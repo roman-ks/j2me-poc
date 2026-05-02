@@ -3,7 +3,7 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 SDL_CFLAGS ?= $(shell sdl2-config --cflags 2>/dev/null)
 SDL_LIBS ?= $(shell sdl2-config --libs 2>/dev/null)
 
-COMMON_SRCS := class_file.cpp bytecode.cpp frame.cpp interpreter.cpp jvm_midlet_app.cpp method_resolution.cpp
+COMMON_SRCS := class_file.cpp bytecode.cpp frame.cpp interpreter.cpp jvm_midlet_app.cpp method_resolution.cpp native_methods.cpp
 COMMON_OBJS := $(COMMON_SRCS:.cpp=.o)
 APP_OBJS := main.o $(COMMON_OBJS)
 SDL_DEMO_OBJS := demo_sdl_main.o $(COMMON_OBJS)

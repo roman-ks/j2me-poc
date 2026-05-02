@@ -18,6 +18,8 @@ struct TestCase {
     std::vector<std::string> expectedFreedArrays;
     std::vector<std::string> expectedFreedStrings;
     std::vector<std::string> expectedUnknownCalls;
+    std::vector<std::string> expectedDisplayCurrents;
+    std::vector<std::string> expectedRenderGraphicsOps;
     bool midlet = false;
 };
 
@@ -26,15 +28,19 @@ public:
     int screenWidth() const override { return 240; }
     int screenHeight() const override { return 320; }
     uint32_t millis() const override { return 123; }
-    void present(const uint16_t* /*pixels*/, int width, int height) override {
+    void present(const uint16_t* pixels, int width, int height) override {
         lastPresentWidth = width;
         lastPresentHeight = height;
+        if (pixels != nullptr && width > 0 && height > 0) {
+            lastPixels.assign(pixels, pixels + static_cast<size_t>(width * height));
+        }
         ++presentCount;
     }
 
     int lastPresentWidth = 0;
     int lastPresentHeight = 0;
     int presentCount = 0;
+    std::vector<uint16_t> lastPixels;
 };
 
 std::string classPath(const std::string& root, const std::string& className) {
@@ -74,6 +80,22 @@ std::vector<std::string> unknownCalls(const jvmpoc::ExecutionTrace& trace) {
         calls.push_back(call.methodName);
     }
     return calls;
+}
+
+std::vector<std::string> displayCurrents(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> currents;
+    for (const jvmpoc::DisplaySetCurrent& setCurrent : trace.displaySetCurrents) {
+        currents.push_back(setCurrent.display.text + ".setCurrent(" + setCurrent.displayable.text + ")");
+    }
+    return currents;
+}
+
+std::vector<std::string> graphicsOps(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> ops;
+    for (const jvmpoc::GraphicsOp& op : trace.graphicsOps) {
+        ops.push_back(op.op);
+    }
+    return ops;
 }
 
 std::vector<std::string> valueTexts(const std::vector<jvmpoc::Value>& values) {
@@ -148,11 +170,30 @@ bool runCase(const std::string& root, const TestCase& test) {
     }
 
     jvmpoc::ExecutionTrace trace;
+    jvmpoc::ExecutionTrace renderTrace;
     if (test.midlet) {
         TestHost host;
         jvmpoc::JvmMidletApp app(host);
         app.setClasses(classes);
         trace = app.start(test.mainClass);
+        renderTrace = app.render();
+        if (host.presentCount != 1 || host.lastPresentWidth != host.screenWidth() ||
+            host.lastPresentHeight != host.screenHeight()) {
+            std::cout << "FAIL " << test.name << ": render did not present expected frame\n";
+            return false;
+        }
+        if (host.lastPixels.empty() || host.lastPixels[0] != 0xffff) {
+            std::cout << "FAIL " << test.name << ": render did not fill white background\n";
+            return false;
+        }
+        bool hasBlackPixel = false;
+        for (uint16_t pixel : host.lastPixels) {
+            hasBlackPixel = hasBlackPixel || pixel == 0x0000;
+        }
+        if (!hasBlackPixel) {
+            std::cout << "FAIL " << test.name << ": render did not draw black foreground pixels\n";
+            return false;
+        }
     } else {
         trace = jvmpoc::executeStraightLine(classes, *mainClass, *main);
     }
@@ -162,6 +203,11 @@ bool runCase(const std::string& root, const TestCase& test) {
     ok = expectList(test.name, "freed arrays", lastFreedArrays(trace), test.expectedFreedArrays) && ok;
     ok = expectList(test.name, "freed strings", lastFreedStrings(trace), test.expectedFreedStrings) && ok;
     ok = expectList(test.name, "unknown calls", unknownCalls(trace), test.expectedUnknownCalls) && ok;
+    ok = expectList(test.name, "display currents", displayCurrents(trace), test.expectedDisplayCurrents) && ok;
+    if (test.midlet) {
+        ok = expectList(test.name, "render unknown calls", unknownCalls(renderTrace), test.expectedUnknownCalls) && ok;
+        ok = expectList(test.name, "render graphics ops", graphicsOps(renderTrace), test.expectedRenderGraphicsOps) && ok;
+    }
 
     if (ok) {
         std::cout << "PASS " << test.name << "\n";
@@ -183,6 +229,8 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+            {},
+            {},
         },
         TestCase{
             "strings",
@@ -193,12 +241,16 @@ int main(int argc, char** argv) {
             {},
             {"str#2"},
             {},
+            {},
+            {},
         },
         TestCase{
             "string length",
             "dev/roman/hello/StringLength",
             {"dev/roman/hello/StringLength"},
             {"3", "5"},
+            {},
+            {},
             {},
             {},
             {},
@@ -217,6 +269,8 @@ int main(int argc, char** argv) {
                 "java/lang/Object.<init>()V",
                 "java/lang/Object.<init>()V",
             },
+            {},
+            {},
         },
         TestCase{
             "inherited method lookup",
@@ -231,6 +285,8 @@ int main(int argc, char** argv) {
             {},
             {},
             {"java/lang/Object.<init>()V"},
+            {},
+            {},
         },
         TestCase{
             "midlet lifecycle unknowns",
@@ -243,11 +299,13 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+            {},
+            {"display#1.setCurrent(obj#2)"},
             {
-                "javax/microedition/midlet/MIDlet.<init>()V",
-                "javax/microedition/lcdui/Canvas.<init>()V",
-                "javax/microedition/lcdui/Display.getDisplay(Ljavax/microedition/midlet/MIDlet;)Ljavax/microedition/lcdui/Display;",
-                "javax/microedition/lcdui/Display.setCurrent(Ljavax/microedition/lcdui/Displayable;)V",
+                "setColor(255,255,255)",
+                "fillRect(0,0,240,320)",
+                "setColor(0,0,0)",
+                "drawString(\"Hello World!\",120,160,65)",
             },
             true,
         },

@@ -1,7 +1,9 @@
 #include "interpreter.hpp"
 
 #include "bytecode.hpp"
+#include "jvm_host.hpp"
 #include "method_resolution.hpp"
+#include "native_methods.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -94,39 +96,6 @@ const char* compareOpText(uint8_t op) {
     }
 }
 
-bool isNativeRuntimePrintInt(const MethodRef& ref) {
-    const std::string suffix = "/NativeRuntime";
-    bool classMatches = ref.className == "NativeRuntime";
-    if (ref.className.size() >= suffix.size()) {
-        classMatches = classMatches ||
-                       ref.className.compare(ref.className.size() - suffix.size(), suffix.size(), suffix) == 0;
-    }
-
-    return classMatches && ref.name == "printInt" && ref.descriptor == "(I)V";
-}
-
-bool isNativeRuntimePrintString(const MethodRef& ref) {
-    const std::string suffix = "/NativeRuntime";
-    bool classMatches = ref.className == "NativeRuntime";
-    if (ref.className.size() >= suffix.size()) {
-        classMatches = classMatches ||
-                       ref.className.compare(ref.className.size() - suffix.size(), suffix.size(), suffix) == 0;
-    }
-
-    return classMatches && ref.name == "printString" && ref.descriptor == "(Ljava/lang/String;)V";
-}
-
-bool isNativeRuntimeGc(const MethodRef& ref) {
-    const std::string suffix = "/NativeRuntime";
-    bool classMatches = ref.className == "NativeRuntime";
-    if (ref.className.size() >= suffix.size()) {
-        classMatches = classMatches ||
-                       ref.className.compare(ref.className.size() - suffix.size(), suffix.size(), suffix) == 0;
-    }
-
-    return classMatches && ref.name == "gc" && ref.descriptor == "()V";
-}
-
 std::string methodLabel(const ClassFile& cls, const MethodInfo& method) {
     return cls.thisClass + "." + method.name + method.descriptor;
 }
@@ -193,6 +162,7 @@ struct RuntimeFrame {
 };
 
 struct Runtime {
+    const JvmHost* host = nullptr;
     std::map<std::string, Value> staticFields;
     Heap heap;
     IntArrayHeap arrays;
@@ -205,6 +175,12 @@ struct Runtime {
     std::vector<uint32_t> freeArrayIds;
     std::vector<uint32_t> freeStringIds;
     std::vector<RuntimeFrame> callStack;
+    Value displayRef = Value::named("display#1");
+    Value currentDisplayable = Value::named("0");
+    uint16_t* graphicsPixels = nullptr;
+    int graphicsWidth = 0;
+    int graphicsHeight = 0;
+    uint16_t graphicsColor = 0x0000;
     ExecutionTrace trace;
     size_t steps = 0;
 };
@@ -471,6 +447,23 @@ std::optional<Value> executeMethod(
         recordLocal(index, pc, value, "store");
     };
 
+    auto makeNativeContext = [&]() {
+        return NativeCallContext{
+            rt.host,
+            rt.trace,
+            rt.strings,
+            rt.displayRef,
+            rt.currentDisplayable,
+            rt.graphicsPixels,
+            rt.graphicsWidth,
+            rt.graphicsHeight,
+            rt.graphicsColor,
+            [&](std::string when) {
+                collectGarbage(rt, std::move(when));
+            },
+        };
+    };
+
     size_t pc = 0;
     while (pc < method.code.size()) {
         if (++rt.steps > kMaxSteps) {
@@ -702,28 +695,19 @@ std::optional<Value> executeMethod(
             case 0xb8: {
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
-                if (isNativeRuntimePrintInt(ref)) {
-                    rt.trace.runtimePrints.push_back(RuntimePrint{label, callPc, frame.pop()});
-                } else if (isNativeRuntimePrintString(ref)) {
-                    Value value = frame.pop();
-                    std::optional<uint32_t> id = stringId(value);
-                    auto strIt = id.has_value() ? rt.strings.find(*id) : rt.strings.end();
-                    rt.trace.runtimePrints.push_back(RuntimePrint{
-                        label,
-                        callPc,
-                        id.has_value() && strIt != rt.strings.end()
-                            ? Value::named(strIt->second)
-                            : Value::named("<string:" + value.text + ">"),
-                    });
-                } else if (isNativeRuntimeGc(ref)) {
-                    collectGarbage(rt, label + " pc=" + std::to_string(callPc));
-                } else {
-                    std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
-                    std::vector<Value> callArgs(widths.size());
-                    for (size_t i = widths.size(); i > 0; --i) {
-                        callArgs[i - 1] = frame.pop();
-                    }
+                std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
+                std::vector<Value> callArgs(widths.size());
+                for (size_t i = widths.size(); i > 0; --i) {
+                    callArgs[i - 1] = frame.pop();
+                }
 
+                NativeCallContext nativeCtx = makeNativeContext();
+                NativeCallResult nativeResult = handleNativeStaticCall(nativeCtx, label, callPc, ref, callArgs);
+                if (nativeResult.handled) {
+                    if (nativeResult.returnValue.has_value()) {
+                        frame.push(*nativeResult.returnValue);
+                    }
+                } else {
                     const ClassFile* targetClass = nullptr;
                     const MethodInfo* targetMethod = findMethodInHierarchy(
                         classes, ref.className, ref.name, ref.descriptor, &targetClass);
@@ -755,26 +739,12 @@ std::optional<Value> executeMethod(
                 Value object = frame.pop();
                 callArgs[0] = object;
 
-                if ((ref.className == "java/lang/String" || stringId(object).has_value()) &&
-                    ref.name == "length" && ref.descriptor == "()I") {
-                    std::optional<uint32_t> id = stringId(object);
-                    auto strIt = id.has_value() ? rt.strings.find(*id) : rt.strings.end();
-                    frame.push(id.has_value() && strIt != rt.strings.end()
-                        ? Value::named(std::to_string(strIt->second.size()))
-                        : Value::named("<string-length:" + object.text + ">"));
-                    pc += 3;
-                    break;
-                }
-
-                if (ref.className == "java/lang/String" || stringId(object).has_value()) {
-                    rt.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{
-                        label,
-                        static_cast<uint32_t>(pc),
-                        ref.className + "." + ref.name + ref.descriptor,
-                        object,
-                    });
-                    if (returnsValue(ref.descriptor)) {
-                        frame.push(Value::named("<unsupported-string-call:" + ref.name + ">"));
+                NativeCallContext nativeCtx = makeNativeContext();
+                NativeCallResult nativeResult = handleNativeInstanceCall(
+                    nativeCtx, label, static_cast<uint32_t>(pc), ref, callArgs);
+                if (nativeResult.handled) {
+                    if (nativeResult.returnValue.has_value()) {
+                        frame.push(*nativeResult.returnValue);
                     }
                     pc += 3;
                     break;
@@ -882,8 +852,12 @@ ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const 
     return rt.trace;
 }
 
-ExecutionTrace executeMidlet(const std::vector<ClassFile>& classes, const std::string& className) {
+ExecutionTrace executeMidlet(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host) {
     Runtime rt;
+    rt.host = host;
     rt.callStack.reserve(kMaxCallDepth + 1);
 
     const ClassFile* midletClass = findClass(classes, className);
@@ -909,6 +883,65 @@ ExecutionTrace executeMidlet(const std::vector<ClassFile>& classes, const std::s
     } else {
         MethodRef ref{midletClass->thisClass, "startApp", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {midlet});
+    }
+
+    return rt.trace;
+}
+
+ExecutionTrace renderMidletFrame(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host,
+    uint16_t* pixels,
+    int width,
+    int height) {
+    Runtime rt;
+    rt.host = host;
+    rt.graphicsPixels = pixels;
+    rt.graphicsWidth = width;
+    rt.graphicsHeight = height;
+    rt.callStack.reserve(kMaxCallDepth + 1);
+
+    const ClassFile* midletClass = findClass(classes, className);
+    if (midletClass == nullptr) {
+        MethodRef missing{className, "<load>", "()V"};
+        (void)recordUnknownCall(rt, "<midlet>", 0, missing, {});
+        return rt.trace;
+    }
+
+    Value midlet = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
+    const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
+    if (init != nullptr) {
+        (void)executeMethod(classes, *midletClass, *init, {midlet}, rt, 0);
+    }
+
+    const ClassFile* startOwner = nullptr;
+    const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
+    if (startOwner != nullptr && startApp != nullptr) {
+        (void)executeMethod(classes, *startOwner, *startApp, {midlet}, rt, 0);
+    }
+
+    std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
+    if (!displayableId.has_value()) {
+        return rt.trace;
+    }
+    auto displayableIt = rt.heap.find(*displayableId);
+    if (displayableIt == rt.heap.end()) {
+        return rt.trace;
+    }
+
+    const ClassFile* paintOwner = nullptr;
+    const MethodInfo* paint = findMethodInHierarchy(
+        classes,
+        displayableIt->second.className,
+        "paint",
+        "(Ljavax/microedition/lcdui/Graphics;)V",
+        &paintOwner);
+    if (paintOwner != nullptr && paint != nullptr) {
+        (void)executeMethod(classes, *paintOwner, *paint, {rt.currentDisplayable, Value::named("graphics#1")}, rt, 0);
+    } else {
+        MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
+        (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::named("graphics#1")});
     }
 
     return rt.trace;

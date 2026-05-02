@@ -174,6 +174,32 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         }
     }
 
+    if (!trace.displaySetCurrents.empty()) {
+        std::cout << "  display:\n";
+        for (const jvmpoc::DisplaySetCurrent& setCurrent : trace.displaySetCurrents) {
+            std::cout << "    " << setCurrent.methodLabel << " pc=" << setCurrent.pc
+                      << " " << setCurrent.display.text << ".setCurrent("
+                      << setCurrent.displayable.text << ")\n";
+        }
+    }
+
+    if (!trace.canvasSizeQueries.empty()) {
+        std::cout << "  canvas queries:\n";
+        for (const jvmpoc::CanvasSizeQuery& query : trace.canvasSizeQueries) {
+            std::cout << "    " << query.methodLabel << " pc=" << query.pc
+                      << " " << query.canvas.text << "." << query.methodName
+                      << " -> " << query.value << "\n";
+        }
+    }
+
+    if (!trace.graphicsOps.empty()) {
+        std::cout << "  graphics:\n";
+        for (const jvmpoc::GraphicsOp& op : trace.graphicsOps) {
+            std::cout << "    " << op.methodLabel << " pc=" << op.pc
+                      << " " << op.op << "\n";
+        }
+    }
+
     if (!trace.unsupportedStringCalls.empty()) {
         std::cout << "  unsupported string calls:\n";
         for (const jvmpoc::UnsupportedStringCall& call : trace.unsupportedStringCalls) {

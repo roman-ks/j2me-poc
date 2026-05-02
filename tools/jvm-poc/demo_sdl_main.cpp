@@ -85,17 +85,6 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
-std::vector<uint16_t> makeStartupFrame(int width, int height) {
-    std::vector<uint16_t> pixels(static_cast<size_t>(width * height), 0);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const bool grid = (x / 16 + y / 16) % 2 == 0;
-            pixels[static_cast<size_t>(y * width + x)] = grid ? 0x39e7 : 0x18e3;
-        }
-    }
-    return pixels;
-}
-
 void printUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
     if (trace.unknownMethodCalls.empty()) {
         return;
@@ -145,9 +134,7 @@ int main(int argc, char** argv) {
         app.loadClasses(classFiles);
         const jvmpoc::ExecutionTrace& startTrace = app.start(argv[1]);
         printUnknownCalls(startTrace);
-
-        std::vector<uint16_t> startupFrame = makeStartupFrame(width, height);
-        host.present(startupFrame.data(), width, height);
+        (void)app.render();
 
         bool running = true;
         while (running) {

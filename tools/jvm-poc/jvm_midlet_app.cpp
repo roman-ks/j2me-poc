@@ -18,13 +18,27 @@ void JvmMidletApp::setClasses(std::vector<ClassFile> classes) {
 
 const ExecutionTrace& JvmMidletApp::start(const std::string& className) {
     midletClassName_ = className;
-    lastTrace_ = executeMidlet(classes_, className);
+    lastTrace_ = executeMidlet(classes_, className, &host_);
+    if (!lastTrace_.displaySetCurrents.empty()) {
+        currentDisplayable_ = lastTrace_.displaySetCurrents.back().displayable;
+    }
     return lastTrace_;
 }
 
 const ExecutionTrace& JvmMidletApp::render() {
-    (void)host_;
     lastTrace_ = ExecutionTrace{};
+    const int width = host_.screenWidth();
+    const int height = host_.screenHeight();
+    if (width <= 0 || height <= 0) {
+        return lastTrace_;
+    }
+
+    framebuffer_.assign(static_cast<size_t>(width * height), 0x39e7);
+    lastTrace_ = renderMidletFrame(classes_, midletClassName_, &host_, framebuffer_.data(), width, height);
+    if (!lastTrace_.displaySetCurrents.empty()) {
+        currentDisplayable_ = lastTrace_.displaySetCurrents.back().displayable;
+    }
+    host_.present(framebuffer_.data(), width, height);
     return lastTrace_;
 }
 

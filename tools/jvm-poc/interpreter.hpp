@@ -3,10 +3,13 @@
 #include "class_file.hpp"
 #include "frame.hpp"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace jvmpoc {
+
+class JvmHost;
 
 struct RuntimePrint {
     std::string methodLabel;
@@ -87,6 +90,27 @@ struct GcReport {
     std::vector<Value> freedStrings;
 };
 
+struct DisplaySetCurrent {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value display;
+    Value displayable;
+};
+
+struct CanvasSizeQuery {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value canvas;
+    std::string methodName;
+    int value = 0;
+};
+
+struct GraphicsOp {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    std::string op;
+};
+
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
@@ -99,10 +123,23 @@ struct ExecutionTrace {
     std::vector<ArrayAlloc> arrayAllocs;
     std::vector<ArrayWrite> arrayWrites;
     std::vector<GcReport> gcReports;
+    std::vector<DisplaySetCurrent> displaySetCurrents;
+    std::vector<CanvasSizeQuery> canvasSizeQueries;
+    std::vector<GraphicsOp> graphicsOps;
     bool stepLimitHit = false;
 };
 
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method);
-ExecutionTrace executeMidlet(const std::vector<ClassFile>& classes, const std::string& className);
+ExecutionTrace executeMidlet(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host = nullptr);
+ExecutionTrace renderMidletFrame(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host,
+    uint16_t* pixels,
+    int width,
+    int height);
 
 } // namespace jvmpoc
