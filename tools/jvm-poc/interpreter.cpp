@@ -17,6 +17,26 @@ std::string compareText(const Value& lhs, const char* op, const Value& rhs) {
     return lhs.text + " " + op + " " + rhs.text;
 }
 
+Value intBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t opcode) {
+    std::optional<int> left = parseIntValue(lhs);
+    std::optional<int> right = parseIntValue(rhs);
+    if (left && right) {
+        switch (opcode) {
+            case 0x60: return Value::named(std::to_string(*left + *right));
+            case 0x64: return Value::named(std::to_string(*left - *right));
+            case 0x68: return Value::named(std::to_string(*left * *right));
+            case 0x6c:
+                if (*right == 0) {
+                    return Value::named("<divide-by-zero>");
+                }
+                return Value::named(std::to_string(*left / *right));
+            default:
+                break;
+        }
+    }
+    return Value::named("(" + lhs.text + " " + op + " " + rhs.text + ")");
+}
+
 bool compareInts(int lhs, int rhs, uint8_t op) {
     switch (op) {
         case 0x9f: return lhs == rhs;
@@ -95,16 +115,14 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
             case 0x3e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x36: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
 
-            case 0x60: {
+            case 0x60:
+            case 0x64:
+            case 0x68:
+            case 0x6c: {
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
-                std::optional<int> left = parseIntValue(lhs);
-                std::optional<int> right = parseIntValue(rhs);
-                if (left && right) {
-                    frame.push(Value::named(std::to_string(*left + *right)));
-                } else {
-                    frame.push(Value::named("(" + lhs.text + " + " + rhs.text + ")"));
-                }
+                const char* opText = op == 0x60 ? "+" : op == 0x64 ? "-" : op == 0x68 ? "*" : "/";
+                frame.push(intBinaryOp(lhs, rhs, opText, op));
                 ++pc;
                 break;
             }
