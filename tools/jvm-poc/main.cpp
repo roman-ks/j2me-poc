@@ -126,6 +126,14 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
+    if (!trace.staticWrites.empty()) {
+        std::cout << "  static writes:\n";
+        for (const jvmpoc::StaticWrite& write : trace.staticWrites) {
+            std::cout << "    " << write.methodLabel << " pc=" << write.pc
+                      << " " << write.fieldName << " = " << write.value.text << "\n";
+        }
+    }
+
     if (!trace.runtimePrints.empty()) {
         std::cout << "  stdout:\n";
         for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
@@ -133,7 +141,7 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
-    if (trace.localWrites.empty() && trace.branches.empty() && trace.runtimePrints.empty()) {
+    if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() && trace.runtimePrints.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
     if (trace.stepLimitHit) {

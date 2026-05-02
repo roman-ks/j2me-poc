@@ -3,6 +3,7 @@
 #include "bytecode.hpp"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -166,6 +167,7 @@ std::optional<Value> executeMethod(
     const ClassFile& cls,
     const MethodInfo& method,
     const std::vector<Value>& args,
+    std::map<std::string, Value>& staticFields,
     ExecutionTrace& trace,
     size_t& steps,
     size_t depth) {
@@ -312,9 +314,26 @@ std::optional<Value> executeMethod(
                 break;
 
             case 0xb2:
-                frame.push(Value::named("<static-field#" + std::to_string(codeU2(method.code, pc + 1)) + ">"));
+            {
+                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                std::string key = ref.className + "." + ref.name;
+                auto it = staticFields.find(key);
+                frame.push(it == staticFields.end() ? Value::named("0") : it->second);
                 pc += 3;
                 break;
+            }
+
+            case 0xb3:
+            {
+                uint32_t writePc = static_cast<uint32_t>(pc);
+                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                std::string key = ref.className + "." + ref.name;
+                Value value = frame.pop();
+                staticFields[key] = value;
+                trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
+                pc += 3;
+                break;
+            }
 
             case 0xb8: {
                 uint32_t callPc = static_cast<uint32_t>(pc);
@@ -332,7 +351,7 @@ std::optional<Value> executeMethod(
                     const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, callArgs, trace, steps, depth + 1);
+                            classes, *targetClass, *targetMethod, callArgs, staticFields, trace, steps, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -369,8 +388,9 @@ std::optional<Value> executeMethod(
 
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
     ExecutionTrace trace;
+    std::map<std::string, Value> staticFields;
     size_t steps = 0;
-    (void)executeMethod(classes, cls, method, {}, trace, steps, 0);
+    (void)executeMethod(classes, cls, method, {}, staticFields, trace, steps, 0);
     return trace;
 }
 

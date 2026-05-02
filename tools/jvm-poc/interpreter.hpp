@@ -22,10 +22,18 @@ struct BranchTrace {
     uint32_t targetPc = 0;
 };
 
+struct StaticWrite {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    std::string fieldName;
+    Value value;
+};
+
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
     std::vector<BranchTrace> branches;
+    std::vector<StaticWrite> staticWrites;
     bool stepLimitHit = false;
 };
 
