@@ -296,6 +296,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "long arithmetic",
+            "dev/roman/hello/LongArithmetic",
+            {"dev/roman/hello/LongArithmetic"},
+            {"24", "17", "42", "6", "2", "-5"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "gc roots",
             "dev/roman/hello/GcRoots",
             {"dev/roman/hello/Objects", "dev/roman/hello/GcRoots"},

@@ -50,6 +50,26 @@ Value intBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t op
     return Value::named("(" + lhs.text + " " + op + " " + rhs.text + ")");
 }
 
+Value longBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t opcode) {
+    std::optional<long long> left = parseLongValue(lhs);
+    std::optional<long long> right = parseLongValue(rhs);
+    if (left && right) {
+        switch (opcode) {
+            case 0x61: return Value::named(std::to_string(*left + *right));
+            case 0x65: return Value::named(std::to_string(*left - *right));
+            case 0x69: return Value::named(std::to_string(*left * *right));
+            case 0x6d:
+                if (*right == 0) {
+                    return Value::named("<divide-by-zero>");
+                }
+                return Value::named(std::to_string(*left / *right));
+            default:
+                break;
+        }
+    }
+    return Value::named("(" + lhs.text + " " + op + " " + rhs.text + ")");
+}
+
 bool compareInts(int lhs, int rhs, uint8_t op) {
     switch (op) {
         case 0x9f: return lhs == rhs;
@@ -414,8 +434,17 @@ std::optional<Value> executeMethod(
                            Value::named("<arg:" + localNameAt(method, static_cast<uint16_t>(i), 0) + ">"));
         }
     } else {
-        for (size_t i = 0; i < args.size() && i < method.maxLocals; ++i) {
-            frame.setLocal(static_cast<uint16_t>(i), args[i]);
+        size_t localIndex = hasAccess(method.access, 0x0008) ? 0 : 1;
+        size_t argIndex = 0;
+        if (!hasAccess(method.access, 0x0008) && !args.empty() && method.maxLocals > 0) {
+            frame.setLocal(0, args[0]);
+            argIndex = 1;
+        }
+        std::vector<size_t> widths = argumentSlotWidths(method.descriptor);
+        for (size_t i = 0; i < widths.size() && argIndex < args.size() && localIndex < method.maxLocals; ++i) {
+            frame.setLocal(static_cast<uint16_t>(localIndex), args[argIndex]);
+            localIndex += widths[i];
+            ++argIndex;
         }
     }
 
@@ -471,6 +500,8 @@ std::optional<Value> executeMethod(
             case 0x06: frame.push(Value::named("3")); ++pc; break;
             case 0x07: frame.push(Value::named("4")); ++pc; break;
             case 0x08: frame.push(Value::named("5")); ++pc; break;
+            case 0x09: frame.push(Value::named("0")); ++pc; break;
+            case 0x0a: frame.push(Value::named("1")); ++pc; break;
             case 0x10: frame.push(Value::named(std::to_string(codeS1(method.code, pc + 1)))); pc += 2; break;
             case 0x11: frame.push(Value::named(std::to_string(codeS2(method.code, pc + 1)))); pc += 3; break;
             case 0x12: {
@@ -489,11 +520,22 @@ std::optional<Value> executeMethod(
                 pc += 3;
                 break;
             }
+            case 0x14: {
+                uint16_t index = codeU2(method.code, pc + 1);
+                frame.push(Value::named(std::to_string(resolveLongConstant(cls, index))));
+                pc += 3;
+                break;
+            }
 
+            case 0x1e: frame.push(frame.local(0)); ++pc; break;
+            case 0x1f: frame.push(frame.local(1)); ++pc; break;
+            case 0x20: frame.push(frame.local(2)); ++pc; break;
+            case 0x21: frame.push(frame.local(3)); ++pc; break;
             case 0x1a: frame.push(frame.local(0)); ++pc; break;
             case 0x1b: frame.push(frame.local(1)); ++pc; break;
             case 0x1c: frame.push(frame.local(2)); ++pc; break;
             case 0x1d: frame.push(frame.local(3)); ++pc; break;
+            case 0x16: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
             case 0x15: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
             case 0x19: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
             case 0x2a: frame.push(frame.local(0)); ++pc; break;
@@ -537,10 +579,15 @@ std::optional<Value> executeMethod(
                 break;
             }
 
+            case 0x3f: store(0, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x40: store(1, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x41: store(2, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x42: store(3, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3b: store(0, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x37: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
             case 0x36: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
             case 0x3a: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
             case 0x4b: store(0, static_cast<uint32_t>(pc)); ++pc; break;
@@ -615,17 +662,35 @@ std::optional<Value> executeMethod(
             }
 
             case 0x60:
+            case 0x61:
             case 0x64:
+            case 0x65:
             case 0x68:
+            case 0x69:
             case 0x6c:
-            case 0x70: {
+            case 0x6d:
+            case 0x70:
+            case 0x71: {
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
-                const char* opText = op == 0x60 ? "+" : op == 0x64 ? "-" : op == 0x68 ? "*" : op == 0x6c ? "/" : "%";
+                const char* opText = (op == 0x60 || op == 0x61) ? "+" :
+                    (op == 0x64 || op == 0x65) ? "-" :
+                    (op == 0x68 || op == 0x69) ? "*" :
+                    (op == 0x6c || op == 0x6d) ? "/" : "%";
                 std::optional<int> left = parseIntValue(lhs);
                 std::optional<int> right = parseIntValue(rhs);
                 if (op == 0x70 && left.has_value() && right.has_value()) {
                     frame.push(*right == 0 ? Value::named("<divide-by-zero>") : Value::named(std::to_string(*left % *right)));
+                } else if (op == 0x71) {
+                    std::optional<long long> leftLong = parseLongValue(lhs);
+                    std::optional<long long> rightLong = parseLongValue(rhs);
+                    frame.push(leftLong.has_value() && rightLong.has_value() && *rightLong != 0
+                        ? Value::named(std::to_string(*leftLong % *rightLong))
+                        : leftLong.has_value() && rightLong.has_value() && *rightLong == 0
+                            ? Value::named("<divide-by-zero>")
+                            : Value::named("(" + lhs.text + " % " + rhs.text + ")"));
+                } else if (op == 0x61 || op == 0x65 || op == 0x69 || op == 0x6d) {
+                    frame.push(longBinaryOp(lhs, rhs, opText, op));
                 } else {
                     frame.push(intBinaryOp(lhs, rhs, opText, op));
                 }
@@ -643,9 +708,31 @@ std::optional<Value> executeMethod(
                 break;
             }
 
+            case 0x75: {
+                Value value = frame.pop();
+                std::optional<long long> parsed = parseLongValue(value);
+                frame.push(parsed.has_value()
+                    ? Value::named(std::to_string(-*parsed))
+                    : Value::named("(-" + value.text + ")"));
+                ++pc;
+                break;
+            }
+
             case 0x92:
                 ++pc;
                 break;
+
+            case 0x94: {
+                Value rhs = frame.pop();
+                Value lhs = frame.pop();
+                std::optional<long long> left = parseLongValue(lhs);
+                std::optional<long long> right = parseLongValue(rhs);
+                frame.push(left.has_value() && right.has_value()
+                    ? Value::named(*left < *right ? "-1" : *left > *right ? "1" : "0")
+                    : Value::named("<lcmp:" + lhs.text + "," + rhs.text + ">"));
+                ++pc;
+                break;
+            }
 
             case 0x99:
             case 0x9a:
@@ -939,6 +1026,7 @@ std::optional<Value> executeMethod(
             }
 
             case 0xac:
+            case 0xad:
             case 0xb0:
                 return finish(frame.pop());
 

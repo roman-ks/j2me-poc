@@ -19,6 +19,15 @@ NativeCallResult handleNativeRuntime(
         return handledVoid();
     }
 
+    if (ref.name == "printLong" && ref.descriptor == "(J)V") {
+        ctx.trace.runtimePrints.push_back(RuntimePrint{
+            methodLabel,
+            pc,
+            args.empty() ? Value::named("<missing-arg>") : args[0],
+        });
+        return handledVoid();
+    }
+
     if (ref.name == "printString" && ref.descriptor == "(Ljava/lang/String;)V") {
         Value value = args.empty() ? Value::named("<missing-arg>") : args[0];
         std::optional<uint32_t> id = stringObjectId(ctx, value);

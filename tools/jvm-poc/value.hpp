@@ -13,6 +13,7 @@ struct Value {
     }
 };
 
+std::optional<long long> parseLongValue(const Value& value);
 std::optional<int> parseIntValue(const Value& value);
 
 } // namespace jvmpoc

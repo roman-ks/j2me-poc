@@ -30,7 +30,7 @@ Value Frame::pop() {
     return value;
 }
 
-std::optional<int> parseIntValue(const Value& value) {
+std::optional<long long> parseLongValue(const Value& value) {
     if (value.text.empty()) {
         return std::nullopt;
     }
@@ -46,7 +46,15 @@ std::optional<int> parseIntValue(const Value& value) {
             return std::nullopt;
         }
     }
-    return std::stoi(value.text);
+    return std::stoll(value.text);
+}
+
+std::optional<int> parseIntValue(const Value& value) {
+    std::optional<long long> parsed = parseLongValue(value);
+    if (!parsed.has_value() || *parsed < static_cast<long long>(INT32_MIN) || *parsed > static_cast<long long>(INT32_MAX)) {
+        return std::nullopt;
+    }
+    return static_cast<int>(*parsed);
 }
 
 } // namespace jvmpoc

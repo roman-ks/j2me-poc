@@ -256,6 +256,13 @@ int32_t resolveIntegerConstant(const ClassFile& cls, uint16_t index) {
     return cls.cp[index].intValue;
 }
 
+int64_t resolveLongConstant(const ClassFile& cls, uint16_t index) {
+    if (index == 0 || index >= cls.cp.size() || cls.cp[index].tag != CpLong) {
+        throw std::runtime_error("bad Long constant pool reference #" + std::to_string(index));
+    }
+    return cls.cp[index].longValue;
+}
+
 ClassFile parseClassFile(const std::string& path) {
     Reader r(readFile(path));
     if (r.u4() != 0xCAFEBABE) {
@@ -284,7 +291,14 @@ ClassFile parseClassFile(const std::string& path) {
             case CpInteger:
                 entry.intValue = static_cast<int32_t>(r.u4());
                 break;
-            case CpLong:
+            case CpLong: {
+                uint32_t hi = r.u4();
+                uint32_t lo = r.u4();
+                entry.longValue = static_cast<int64_t>((static_cast<uint64_t>(hi) << 32) | lo);
+                cls.cp[i] = entry;
+                ++i;
+                continue;
+            }
             case CpDouble:
                 r.skip(8);
                 cls.cp[i] = entry;
