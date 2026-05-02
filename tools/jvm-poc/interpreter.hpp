@@ -29,11 +29,28 @@ struct StaticWrite {
     Value value;
 };
 
+struct ObjectAlloc {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value ref;
+    std::string className;
+};
+
+struct FieldWrite {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value ref;
+    std::string fieldName;
+    Value value;
+};
+
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
     std::vector<BranchTrace> branches;
     std::vector<StaticWrite> staticWrites;
+    std::vector<ObjectAlloc> objectAllocs;
+    std::vector<FieldWrite> fieldWrites;
     bool stepLimitHit = false;
 };
 

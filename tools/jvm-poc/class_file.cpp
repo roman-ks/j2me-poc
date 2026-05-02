@@ -237,6 +237,10 @@ FieldRef resolveFieldRef(const ClassFile& cls, uint16_t index) {
     return fieldRef(cls.cp, index);
 }
 
+std::string resolveClassRef(const ClassFile& cls, uint16_t index) {
+    return className(cls.cp, index);
+}
+
 ClassFile parseClassFile(const std::string& path) {
     Reader r(readFile(path));
     if (r.u4() != 0xCAFEBABE) {

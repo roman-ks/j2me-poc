@@ -134,6 +134,23 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
+    if (!trace.objectAllocs.empty()) {
+        std::cout << "  object allocs:\n";
+        for (const jvmpoc::ObjectAlloc& alloc : trace.objectAllocs) {
+            std::cout << "    " << alloc.methodLabel << " pc=" << alloc.pc
+                      << " " << alloc.ref.text << " = new " << alloc.className << "\n";
+        }
+    }
+
+    if (!trace.fieldWrites.empty()) {
+        std::cout << "  field writes:\n";
+        for (const jvmpoc::FieldWrite& write : trace.fieldWrites) {
+            std::cout << "    " << write.methodLabel << " pc=" << write.pc
+                      << " " << write.ref.text << "." << write.fieldName
+                      << " = " << write.value.text << "\n";
+        }
+    }
+
     if (!trace.runtimePrints.empty()) {
         std::cout << "  stdout:\n";
         for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
@@ -141,7 +158,8 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
-    if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() && trace.runtimePrints.empty()) {
+    if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() &&
+        trace.objectAllocs.empty() && trace.fieldWrites.empty() && trace.runtimePrints.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
     if (trace.stepLimitHit) {

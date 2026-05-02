@@ -89,6 +89,7 @@ size_t argumentSlots(const MethodInfo& method);
 std::string localNameAt(const MethodInfo& method, uint16_t index, uint32_t pc);
 MethodRef resolveMethodRef(const ClassFile& cls, uint16_t index);
 FieldRef resolveFieldRef(const ClassFile& cls, uint16_t index);
+std::string resolveClassRef(const ClassFile& cls, uint16_t index);
 
 ClassFile parseClassFile(const std::string& path);
 

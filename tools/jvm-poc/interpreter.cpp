@@ -3,6 +3,7 @@
 #include "bytecode.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <optional>
 #include <string>
@@ -162,12 +163,38 @@ bool returnsValue(const std::string& descriptor) {
     return close != std::string::npos && close + 1 < descriptor.size() && descriptor[close + 1] != 'V';
 }
 
+struct HeapObject {
+    std::string className;
+    std::map<std::string, Value> fields;
+};
+
+using Heap = std::map<uint32_t, HeapObject>;
+
+Value objectRef(uint32_t id) {
+    return Value::named("obj#" + std::to_string(id));
+}
+
+std::optional<uint32_t> objectId(const Value& value) {
+    const std::string prefix = "obj#";
+    if (value.text.compare(0, prefix.size(), prefix) != 0) {
+        return std::nullopt;
+    }
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(value.text.c_str() + prefix.size(), &end, 10);
+    if (end == nullptr || *end != '\0') {
+        return std::nullopt;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
 std::optional<Value> executeMethod(
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
     const MethodInfo& method,
     const std::vector<Value>& args,
     std::map<std::string, Value>& staticFields,
+    Heap& heap,
+    uint32_t& nextObjectId,
     ExecutionTrace& trace,
     size_t& steps,
     size_t depth) {
@@ -223,12 +250,30 @@ std::optional<Value> executeMethod(
             case 0x1c: frame.push(frame.local(2)); ++pc; break;
             case 0x1d: frame.push(frame.local(3)); ++pc; break;
             case 0x15: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
+            case 0x19: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
+            case 0x2a: frame.push(frame.local(0)); ++pc; break;
+            case 0x2b: frame.push(frame.local(1)); ++pc; break;
+            case 0x2c: frame.push(frame.local(2)); ++pc; break;
+            case 0x2d: frame.push(frame.local(3)); ++pc; break;
 
             case 0x3b: store(0, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x36: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
+            case 0x3a: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
+            case 0x4b: store(0, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x4c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x4d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
+            case 0x4e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
+
+            case 0x59: {
+                Value value = frame.pop();
+                frame.push(value);
+                frame.push(value);
+                ++pc;
+                break;
+            }
 
             case 0x84: {
                 uint32_t iincPc = static_cast<uint32_t>(pc);
@@ -335,6 +380,41 @@ std::optional<Value> executeMethod(
                 break;
             }
 
+            case 0xb4:
+            {
+                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                Value object = frame.pop();
+                std::optional<uint32_t> id = objectId(object);
+                Value value = Value::named("0");
+                if (id.has_value()) {
+                    auto objectIt = heap.find(*id);
+                    if (objectIt != heap.end()) {
+                        auto fieldIt = objectIt->second.fields.find(ref.name);
+                        if (fieldIt != objectIt->second.fields.end()) {
+                            value = fieldIt->second;
+                        }
+                    }
+                }
+                frame.push(value);
+                pc += 3;
+                break;
+            }
+
+            case 0xb5:
+            {
+                uint32_t writePc = static_cast<uint32_t>(pc);
+                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                Value value = frame.pop();
+                Value object = frame.pop();
+                std::optional<uint32_t> id = objectId(object);
+                if (id.has_value()) {
+                    heap[*id].fields[ref.name] = value;
+                }
+                trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
+                pc += 3;
+                break;
+            }
+
             case 0xb8: {
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
@@ -351,7 +431,7 @@ std::optional<Value> executeMethod(
                     const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, callArgs, staticFields, trace, steps, depth + 1);
+                            classes, *targetClass, *targetMethod, callArgs, staticFields, heap, nextObjectId, trace, steps, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -364,10 +444,52 @@ std::optional<Value> executeMethod(
             }
 
             case 0xb6:
-                (void)frame.pop();
-                (void)frame.pop();
+            case 0xb7: {
+                MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
+                std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
+                std::vector<Value> callArgs(widths.size() + 1);
+                for (size_t i = widths.size(); i > 0; --i) {
+                    callArgs[i] = frame.pop();
+                }
+                Value object = frame.pop();
+                callArgs[0] = object;
+
+                const ClassFile* targetClass = findClass(classes, ref.className);
+                if (targetClass == nullptr) {
+                    std::optional<uint32_t> id = objectId(object);
+                    if (id.has_value()) {
+                        auto objectIt = heap.find(*id);
+                        if (objectIt != heap.end()) {
+                            targetClass = findClass(classes, objectIt->second.className);
+                        }
+                    }
+                }
+                const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
+                if (targetClass != nullptr && targetMethod != nullptr) {
+                    std::optional<Value> result = executeMethod(
+                        classes, *targetClass, *targetMethod, callArgs, staticFields, heap, nextObjectId, trace, steps, depth + 1);
+                    if (result.has_value()) {
+                        frame.push(*result);
+                    }
+                } else if (returnsValue(ref.descriptor)) {
+                    frame.push(Value::named("<call:" + ref.className + "." + ref.name + ref.descriptor + ">"));
+                }
                 pc += 3;
                 break;
+            }
+
+            case 0xbb:
+            {
+                uint32_t allocPc = static_cast<uint32_t>(pc);
+                std::string className = resolveClassRef(cls, codeU2(method.code, pc + 1));
+                uint32_t id = nextObjectId++;
+                heap[id] = HeapObject{className, {}};
+                Value ref = objectRef(id);
+                trace.objectAllocs.push_back(ObjectAlloc{label, allocPc, ref, className});
+                frame.push(ref);
+                pc += 3;
+                break;
+            }
 
             case 0xac:
                 return frame.pop();
@@ -389,8 +511,10 @@ std::optional<Value> executeMethod(
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
     ExecutionTrace trace;
     std::map<std::string, Value> staticFields;
+    Heap heap;
+    uint32_t nextObjectId = 1;
     size_t steps = 0;
-    (void)executeMethod(classes, cls, method, {}, staticFields, trace, steps, 0);
+    (void)executeMethod(classes, cls, method, {}, staticFields, heap, nextObjectId, trace, steps, 0);
     return trace;
 }
 
