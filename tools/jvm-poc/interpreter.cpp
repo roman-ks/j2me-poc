@@ -942,6 +942,76 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
+            case 0x5a: {
+                Value value1 = frame.pop();
+                Value value2 = frame.pop();
+                frame.push(value1);
+                frame.push(value2);
+                frame.push(value1);
+                ++pc;
+                break;
+            }
+
+            case 0x5b: {
+                Value value1 = frame.pop();
+                Value value2 = frame.pop();
+                Value value3 = frame.pop();
+                frame.push(value1);
+                frame.push(value3);
+                frame.push(value2);
+                frame.push(value1);
+                ++pc;
+                break;
+            }
+
+            case 0x5c: {
+                Value value1 = frame.pop();
+                Value value2 = frame.pop();
+                frame.push(value2);
+                frame.push(value1);
+                frame.push(value2);
+                frame.push(value1);
+                ++pc;
+                break;
+            }
+
+            case 0x5d: {
+                Value value1 = frame.pop();
+                Value value2 = frame.pop();
+                Value value3 = frame.pop();
+                frame.push(value2);
+                frame.push(value1);
+                frame.push(value3);
+                frame.push(value2);
+                frame.push(value1);
+                ++pc;
+                break;
+            }
+
+            case 0x5e: {
+                Value value1 = frame.pop();
+                Value value2 = frame.pop();
+                Value value3 = frame.pop();
+                Value value4 = frame.pop();
+                frame.push(value2);
+                frame.push(value1);
+                frame.push(value4);
+                frame.push(value3);
+                frame.push(value2);
+                frame.push(value1);
+                ++pc;
+                break;
+            }
+
+            case 0x5f: {
+                Value value1 = frame.pop();
+                Value value2 = frame.pop();
+                frame.push(value1);
+                frame.push(value2);
+                ++pc;
+                break;
+            }
+
             case 0x57:
                 (void)frame.pop();
                 ++pc;

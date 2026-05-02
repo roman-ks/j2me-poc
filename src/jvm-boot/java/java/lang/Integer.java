@@ -4,6 +4,10 @@ public final class Integer {
     private Integer() {
     }
 
+    public static String toString(int value) {
+        return String.valueOf(value);
+    }
+
     public static int parseInt(String value) {
         if (value == null) {
             return 0;
