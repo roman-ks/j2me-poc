@@ -72,6 +72,8 @@ bool isNativeRuntimePrintInt(const MethodRef& ref) {
     return classMatches && ref.name == "printInt" && ref.descriptor == "(I)V";
 }
 
+constexpr size_t kMaxSteps = 10000;
+
 } // namespace
 
 ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method) {
@@ -86,11 +88,17 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
     auto store = [&](uint16_t index, uint32_t pc) {
         Value value = frame.pop();
         frame.setLocal(index, value);
-        trace.localWrites.push_back(LocalWrite{pc, index, value});
+        trace.localWrites.push_back(LocalWrite{pc, index, value, "store"});
     };
 
     size_t pc = 0;
+    size_t steps = 0;
     while (pc < method.code.size()) {
+        if (++steps > kMaxSteps) {
+            trace.stepLimitHit = true;
+            return trace;
+        }
+
         uint8_t op = method.code[pc];
         switch (op) {
             case 0x02: frame.push(Value::named("-1")); ++pc; break;
@@ -114,6 +122,21 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
             case 0x3d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x36: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
+
+            case 0x84: {
+                uint32_t iincPc = static_cast<uint32_t>(pc);
+                uint16_t index = codeU1(method.code, pc + 1);
+                int delta = codeS1(method.code, pc + 2);
+                Value oldValue = frame.local(index);
+                std::optional<int> oldInt = parseIntValue(oldValue);
+                Value newValue = oldInt
+                    ? Value::named(std::to_string(*oldInt + delta))
+                    : Value::named("(" + oldValue.text + " + " + std::to_string(delta) + ")");
+                frame.setLocal(index, newValue);
+                trace.localWrites.push_back(LocalWrite{iincPc, index, newValue, "iinc"});
+                pc += 3;
+                break;
+            }
 
             case 0x60:
             case 0x64:

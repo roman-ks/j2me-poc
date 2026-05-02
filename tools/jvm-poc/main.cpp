@@ -109,7 +109,11 @@ void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& m
             std::cout << "    pc=" << write.pc << " ["
                       << write.index << "] "
                       << jvmpoc::localNameAt(method, write.index, write.pc)
-                      << " = " << write.value.text << "\n";
+                      << " = " << write.value.text;
+            if (!write.reason.empty() && write.reason != "store") {
+                std::cout << " (" << write.reason << ")";
+            }
+            std::cout << "\n";
         }
     }
 
@@ -131,6 +135,9 @@ void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& m
 
     if (trace.localWrites.empty() && trace.branches.empty() && trace.runtimePrints.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
+    }
+    if (trace.stepLimitHit) {
+        std::cout << "  stopped: execution step limit hit\n";
     }
 }
 

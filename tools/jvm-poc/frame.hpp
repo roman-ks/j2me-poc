@@ -12,6 +12,7 @@ struct LocalWrite {
     uint32_t pc = 0;
     uint16_t index = 0;
     Value value;
+    std::string reason;
 };
 
 class Frame {

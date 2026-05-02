@@ -24,6 +24,7 @@ struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
     std::vector<BranchTrace> branches;
+    bool stepLimitHit = false;
 };
 
 ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method);
