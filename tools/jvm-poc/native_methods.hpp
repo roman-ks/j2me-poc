@@ -22,6 +22,7 @@ struct NativeCallContext {
     std::function<Value(const Value&, const std::string&)> readField;
     std::function<void(const Value&)> startRunnable;
     std::function<void(uint32_t)> sleepThread;
+    std::function<void()> requestRepaint;
     std::map<uint32_t, std::string>& strings;
     std::map<uint32_t, std::vector<Value>>& arrays;
     std::map<uint32_t, port::Image>& images;

@@ -224,6 +224,7 @@ struct Runtime {
     int graphicsColorRgb = 0x000000;
     ExecutionTrace trace;
     size_t steps = 0;
+    bool repaintRequested = true;
 };
 
 } // namespace
@@ -809,6 +810,9 @@ std::optional<Value> resumeCurrentMethod(
                 if (rt.host != nullptr) {
                     rt.host->sleepMillis(millis);
                 }
+            },
+            [&]() {
+                rt.repaintRequested = true;
             },
             rt.strings,
             rt.arrays,
@@ -1483,6 +1487,7 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         {rt.currentDisplayable, Value::named(std::to_string(event.keyCode))},
         rt,
         0);
+    rt.repaintRequested = true;
 }
 
 ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixels, int width, int height) {
@@ -1550,12 +1555,18 @@ ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixe
         "paint",
         "(Ljavax/microedition/lcdui/Graphics;)V",
         &paintOwner);
+    if (!rt.repaintRequested) {
+        captureSuspendedTasks(rt.trace, session);
+        return rt.trace;
+    }
+
     if (paintOwner != nullptr && paint != nullptr) {
         (void)executeMethod(classes, *paintOwner, *paint, {rt.currentDisplayable, Value::named("graphics#1")}, rt, 0);
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::named("graphics#1")});
     }
+    rt.repaintRequested = false;
 
     captureSuspendedTasks(rt.trace, session);
 

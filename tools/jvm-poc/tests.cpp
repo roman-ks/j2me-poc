@@ -339,6 +339,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "boot String digits",
+            "dev/roman/hello/StringDigits",
+            {"dev/roman/hello/StringDigits"},
+            {"2", "1", "sn1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "boot Thread",
             "dev/roman/hello/ThreadBoot",
             {"dev/roman/hello/ThreadBoot", "dev/roman/hello/ThreadBootTask"},

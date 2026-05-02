@@ -35,6 +35,18 @@ NativeCallResult handleCanvas(
         return handledVoid();
     }
 
+    if ((ref.name == "repaint" && ref.descriptor == "()V") ||
+        (ref.name == "repaint" && ref.descriptor == "(IIII)V")) {
+        ctx.requestRepaint();
+        return handledVoid();
+    }
+
+    if (ref.name == "serviceRepaints" && ref.descriptor == "()V") {
+        ctx.requestRepaint();
+        ctx.sleepThread(0);
+        return handledVoid();
+    }
+
     return NativeCallResult{};
 }
 

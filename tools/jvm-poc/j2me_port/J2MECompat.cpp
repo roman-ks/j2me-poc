@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <set>
 #include <string>
 #if defined(__linux__)
 #include <limits.h>
@@ -21,6 +22,7 @@ namespace {
 esp_gallery::Fs* g_resourceFs = nullptr;
 std::string g_gameName = "default_game";
 std::string g_resourceRoot = FS_ROOT_PATH;
+std::set<std::string> g_warnedMissingResources;
 
 std::string withTrailingSlash(std::string path) {
     if (path.empty()) {
@@ -173,7 +175,10 @@ bool readResourceAll(const std::string& path, std::vector<uint8_t>& out) {
     const std::string resolved = resolveAssetPath(path);
     const bool ok = readFileAll(resolved, out);
     if (!ok) {
-        LOGF_W("Failed to read resource: raw=%s resolved=%s", path.c_str(), resolved.c_str());
+        const std::string key = path + " -> " + resolved;
+        if (g_warnedMissingResources.insert(key).second) {
+            LOGF_W("Failed to read resource: raw=%s resolved=%s", path.c_str(), resolved.c_str());
+        }
     }
     return ok;
 }

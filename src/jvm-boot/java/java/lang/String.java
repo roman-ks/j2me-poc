@@ -33,6 +33,13 @@ public final class String {
         return new StringBuffer().append(value).toString();
     }
 
+    public char[] toCharArray() {
+        int length = length();
+        char[] chars = new char[length];
+        getChars(0, length, chars, 0);
+        return chars;
+    }
+
     public native int length();
 
     public native void getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin);

@@ -432,7 +432,6 @@ int main(int argc, char** argv) {
             }
             const bool suspiciousFrame = renderTrace.graphicsOps.empty() &&
                 (renderTrace.stepLimitHit ||
-                 !renderTrace.currentDisplayableClass.empty() ||
                  !renderTrace.unknownMethodCalls.empty() ||
                  !renderTrace.suspendedTasks.empty());
             if (suspiciousFrame) {

@@ -38,7 +38,10 @@ const ExecutionTrace& JvmMidletApp::render() {
         return lastTrace_;
     }
 
-    framebuffer_.assign(static_cast<size_t>(width * height), 0x39e7);
+    const size_t expectedSize = static_cast<size_t>(width * height);
+    if (framebuffer_.size() != expectedSize) {
+        framebuffer_.assign(expectedSize, 0x39e7);
+    }
     lastTrace_ = renderMidletSession(*session_, framebuffer_, width, height);
     host_.present(framebuffer_.data(), width, height);
     return lastTrace_;

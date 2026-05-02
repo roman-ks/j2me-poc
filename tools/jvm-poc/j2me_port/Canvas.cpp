@@ -3,6 +3,7 @@
 #include "BitmapFont5x7.hpp"
 
 #include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
 #include <core/log.h>
@@ -13,6 +14,7 @@ namespace port {
 namespace {
 
 Image::Decoder g_imageDecoder = nullptr;
+std::set<std::string> g_warnedImageLoads;
 
 uint16_t rgbToRgb565(uint8_t r, uint8_t g, uint8_t b) {
     return static_cast<uint16_t>(((static_cast<uint16_t>(r) >> 3u) << 11u) |
@@ -48,7 +50,9 @@ Image Image::createImage(const std::string& path) {
 
     std::vector<uint8_t> encoded;
     if (!readResourceAll(path, encoded) || encoded.empty()) {
-        LOGF_W("Failed to load image resource: %s", path.c_str());
+        if (g_warnedImageLoads.insert(path).second) {
+            LOGF_W("Failed to load image resource: %s", path.c_str());
+        }
         return image;
     }
 
