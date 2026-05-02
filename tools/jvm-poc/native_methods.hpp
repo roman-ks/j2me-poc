@@ -19,6 +19,9 @@ struct NativeCallContext {
     const JvmHost* host = nullptr;
     const std::vector<ClassFile>* classes = nullptr;
     ExecutionTrace& trace;
+    std::function<Value(const Value&, const std::string&)> readField;
+    std::function<void(const Value&)> startRunnable;
+    std::function<void(uint32_t)> sleepThread;
     std::map<uint32_t, std::string>& strings;
     std::map<uint32_t, std::vector<Value>>& arrays;
     std::map<uint32_t, port::Image>& images;

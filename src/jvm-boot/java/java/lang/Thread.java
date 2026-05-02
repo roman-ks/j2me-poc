@@ -10,11 +10,7 @@ public class Thread {
         this.target = target;
     }
 
-    public void start() {
-        if (target != null) {
-            target.run();
-        }
-    }
+    public native void start();
 
     public static native void sleep(int millis);
 

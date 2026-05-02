@@ -67,6 +67,10 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleString(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "java/lang/Thread") {
+        return native_methods::handleThread(ctx, methodLabel, pc, ref, args);
+    }
+
     return NativeCallResult{};
 }
 

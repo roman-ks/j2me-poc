@@ -181,11 +181,25 @@ using ImageHeap = std::map<uint32_t, port::Image>;
 
 struct RuntimeFrame {
     std::string label;
+    const ClassFile* cls = nullptr;
+    const MethodInfo* method = nullptr;
+    size_t pc = 0;
     Frame frame;
+};
+
+struct ThreadTask {
+    const ClassFile* cls = nullptr;
+    const MethodInfo* method = nullptr;
+    Value receiver = Value::named("0");
+    std::optional<RuntimeFrame> suspendedFrame;
+    uint32_t wakeAtMillis = 0;
+    bool finished = false;
 };
 
 struct Runtime {
     const JvmHost* host = nullptr;
+    MidletSession* session = nullptr;
+    ThreadTask* currentTask = nullptr;
     std::map<std::string, Value> staticFields;
     Heap heap;
     ArrayHeap arrays;
@@ -215,6 +229,7 @@ public:
     MidletSession(const std::vector<ClassFile>& classes, std::string className, const JvmHost* host)
         : classes_(&classes), className_(std::move(className)) {
         runtime_.host = host;
+        runtime_.session = this;
         runtime_.callStack.reserve(kMaxCallDepth + 1);
     }
 
@@ -225,6 +240,8 @@ public:
     Value& midletRef() { return midlet_; }
     bool started() const { return started_; }
     void setStarted(bool started) { started_ = started; }
+    std::vector<ThreadTask>& tasks() { return tasks_; }
+    const std::vector<ThreadTask>& tasks() const { return tasks_; }
 
 private:
     const std::vector<ClassFile>* classes_ = nullptr;
@@ -232,6 +249,11 @@ private:
     Runtime runtime_;
     Value midlet_ = Value::named("0");
     bool started_ = false;
+    std::vector<ThreadTask> tasks_;
+};
+
+struct YieldThreadSleep {
+    uint32_t millis = 0;
 };
 
 namespace {
@@ -391,6 +413,21 @@ void collectGarbage(Runtime& rt, std::string when) {
             addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
     }
+    if (rt.session != nullptr) {
+        for (const ThreadTask& task : rt.session->tasks()) {
+            if (!task.suspendedFrame.has_value()) {
+                continue;
+            }
+            const std::vector<Value>& locals = task.suspendedFrame->frame.locals();
+            for (size_t i = 0; i < locals.size(); ++i) {
+                addRoot(report, task.suspendedFrame->label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
+            }
+            const std::vector<Value>& stack = task.suspendedFrame->frame.stack();
+            for (size_t i = 0; i < stack.size(); ++i) {
+                addRoot(report, task.suspendedFrame->label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+            }
+        }
+    }
 
     std::vector<uint32_t> objectsToFree;
     for (const auto& object : rt.heap) {
@@ -436,54 +473,101 @@ void collectGarbage(Runtime& rt, std::string when) {
     rt.trace.gcReports.push_back(report);
 }
 
+Value readFieldValue(Runtime& rt, const Value& object, const std::string& fieldName) {
+    std::optional<uint32_t> id = objectId(object);
+    if (!id.has_value()) {
+        return Value::named("0");
+    }
+    auto objectIt = rt.heap.find(*id);
+    if (objectIt == rt.heap.end()) {
+        return Value::named("0");
+    }
+    auto fieldIt = objectIt->second.fields.find(fieldName);
+    return fieldIt == objectIt->second.fields.end() ? Value::named("0") : fieldIt->second;
+}
+
 std::optional<Value> executeMethod(
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
     const MethodInfo& method,
     const std::vector<Value>& args,
     Runtime& rt,
+    size_t depth);
+
+void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const Value& runnable) {
+    std::optional<uint32_t> id = objectId(runnable);
+    if (!id.has_value()) {
+        return;
+    }
+    auto objectIt = rt.heap.find(*id);
+    if (objectIt == rt.heap.end()) {
+        return;
+    }
+    const ClassFile* owner = nullptr;
+    const MethodInfo* run = findMethodInHierarchy(classes, objectIt->second.className, "run", "()V", &owner);
+    if (owner == nullptr || run == nullptr) {
+        return;
+    }
+    if (rt.session != nullptr) {
+        rt.session->tasks().push_back(ThreadTask{owner, run, runnable, std::nullopt, 0, false});
+        return;
+    }
+    (void)executeMethod(classes, *owner, *run, {runnable}, rt, 0);
+}
+
+void initializeFrameArgs(RuntimeFrame& runtimeFrame, const std::vector<Value>& args) {
+    Frame& frame = runtimeFrame.frame;
+    const MethodInfo& method = *runtimeFrame.method;
+    if (args.empty()) {
+        for (size_t i = 0; i < argumentSlots(method) && i < method.maxLocals; ++i) {
+            frame.setLocal(static_cast<uint16_t>(i),
+                           Value::named("<arg:" + localNameAt(method, static_cast<uint16_t>(i), 0) + ">"));
+        }
+        return;
+    }
+
+    size_t localIndex = hasAccess(method.access, 0x0008) ? 0 : 1;
+    size_t argIndex = 0;
+    if (!hasAccess(method.access, 0x0008) && !args.empty() && method.maxLocals > 0) {
+        frame.setLocal(0, args[0]);
+        argIndex = 1;
+    }
+    std::vector<size_t> widths = argumentSlotWidths(method.descriptor);
+    for (size_t i = 0; i < widths.size() && argIndex < args.size() && localIndex < method.maxLocals; ++i) {
+        frame.setLocal(static_cast<uint16_t>(localIndex), args[argIndex]);
+        localIndex += widths[i];
+        ++argIndex;
+    }
+}
+
+std::optional<Value> resumeCurrentMethod(
+    const std::vector<ClassFile>& classes,
+    Runtime& rt,
     size_t depth) {
-    if (depth > kMaxCallDepth) {
+    if (depth > kMaxCallDepth || rt.callStack.empty()) {
         return Value::named("<call-depth-limit>");
     }
 
-    const std::string label = methodLabel(cls, method);
-    rt.callStack.push_back(RuntimeFrame{label, Frame(method.maxLocals)});
-    Frame& frame = rt.callStack.back().frame;
+    RuntimeFrame& runtimeFrame = rt.callStack.back();
+    const ClassFile& cls = *runtimeFrame.cls;
+    const MethodInfo& method = *runtimeFrame.method;
+    const std::string& label = runtimeFrame.label;
+    Frame& frame = runtimeFrame.frame;
+    size_t& pc = runtimeFrame.pc;
 
     auto finish = [&](std::optional<Value> result) -> std::optional<Value> {
         rt.callStack.pop_back();
         return result;
     };
 
-    if (args.empty()) {
-        for (size_t i = 0; i < argumentSlots(method) && i < method.maxLocals; ++i) {
-            frame.setLocal(static_cast<uint16_t>(i),
-                           Value::named("<arg:" + localNameAt(method, static_cast<uint16_t>(i), 0) + ">"));
-        }
-    } else {
-        size_t localIndex = hasAccess(method.access, 0x0008) ? 0 : 1;
-        size_t argIndex = 0;
-        if (!hasAccess(method.access, 0x0008) && !args.empty() && method.maxLocals > 0) {
-            frame.setLocal(0, args[0]);
-            argIndex = 1;
-        }
-        std::vector<size_t> widths = argumentSlotWidths(method.descriptor);
-        for (size_t i = 0; i < widths.size() && argIndex < args.size() && localIndex < method.maxLocals; ++i) {
-            frame.setLocal(static_cast<uint16_t>(localIndex), args[argIndex]);
-            localIndex += widths[i];
-            ++argIndex;
-        }
-    }
-
-    auto recordLocal = [&](uint16_t index, uint32_t pc, const Value& value, const std::string& reason) {
-        rt.trace.localWrites.push_back(LocalWrite{label, pc, index, localNameAt(method, index, pc), value, reason});
+    auto recordLocal = [&](uint16_t index, uint32_t writePc, const Value& value, const std::string& reason) {
+        rt.trace.localWrites.push_back(LocalWrite{label, writePc, index, localNameAt(method, index, writePc), value, reason});
     };
 
-    auto store = [&](uint16_t index, uint32_t pc) {
+    auto store = [&](uint16_t index, uint32_t writePc) {
         Value value = frame.pop();
         frame.setLocal(index, value);
-        recordLocal(index, pc, value, "store");
+        recordLocal(index, writePc, value, "store");
     };
 
     auto makeNativeContext = [&]() {
@@ -491,6 +575,20 @@ std::optional<Value> executeMethod(
             rt.host,
             &classes,
             rt.trace,
+            [&](const Value& object, const std::string& fieldName) {
+                return readFieldValue(rt, object, fieldName);
+            },
+            [&](const Value& runnable) {
+                queueRunnableTask(rt, classes, runnable);
+            },
+            [&](uint32_t millis) {
+                if (rt.currentTask != nullptr) {
+                    throw YieldThreadSleep{millis};
+                }
+                if (rt.host != nullptr) {
+                    rt.host->sleepMillis(millis);
+                }
+            },
             rt.strings,
             rt.arrays,
             rt.images,
@@ -511,7 +609,6 @@ std::optional<Value> executeMethod(
         };
     };
 
-    size_t pc = 0;
     while (pc < method.code.size()) {
         if (++rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
@@ -910,8 +1007,14 @@ std::optional<Value> executeMethod(
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     if (hasAccess(targetMethod->access, kAccNative)) {
                         NativeCallContext nativeCtx = makeNativeContext();
-                        NativeCallResult nativeResult = handleNativeStaticCall(
-                            nativeCtx, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
+                        NativeCallResult nativeResult;
+                        try {
+                            nativeResult = handleNativeStaticCall(
+                                nativeCtx, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
+                        } catch (const YieldThreadSleep&) {
+                            pc += 3;
+                            throw;
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -975,8 +1078,14 @@ std::optional<Value> executeMethod(
                                 nativeCtx.receiverClassName = objectIt->second.className;
                             }
                         }
-                        NativeCallResult nativeResult = handleNativeInstanceCall(
-                            nativeCtx, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
+                        NativeCallResult nativeResult;
+                        try {
+                            nativeResult = handleNativeInstanceCall(
+                                nativeCtx, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
+                        } catch (const YieldThreadSleep&) {
+                            pc += op == 0xb9 ? 5 : 3;
+                            throw;
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1070,6 +1179,23 @@ std::optional<Value> executeMethod(
     return finish(std::nullopt);
 }
 
+std::optional<Value> executeMethod(
+    const std::vector<ClassFile>& classes,
+    const ClassFile& cls,
+    const MethodInfo& method,
+    const std::vector<Value>& args,
+    Runtime& rt,
+    size_t depth) {
+    if (depth > kMaxCallDepth) {
+        return Value::named("<call-depth-limit>");
+    }
+
+    RuntimeFrame runtimeFrame{methodLabel(cls, method), &cls, &method, 0, Frame(method.maxLocals)};
+    initializeFrameArgs(runtimeFrame, args);
+    rt.callStack.push_back(std::move(runtimeFrame));
+    return resumeCurrentMethod(classes, rt, depth);
+}
+
 void resetRuntimeTrace(Runtime& rt) {
     rt.trace = ExecutionTrace{};
     rt.steps = 0;
@@ -1123,6 +1249,33 @@ ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixe
 
     if (!session.started()) {
         return startSession(session);
+    }
+
+    const uint32_t now = rt.host != nullptr ? rt.host->millis() : 0;
+    for (ThreadTask& task : session.tasks()) {
+        if (task.finished || now < task.wakeAtMillis) {
+            continue;
+        }
+
+        rt.currentTask = &task;
+        try {
+            if (task.suspendedFrame.has_value()) {
+                rt.callStack.push_back(std::move(*task.suspendedFrame));
+                task.suspendedFrame.reset();
+                (void)resumeCurrentMethod(session.classes(), rt, 0);
+            } else if (task.cls != nullptr && task.method != nullptr) {
+                (void)executeMethod(session.classes(), *task.cls, *task.method, {task.receiver}, rt, 0);
+            }
+            task.finished = true;
+        } catch (const YieldThreadSleep& request) {
+            task.wakeAtMillis = now + request.millis;
+            if (!rt.callStack.empty()) {
+                task.suspendedFrame = std::move(rt.callStack.back());
+                rt.callStack.pop_back();
+            }
+        }
+        rt.currentTask = nullptr;
+        rt.callStack.clear();
     }
 
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
