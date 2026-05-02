@@ -191,6 +191,7 @@ std::string accessText(uint16_t flags, bool method) {
     if (method && hasAccess(flags, 0x0040)) add("bridge");
     if (!method && hasAccess(flags, 0x0080)) add("transient");
     if (method && hasAccess(flags, 0x0080)) add("varargs");
+    if (method && hasAccess(flags, 0x0100)) add("native");
     if (hasAccess(flags, 0x0400)) add("abstract");
     if (hasAccess(flags, 0x1000)) add("synthetic");
 

@@ -20,6 +20,7 @@ namespace {
 
 constexpr size_t kMaxSteps = 10000;
 constexpr size_t kMaxCallDepth = 64;
+constexpr uint16_t kAccNative = 0x0100;
 
 uint32_t branchTarget(size_t pc, int16_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
@@ -142,6 +143,10 @@ bool returnsValue(const std::string& descriptor) {
 
 std::string callName(const MethodRef& ref) {
     return ref.className + "." + ref.name + ref.descriptor;
+}
+
+MethodRef methodRefForOwner(const ClassFile& owner, const MethodRef& ref) {
+    return MethodRef{owner.thisClass, ref.name, ref.descriptor};
 }
 
 struct HeapObject {
@@ -807,27 +812,36 @@ std::optional<Value> executeMethod(
                     callArgs[i - 1] = frame.pop();
                 }
 
-                NativeCallContext nativeCtx = makeNativeContext();
-                NativeCallResult nativeResult = handleNativeStaticCall(nativeCtx, label, callPc, ref, callArgs);
-                if (nativeResult.handled) {
-                    if (nativeResult.returnValue.has_value()) {
-                        frame.push(*nativeResult.returnValue);
-                    }
-                } else {
-                    const ClassFile* targetClass = nullptr;
-                    const MethodInfo* targetMethod = findMethodInHierarchy(
-                        classes, ref.className, ref.name, ref.descriptor, &targetClass);
-                    if (targetClass != nullptr && targetMethod != nullptr) {
+                const ClassFile* targetClass = nullptr;
+                const MethodInfo* targetMethod = findMethodInHierarchy(
+                    classes, ref.className, ref.name, ref.descriptor, &targetClass);
+                if (targetClass != nullptr && targetMethod != nullptr) {
+                    if (hasAccess(targetMethod->access, kAccNative)) {
+                        NativeCallContext nativeCtx = makeNativeContext();
+                        NativeCallResult nativeResult = handleNativeStaticCall(
+                            nativeCtx, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
+                        if (nativeResult.handled) {
+                            if (nativeResult.returnValue.has_value()) {
+                                frame.push(*nativeResult.returnValue);
+                            }
+                        } else {
+                            std::optional<Value> result = recordUnknownCall(
+                                rt, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
+                            if (result.has_value()) {
+                                frame.push(*result);
+                            }
+                        }
+                    } else {
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
-                    } else {
-                        std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
-                        if (result.has_value()) {
-                            frame.push(*result);
-                        }
+                    }
+                } else {
+                    std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
+                    if (result.has_value()) {
+                        frame.push(*result);
                     }
                 }
                 pc += 3;
@@ -845,24 +859,6 @@ std::optional<Value> executeMethod(
                 Value object = frame.pop();
                 callArgs[0] = object;
 
-                NativeCallContext nativeCtx = makeNativeContext();
-                std::optional<uint32_t> nativeObjectId = objectId(object);
-                if (nativeObjectId.has_value()) {
-                    auto objectIt = rt.heap.find(*nativeObjectId);
-                    if (objectIt != rt.heap.end()) {
-                        nativeCtx.receiverClassName = objectIt->second.className;
-                    }
-                }
-                NativeCallResult nativeResult = handleNativeInstanceCall(
-                    nativeCtx, label, static_cast<uint32_t>(pc), ref, callArgs);
-                if (nativeResult.handled) {
-                    if (nativeResult.returnValue.has_value()) {
-                        frame.push(*nativeResult.returnValue);
-                    }
-                    pc += 3;
-                    break;
-                }
-
                 std::string lookupClassName = ref.className;
                 if (op == 0xb6) {
                     std::optional<uint32_t> id = objectId(object);
@@ -877,10 +873,34 @@ std::optional<Value> executeMethod(
                 const MethodInfo* targetMethod = findMethodInHierarchy(
                     classes, lookupClassName, ref.name, ref.descriptor, &targetClass);
                 if (targetClass != nullptr && targetMethod != nullptr) {
-                    std::optional<Value> result = executeMethod(
-                        classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
-                    if (result.has_value()) {
-                        frame.push(*result);
+                    if (hasAccess(targetMethod->access, kAccNative)) {
+                        NativeCallContext nativeCtx = makeNativeContext();
+                        std::optional<uint32_t> nativeObjectId = objectId(object);
+                        if (nativeObjectId.has_value()) {
+                            auto objectIt = rt.heap.find(*nativeObjectId);
+                            if (objectIt != rt.heap.end()) {
+                                nativeCtx.receiverClassName = objectIt->second.className;
+                            }
+                        }
+                        NativeCallResult nativeResult = handleNativeInstanceCall(
+                            nativeCtx, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
+                        if (nativeResult.handled) {
+                            if (nativeResult.returnValue.has_value()) {
+                                frame.push(*nativeResult.returnValue);
+                            }
+                        } else {
+                            std::optional<Value> result = recordUnknownCall(
+                                rt, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
+                            if (result.has_value()) {
+                                frame.push(*result);
+                            }
+                        }
+                    } else {
+                        std::optional<Value> result = executeMethod(
+                            classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
+                        if (result.has_value()) {
+                            frame.push(*result);
+                        }
                     }
                 } else {
                     std::optional<Value> result = recordUnknownCall(rt, label, static_cast<uint32_t>(pc), ref, callArgs);

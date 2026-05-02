@@ -157,6 +157,7 @@ bool runCase(const std::string& root, const TestCase& test) {
     for (const std::string& classFile : test.classFiles) {
         classes.push_back(jvmpoc::parseClassFile(classPath(root, classFile)));
     }
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NativeRuntime")));
     jvmpoc::appendDefaultBootClasses(classes);
 
     const jvmpoc::ClassFile* mainClass = findClass(classes, test.mainClass);

@@ -43,10 +43,6 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleMidlet(ctx, methodLabel, pc, ref, args);
     }
 
-    if (ref.className == "java/lang/Object") {
-        return native_methods::handleObject(ctx, methodLabel, pc, ref, args);
-    }
-
     if (ref.className == "javax/microedition/lcdui/Display") {
         return native_methods::handleDisplay(ctx, methodLabel, pc, ref, args);
     }

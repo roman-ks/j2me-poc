@@ -40,12 +40,6 @@ NativeCallResult handleNativeRuntime(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
-NativeCallResult handleObject(
-    NativeCallContext& ctx,
-    const std::string& methodLabel,
-    uint32_t pc,
-    const MethodRef& ref,
-    const std::vector<Value>& args);
 NativeCallResult handleString(
     NativeCallContext& ctx,
     const std::string& methodLabel,
