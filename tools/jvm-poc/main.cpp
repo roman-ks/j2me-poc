@@ -3,6 +3,7 @@
 
 #include <exception>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -77,16 +78,6 @@ void printClass(const jvmpoc::ClassFile& cls) {
             }
         }
 
-        std::vector<jvmpoc::LocalWrite> writes = jvmpoc::inferStraightLineLocalWrites(method);
-        if (!writes.empty()) {
-            std::cout << "      inferred local writes:\n";
-            for (const jvmpoc::LocalWrite& write : writes) {
-                std::cout << "        pc=" << write.pc << " ["
-                          << write.index << "] "
-                          << jvmpoc::localNameAt(method, write.index, write.pc)
-                          << " = " << write.value.text << "\n";
-            }
-        }
     }
 
     if (!cls.attributes.empty()) {
@@ -95,6 +86,42 @@ void printClass(const jvmpoc::ClassFile& cls) {
             std::cout << ' ' << attr;
         }
         std::cout << "\n";
+    }
+}
+
+const jvmpoc::MethodInfo* findMain(const jvmpoc::ClassFile& cls) {
+    for (const jvmpoc::MethodInfo& method : cls.methods) {
+        if (method.name == "main" && method.descriptor == "([Ljava/lang/String;)V" &&
+            jvmpoc::hasAccess(method.access, 0x0008)) {
+            return &method;
+        }
+    }
+    return nullptr;
+}
+
+void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& method) {
+    std::cout << "runtime " << cls.thisClass << "." << method.name << method.descriptor << "\n";
+    jvmpoc::ExecutionTrace trace = jvmpoc::executeStraightLine(cls, method);
+
+    if (!trace.localWrites.empty()) {
+        std::cout << "  local writes:\n";
+        for (const jvmpoc::LocalWrite& write : trace.localWrites) {
+            std::cout << "    pc=" << write.pc << " ["
+                      << write.index << "] "
+                      << jvmpoc::localNameAt(method, write.index, write.pc)
+                      << " = " << write.value.text << "\n";
+        }
+    }
+
+    if (!trace.runtimePrints.empty()) {
+        std::cout << "  stdout:\n";
+        for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
+            std::cout << "    pc=" << print.pc << ": " << print.value.text << "\n";
+        }
+    }
+
+    if (trace.localWrites.empty() && trace.runtimePrints.empty()) {
+        std::cout << "  <no observable toy-runtime effects>\n";
     }
 }
 
@@ -107,11 +134,35 @@ int main(int argc, char** argv) {
     }
 
     try {
+        std::vector<jvmpoc::ClassFile> classes;
+        for (int i = 1; i < argc; ++i) {
+            classes.push_back(jvmpoc::parseClassFile(argv[i]));
+        }
+
+        std::cout << "metadata\n";
         for (int i = 1; i < argc; ++i) {
             if (i > 1) {
                 std::cout << "\n";
             }
-            printClass(jvmpoc::parseClassFile(argv[i]));
+            printClass(classes[static_cast<size_t>(i - 1)]);
+        }
+
+        bool ran = false;
+        for (const jvmpoc::ClassFile& cls : classes) {
+            const jvmpoc::MethodInfo* mainMethod = findMain(cls);
+            if (mainMethod == nullptr) {
+                continue;
+            }
+            std::cout << "\n";
+            if (!ran) {
+                std::cout << "runtime\n";
+            }
+            printRuntimeTrace(cls, *mainMethod);
+            ran = true;
+        }
+
+        if (!ran) {
+            std::cout << "\nruntime\n  <no public static main([Ljava/lang/String;)V found>\n";
         }
     } catch (const std::exception& e) {
         std::cerr << "jvm-poc: " << e.what() << "\n";

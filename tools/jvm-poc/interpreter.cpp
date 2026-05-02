@@ -6,8 +6,8 @@
 
 namespace jvmpoc {
 
-std::vector<LocalWrite> inferStraightLineLocalWrites(const MethodInfo& method) {
-    std::vector<LocalWrite> writes;
+ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method) {
+    ExecutionTrace trace;
     Frame frame(method.maxLocals);
 
     for (size_t i = 0; i < argumentSlots(method) && i < method.maxLocals; ++i) {
@@ -18,7 +18,7 @@ std::vector<LocalWrite> inferStraightLineLocalWrites(const MethodInfo& method) {
     auto store = [&](uint16_t index, uint32_t pc) {
         Value value = frame.pop();
         frame.setLocal(index, value);
-        writes.push_back(LocalWrite{pc, index, value});
+        trace.localWrites.push_back(LocalWrite{pc, index, value});
     };
 
     size_t pc = 0;
@@ -66,6 +66,18 @@ std::vector<LocalWrite> inferStraightLineLocalWrites(const MethodInfo& method) {
                 pc += 3;
                 break;
 
+            case 0xb8: {
+                uint32_t callPc = static_cast<uint32_t>(pc);
+                MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
+                if (ref.className == "dev/roman/j2mepoc/NativeRuntime" &&
+                    ref.name == "printInt" &&
+                    ref.descriptor == "(I)V") {
+                    trace.runtimePrints.push_back(RuntimePrint{callPc, frame.pop()});
+                }
+                pc += 3;
+                break;
+            }
+
             case 0xb6:
                 (void)frame.pop();
                 (void)frame.pop();
@@ -73,7 +85,7 @@ std::vector<LocalWrite> inferStraightLineLocalWrites(const MethodInfo& method) {
                 break;
 
             case 0xb1:
-                return writes;
+                return trace;
 
             default:
                 pc += instructionLength(op);
@@ -81,7 +93,7 @@ std::vector<LocalWrite> inferStraightLineLocalWrites(const MethodInfo& method) {
         }
     }
 
-    return writes;
+    return trace;
 }
 
 } // namespace jvmpoc

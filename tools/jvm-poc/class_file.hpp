@@ -70,11 +70,18 @@ struct ClassFile {
     std::vector<CpEntry> cp;
 };
 
+struct MethodRef {
+    std::string className;
+    std::string name;
+    std::string descriptor;
+};
+
 bool hasAccess(uint16_t flags, uint16_t bit);
 std::string accessText(uint16_t flags, bool method);
 size_t fieldSlots(const std::string& descriptor);
 size_t argumentSlots(const MethodInfo& method);
 std::string localNameAt(const MethodInfo& method, uint16_t index, uint32_t pc);
+MethodRef resolveMethodRef(const ClassFile& cls, uint16_t index);
 
 ClassFile parseClassFile(const std::string& path);
 

@@ -7,6 +7,16 @@
 
 namespace jvmpoc {
 
-std::vector<LocalWrite> inferStraightLineLocalWrites(const MethodInfo& method);
+struct RuntimePrint {
+    uint32_t pc = 0;
+    Value value;
+};
+
+struct ExecutionTrace {
+    std::vector<LocalWrite> localWrites;
+    std::vector<RuntimePrint> runtimePrints;
+};
+
+ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method);
 
 } // namespace jvmpoc

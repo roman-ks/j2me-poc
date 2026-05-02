@@ -33,6 +33,26 @@ std::string className(const std::vector<CpEntry>& cp, uint16_t index) {
     return utf8(cp, cp[index].a);
 }
 
+MethodRef methodRef(const std::vector<CpEntry>& cp, uint16_t index) {
+    if (index == 0 || index >= cp.size()) {
+        throw std::runtime_error("bad method reference #" + std::to_string(index));
+    }
+    const CpEntry& ref = cp[index];
+    if (ref.tag != CpMethodref && ref.tag != CpInterfaceMethodref) {
+        throw std::runtime_error("constant pool entry #" + std::to_string(index) + " is not a method reference");
+    }
+    if (ref.b == 0 || ref.b >= cp.size() || cp[ref.b].tag != CpNameAndType) {
+        throw std::runtime_error("bad NameAndType reference for method #" + std::to_string(index));
+    }
+
+    const CpEntry& nameAndType = cp[ref.b];
+    return MethodRef{
+        className(cp, ref.a),
+        utf8(cp, nameAndType.a),
+        utf8(cp, nameAndType.b),
+    };
+}
+
 size_t typeSlotsAt(const std::string& desc, size_t& pos) {
     char c = desc.at(pos++);
     if (c == 'J' || c == 'D') {
@@ -187,6 +207,10 @@ std::string localNameAt(const MethodInfo& method, uint16_t index, uint32_t pc) {
         }
     }
     return "local" + std::to_string(index);
+}
+
+MethodRef resolveMethodRef(const ClassFile& cls, uint16_t index) {
+    return methodRef(cls.cp, index);
 }
 
 ClassFile parseClassFile(const std::string& path) {
