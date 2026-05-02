@@ -86,7 +86,7 @@ public final class StringBuffer {
     }
 
     public String toString() {
-        return makeString(value, count);
+        return new String(value, 0, count);
     }
 
     private void ensureCapacity(int minimumCapacity) {
@@ -111,6 +111,4 @@ public final class StringBuffer {
     private void valueAt(int index, char ch) {
         value[index] = ch;
     }
-
-    private static native String makeString(char[] source, int count);
 }

@@ -174,11 +174,9 @@ struct Runtime {
     std::map<std::string, uint32_t> internedStrings;
     uint32_t nextObjectId = 1;
     uint32_t nextArrayId = 1;
-    uint32_t nextStringId = 1;
     uint32_t nextImageId = 1;
     std::vector<uint32_t> freeObjectIds;
     std::vector<uint32_t> freeArrayIds;
-    std::vector<uint32_t> freeStringIds;
     std::vector<RuntimeFrame> callStack;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
@@ -198,11 +196,7 @@ Value arrayRef(uint32_t id) {
     return Value::named("arr#" + std::to_string(id));
 }
 
-Value stringRef(uint32_t id) {
-    return Value::named("str#" + std::to_string(id));
-}
-
-Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const std::string& className) {
+uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
     uint32_t id = 0;
     if (!rt.freeObjectIds.empty()) {
         id = rt.freeObjectIds.back();
@@ -211,6 +205,11 @@ Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const s
         id = rt.nextObjectId++;
     }
     rt.heap[id] = HeapObject{className, {}};
+    return id;
+}
+
+Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const std::string& className) {
+    uint32_t id = allocateHeapObjectId(rt, className);
     Value ref = objectRef(id);
     rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
     return ref;
@@ -259,38 +258,27 @@ std::optional<uint32_t> arrayId(const Value& value) {
     return parseHandle(value, "arr#");
 }
 
-std::optional<uint32_t> stringId(const Value& value) {
-    return parseHandle(value, "str#");
-}
-
 bool isReference(const Value& value) {
-    return objectId(value).has_value() || arrayId(value).has_value() || stringId(value).has_value();
+    return objectId(value).has_value() || arrayId(value).has_value();
 }
 
 Value internString(Runtime& rt, const std::string& text) {
     auto internIt = rt.internedStrings.find(text);
     if (internIt != rt.internedStrings.end() && rt.strings.find(internIt->second) != rt.strings.end()) {
-        return stringRef(internIt->second);
+        return objectRef(internIt->second);
     }
 
-    uint32_t id = 0;
-    if (!rt.freeStringIds.empty()) {
-        id = rt.freeStringIds.back();
-        rt.freeStringIds.pop_back();
-    } else {
-        id = rt.nextStringId++;
-    }
+    uint32_t id = allocateHeapObjectId(rt, "java/lang/String");
     rt.strings[id] = text;
     rt.internedStrings[text] = id;
-    return stringRef(id);
+    return objectRef(id);
 }
 
 void markValue(
     const Value& value,
     const Runtime& rt,
     std::set<uint32_t>& markedObjects,
-    std::set<uint32_t>& markedArrays,
-    std::set<uint32_t>& markedStrings) {
+    std::set<uint32_t>& markedArrays) {
     std::optional<uint32_t> obj = objectId(value);
     if (obj.has_value()) {
         if (!markedObjects.insert(*obj).second) {
@@ -301,7 +289,7 @@ void markValue(
             return;
         }
         for (const auto& field : objectIt->second.fields) {
-            markValue(field.second, rt, markedObjects, markedArrays, markedStrings);
+            markValue(field.second, rt, markedObjects, markedArrays);
         }
         return;
     }
@@ -316,14 +304,8 @@ void markValue(
             return;
         }
         for (const Value& element : arrayIt->second) {
-            markValue(element, rt, markedObjects, markedArrays, markedStrings);
+            markValue(element, rt, markedObjects, markedArrays);
         }
-        return;
-    }
-
-    std::optional<uint32_t> str = stringId(value);
-    if (str.has_value()) {
-        markedStrings.insert(*str);
     }
 }
 
@@ -333,13 +315,12 @@ void addRoot(
     const Value& value,
     const Runtime& rt,
     std::set<uint32_t>& markedObjects,
-    std::set<uint32_t>& markedArrays,
-    std::set<uint32_t>& markedStrings) {
+    std::set<uint32_t>& markedArrays) {
     if (!isReference(value)) {
         return;
     }
     report.roots.push_back(name + "=" + value.text);
-    markValue(value, rt, markedObjects, markedArrays, markedStrings);
+    markValue(value, rt, markedObjects, markedArrays);
 }
 
 void collectGarbage(Runtime& rt, std::string when) {
@@ -348,28 +329,29 @@ void collectGarbage(Runtime& rt, std::string when) {
 
     std::set<uint32_t> markedObjects;
     std::set<uint32_t> markedArrays;
-    std::set<uint32_t> markedStrings;
     for (const auto& field : rt.staticFields) {
-        addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays, markedStrings);
+        addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays);
     }
     for (const RuntimeFrame& runtimeFrame : rt.callStack) {
         const std::vector<Value>& locals = runtimeFrame.frame.locals();
         for (size_t i = 0; i < locals.size(); ++i) {
-            addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]",
-                    locals[i], rt, markedObjects, markedArrays, markedStrings);
+            addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
         }
 
         const std::vector<Value>& stack = runtimeFrame.frame.stack();
         for (size_t i = 0; i < stack.size(); ++i) {
-            addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]",
-                    stack[i], rt, markedObjects, markedArrays, markedStrings);
+            addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
     }
 
     std::vector<uint32_t> objectsToFree;
     for (const auto& object : rt.heap) {
         if (markedObjects.find(object.first) == markedObjects.end()) {
-            report.unreachableObjects.push_back(objectRef(object.first));
+            if (object.second.className == "java/lang/String") {
+                report.unreachableStrings.push_back(objectRef(object.first));
+            } else {
+                report.unreachableObjects.push_back(objectRef(object.first));
+            }
             objectsToFree.push_back(object.first);
         }
     }
@@ -380,32 +362,27 @@ void collectGarbage(Runtime& rt, std::string when) {
             arraysToFree.push_back(array.first);
         }
     }
-    std::vector<uint32_t> stringsToFree;
-    for (const auto& str : rt.strings) {
-        if (markedStrings.find(str.first) == markedStrings.end()) {
-            report.unreachableStrings.push_back(stringRef(str.first));
-            stringsToFree.push_back(str.first);
-        }
-    }
 
     for (uint32_t id : objectsToFree) {
+        auto objectIt = rt.heap.find(id);
+        const bool isString = objectIt != rt.heap.end() && objectIt->second.className == "java/lang/String";
+        auto strIt = rt.strings.find(id);
+        if (strIt != rt.strings.end()) {
+            rt.internedStrings.erase(strIt->second);
+            rt.strings.erase(strIt);
+        }
         rt.heap.erase(id);
         rt.freeObjectIds.push_back(id);
-        report.freedObjects.push_back(objectRef(id));
+        if (isString) {
+            report.freedStrings.push_back(objectRef(id));
+        } else {
+            report.freedObjects.push_back(objectRef(id));
+        }
     }
     for (uint32_t id : arraysToFree) {
         rt.arrays.erase(id);
         rt.freeArrayIds.push_back(id);
         report.freedArrays.push_back(arrayRef(id));
-    }
-    for (uint32_t id : stringsToFree) {
-        auto strIt = rt.strings.find(id);
-        if (strIt != rt.strings.end()) {
-            rt.internedStrings.erase(strIt->second);
-        }
-        rt.strings.erase(id);
-        rt.freeStringIds.push_back(id);
-        report.freedStrings.push_back(stringRef(id));
     }
 
     rt.trace.gcReports.push_back(report);

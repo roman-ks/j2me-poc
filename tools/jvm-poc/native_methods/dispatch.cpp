@@ -63,7 +63,7 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleCanvas(ctx, methodLabel, pc, ref, args);
     }
 
-    if (ref.className == "java/lang/String" || native_methods::stringId(receiver).has_value()) {
+    if (ref.className == "java/lang/String" || native_methods::isStringObject(ctx, receiver)) {
         return native_methods::handleString(ctx, methodLabel, pc, ref, args);
     }
 

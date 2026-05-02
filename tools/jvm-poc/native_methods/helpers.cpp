@@ -28,8 +28,20 @@ std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefi
     return static_cast<uint32_t>(parsed);
 }
 
-std::optional<uint32_t> stringId(const Value& value) {
-    return parseHandle(value, "str#");
+std::optional<uint32_t> objectId(const Value& value) {
+    return parseHandle(value, "obj#");
+}
+
+std::optional<uint32_t> stringObjectId(const NativeCallContext& ctx, const Value& value) {
+    std::optional<uint32_t> id = objectId(value);
+    if (!id.has_value()) {
+        return std::nullopt;
+    }
+    return ctx.strings.find(*id) != ctx.strings.end() ? id : std::nullopt;
+}
+
+bool isStringObject(const NativeCallContext& ctx, const Value& value) {
+    return stringObjectId(ctx, value).has_value();
 }
 
 std::optional<uint32_t> arrayId(const Value& value) {
@@ -72,7 +84,7 @@ std::string stringArg(const NativeCallContext& ctx, const std::vector<Value>& ar
     if (index >= args.size()) {
         return "";
     }
-    std::optional<uint32_t> id = stringId(args[index]);
+    std::optional<uint32_t> id = stringObjectId(ctx, args[index]);
     auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
     return id.has_value() && strIt != ctx.strings.end() ? strIt->second : args[index].text;
 }

@@ -12,7 +12,9 @@ namespace jvmpoc::native_methods {
 bool nativeRuntimeClassMatches(const std::string& className);
 bool returnsValue(const std::string& descriptor);
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix);
-std::optional<uint32_t> stringId(const Value& value);
+std::optional<uint32_t> objectId(const Value& value);
+std::optional<uint32_t> stringObjectId(const NativeCallContext& ctx, const Value& value);
+bool isStringObject(const NativeCallContext& ctx, const Value& value);
 std::optional<uint32_t> arrayId(const Value& value);
 std::optional<uint32_t> imageId(const Value& value);
 std::optional<uint32_t> imageGraphicsId(const Value& value);

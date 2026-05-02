@@ -21,7 +21,7 @@ NativeCallResult handleNativeRuntime(
 
     if (ref.name == "printString" && ref.descriptor == "(Ljava/lang/String;)V") {
         Value value = args.empty() ? Value::named("<missing-arg>") : args[0];
-        std::optional<uint32_t> id = stringId(value);
+        std::optional<uint32_t> id = stringObjectId(ctx, value);
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         ctx.trace.runtimePrints.push_back(RuntimePrint{
             methodLabel,
