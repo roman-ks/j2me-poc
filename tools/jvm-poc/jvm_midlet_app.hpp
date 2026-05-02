@@ -4,6 +4,7 @@
 #include "interpreter.hpp"
 #include "jvm_host.hpp"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,7 +27,7 @@ private:
     JvmHost& host_;
     std::vector<ClassFile> classes_;
     std::string midletClassName_;
-    Value currentDisplayable_ = Value::named("0");
+    std::shared_ptr<MidletSession> session_;
     std::vector<uint16_t> framebuffer_;
     ExecutionTrace lastTrace_;
 };

@@ -4,12 +4,14 @@
 #include "frame.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace jvmpoc {
 
 class JvmHost;
+class MidletSession;
 
 struct RuntimePrint {
     std::string methodLabel;
@@ -138,6 +140,17 @@ struct ExecutionTrace {
     std::vector<ImageLoad> imageLoads;
     bool stepLimitHit = false;
 };
+
+std::shared_ptr<MidletSession> createMidletSession(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host = nullptr);
+ExecutionTrace startMidletSession(MidletSession& session);
+ExecutionTrace renderMidletSession(
+    MidletSession& session,
+    std::vector<uint16_t>& pixels,
+    int width,
+    int height);
 
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method);
 ExecutionTrace executeMidlet(

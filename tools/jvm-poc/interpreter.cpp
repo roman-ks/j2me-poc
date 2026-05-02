@@ -208,6 +208,34 @@ struct Runtime {
     size_t steps = 0;
 };
 
+} // namespace
+
+class MidletSession {
+public:
+    MidletSession(const std::vector<ClassFile>& classes, std::string className, const JvmHost* host)
+        : classes_(&classes), className_(std::move(className)) {
+        runtime_.host = host;
+        runtime_.callStack.reserve(kMaxCallDepth + 1);
+    }
+
+    const std::vector<ClassFile>& classes() const { return *classes_; }
+    const std::string& className() const { return className_; }
+    Runtime& runtime() { return runtime_; }
+    const Runtime& runtime() const { return runtime_; }
+    Value& midletRef() { return midlet_; }
+    bool started() const { return started_; }
+    void setStarted(bool started) { started_ = started; }
+
+private:
+    const std::vector<ClassFile>* classes_ = nullptr;
+    std::string className_;
+    Runtime runtime_;
+    Value midlet_ = Value::named("0");
+    bool started_ = false;
+};
+
+namespace {
+
 Value objectRef(uint32_t id) {
     return Value::named("obj#" + std::to_string(id));
 }
@@ -1042,82 +1070,59 @@ std::optional<Value> executeMethod(
     return finish(std::nullopt);
 }
 
-} // namespace
-
-ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
-    Runtime rt;
-    rt.callStack.reserve(kMaxCallDepth + 1);
-    (void)executeMethod(classes, cls, method, {}, rt, 0);
-    return rt.trace;
+void resetRuntimeTrace(Runtime& rt) {
+    rt.trace = ExecutionTrace{};
+    rt.steps = 0;
+    rt.callStack.clear();
+    rt.graphicsFramebuffer.reset();
+    rt.graphicsWidth = 0;
+    rt.graphicsHeight = 0;
+    rt.graphicsColorRgb = 0x000000;
 }
 
-ExecutionTrace executeMidlet(
-    const std::vector<ClassFile>& classes,
-    const std::string& className,
-    const JvmHost* host) {
-    Runtime rt;
-    rt.host = host;
-    rt.callStack.reserve(kMaxCallDepth + 1);
+ExecutionTrace startSession(MidletSession& session) {
+    Runtime& rt = session.runtime();
+    resetRuntimeTrace(rt);
 
-    const ClassFile* midletClass = findClass(classes, className);
+    const std::vector<ClassFile>& classes = session.classes();
+    const ClassFile* midletClass = findClass(classes, session.className());
     if (midletClass == nullptr) {
-        MethodRef missing{className, "<load>", "()V"};
+        MethodRef missing{session.className(), "<load>", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, missing, {});
         return rt.trace;
     }
 
-    Value midlet = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
+    session.midletRef() = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
     const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
     if (init != nullptr) {
-        (void)executeMethod(classes, *midletClass, *init, {midlet}, rt, 0);
+        (void)executeMethod(classes, *midletClass, *init, {session.midletRef()}, rt, 0);
     } else {
         MethodRef ref{midletClass->thisClass, "<init>", "()V"};
-        (void)recordUnknownCall(rt, "<midlet>", 0, ref, {midlet});
+        (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
     }
 
     const ClassFile* startOwner = nullptr;
     const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
     if (startOwner != nullptr && startApp != nullptr) {
-        (void)executeMethod(classes, *startOwner, *startApp, {midlet}, rt, 0);
+        (void)executeMethod(classes, *startOwner, *startApp, {session.midletRef()}, rt, 0);
     } else {
         MethodRef ref{midletClass->thisClass, "startApp", "()V"};
-        (void)recordUnknownCall(rt, "<midlet>", 0, ref, {midlet});
+        (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
     }
 
+    session.setStarted(true);
     return rt.trace;
 }
 
-ExecutionTrace renderMidletFrame(
-    const std::vector<ClassFile>& classes,
-    const std::string& className,
-    const JvmHost* host,
-    std::vector<uint16_t>& pixels,
-    int width,
-    int height) {
-    Runtime rt;
-    rt.host = host;
+ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixels, int width, int height) {
+    Runtime& rt = session.runtime();
+    resetRuntimeTrace(rt);
     rt.graphicsFramebuffer = pixels;
     rt.graphicsWidth = width;
     rt.graphicsHeight = height;
-    rt.callStack.reserve(kMaxCallDepth + 1);
 
-    const ClassFile* midletClass = findClass(classes, className);
-    if (midletClass == nullptr) {
-        MethodRef missing{className, "<load>", "()V"};
-        (void)recordUnknownCall(rt, "<midlet>", 0, missing, {});
-        return rt.trace;
-    }
-
-    Value midlet = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
-    const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
-    if (init != nullptr) {
-        (void)executeMethod(classes, *midletClass, *init, {midlet}, rt, 0);
-    }
-
-    const ClassFile* startOwner = nullptr;
-    const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
-    if (startOwner != nullptr && startApp != nullptr) {
-        (void)executeMethod(classes, *startOwner, *startApp, {midlet}, rt, 0);
+    if (!session.started()) {
+        return startSession(session);
     }
 
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
@@ -1129,6 +1134,7 @@ ExecutionTrace renderMidletFrame(
         return rt.trace;
     }
 
+    const std::vector<ClassFile>& classes = session.classes();
     const ClassFile* paintOwner = nullptr;
     const MethodInfo* paint = findMethodInHierarchy(
         classes,
@@ -1144,6 +1150,54 @@ ExecutionTrace renderMidletFrame(
     }
 
     return rt.trace;
+}
+
+} // namespace
+
+std::shared_ptr<MidletSession> createMidletSession(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host) {
+    return std::make_shared<MidletSession>(classes, className, host);
+}
+
+ExecutionTrace startMidletSession(MidletSession& session) {
+    return startSession(session);
+}
+
+ExecutionTrace renderMidletSession(
+    MidletSession& session,
+    std::vector<uint16_t>& pixels,
+    int width,
+    int height) {
+    return renderSession(session, pixels, width, height);
+}
+
+ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
+    Runtime rt;
+    rt.callStack.reserve(kMaxCallDepth + 1);
+    (void)executeMethod(classes, cls, method, {}, rt, 0);
+    return rt.trace;
+}
+
+ExecutionTrace executeMidlet(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host) {
+    std::shared_ptr<MidletSession> session = createMidletSession(classes, className, host);
+    return startMidletSession(*session);
+}
+
+ExecutionTrace renderMidletFrame(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    const JvmHost* host,
+    std::vector<uint16_t>& pixels,
+    int width,
+    int height) {
+    std::shared_ptr<MidletSession> session = createMidletSession(classes, className, host);
+    (void)startMidletSession(*session);
+    return renderMidletSession(*session, pixels, width, height);
 }
 
 } // namespace jvmpoc

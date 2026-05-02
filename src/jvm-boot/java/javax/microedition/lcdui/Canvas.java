@@ -4,6 +4,15 @@ public abstract class Canvas extends Displayable {
     public Canvas() {
     }
 
+    public void repaint() {
+    }
+
+    public void repaint(int x, int y, int width, int height) {
+    }
+
+    public void serviceRepaints() {
+    }
+
     public native int getWidth();
 
     public native int getHeight();
