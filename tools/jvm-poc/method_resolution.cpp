@@ -63,4 +63,22 @@ const MethodInfo* findMethodInHierarchy(
     return findMethodInHierarchy(classes, *startClass, name, descriptor, ownerOut);
 }
 
+bool isClassOrSubclassOf(
+    const std::vector<ClassFile>& classes,
+    const std::string& startClassName,
+    const std::string& ancestorClassName) {
+    std::string currentName = startClassName;
+    while (!currentName.empty()) {
+        if (currentName == ancestorClassName) {
+            return true;
+        }
+        const ClassFile* current = findClass(classes, currentName);
+        if (current == nullptr) {
+            return false;
+        }
+        currentName = current->superClass;
+    }
+    return false;
+}
+
 } // namespace jvmpoc

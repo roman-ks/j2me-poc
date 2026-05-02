@@ -16,6 +16,7 @@ class JvmHost;
 
 struct NativeCallContext {
     const JvmHost* host = nullptr;
+    const std::vector<ClassFile>* classes = nullptr;
     ExecutionTrace& trace;
     std::map<uint32_t, std::string>& strings;
     Value& displayRef;
@@ -24,6 +25,7 @@ struct NativeCallContext {
     int& graphicsWidth;
     int& graphicsHeight;
     uint16_t& graphicsColor;
+    std::string receiverClassName;
     std::function<void(std::string)> collectGarbage;
 };
 

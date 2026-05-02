@@ -450,6 +450,7 @@ std::optional<Value> executeMethod(
     auto makeNativeContext = [&]() {
         return NativeCallContext{
             rt.host,
+            &classes,
             rt.trace,
             rt.strings,
             rt.displayRef,
@@ -458,6 +459,7 @@ std::optional<Value> executeMethod(
             rt.graphicsWidth,
             rt.graphicsHeight,
             rt.graphicsColor,
+            {},
             [&](std::string when) {
                 collectGarbage(rt, std::move(when));
             },
@@ -740,6 +742,13 @@ std::optional<Value> executeMethod(
                 callArgs[0] = object;
 
                 NativeCallContext nativeCtx = makeNativeContext();
+                std::optional<uint32_t> nativeObjectId = objectId(object);
+                if (nativeObjectId.has_value()) {
+                    auto objectIt = rt.heap.find(*nativeObjectId);
+                    if (objectIt != rt.heap.end()) {
+                        nativeCtx.receiverClassName = objectIt->second.className;
+                    }
+                }
                 NativeCallResult nativeResult = handleNativeInstanceCall(
                     nativeCtx, label, static_cast<uint32_t>(pc), ref, callArgs);
                 if (nativeResult.handled) {

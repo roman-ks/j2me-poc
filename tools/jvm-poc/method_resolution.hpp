@@ -21,5 +21,9 @@ const MethodInfo* findMethodInHierarchy(
     const std::string& name,
     const std::string& descriptor,
     const ClassFile** ownerOut = nullptr);
+bool isClassOrSubclassOf(
+    const std::vector<ClassFile>& classes,
+    const std::string& startClassName,
+    const std::string& ancestorClassName);
 
 } // namespace jvmpoc
