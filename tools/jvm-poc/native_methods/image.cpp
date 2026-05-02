@@ -1,0 +1,76 @@
+#include "handlers.hpp"
+
+#include "helpers.hpp"
+
+namespace jvmpoc::native_methods {
+namespace {
+
+Value storeImage(NativeCallContext& ctx, port::Image image) {
+    uint32_t id = ctx.nextImageId++;
+    ctx.images[id] = std::move(image);
+    return Value::named("image#" + std::to_string(id));
+}
+
+} // namespace
+
+NativeCallResult handleImage(
+    NativeCallContext& ctx,
+    const std::string& methodLabel,
+    uint32_t pc,
+    const MethodRef& ref,
+    const std::vector<Value>& args) {
+    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+
+    if (ref.name == "createImage" && ref.descriptor == "(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;") {
+        std::string path = stringArg(ctx, args, 0);
+        port::Image image = port::Image::createImage(path);
+        Value imageRef = storeImage(ctx, image);
+        ctx.trace.imageLoads.push_back(ImageLoad{
+            methodLabel,
+            pc,
+            imageRef,
+            path,
+            image.width,
+            image.height,
+        });
+        return handledValue(imageRef);
+    }
+
+    if (ref.name == "createImage" && ref.descriptor == "(II)Ljavax/microedition/lcdui/Image;") {
+        int width = intArg(args, 0);
+        int height = intArg(args, 1);
+        port::Image image = port::Image::createImage(width, height);
+        Value imageRef = storeImage(ctx, image);
+        ctx.trace.imageLoads.push_back(ImageLoad{
+            methodLabel,
+            pc,
+            imageRef,
+            "<generated>",
+            image.width,
+            image.height,
+        });
+        return handledValue(imageRef);
+    }
+
+    std::optional<uint32_t> id = imageId(receiver);
+    auto imageIt = id.has_value() ? ctx.images.find(*id) : ctx.images.end();
+    if (ref.name == "getWidth" && ref.descriptor == "()I") {
+        return handledValue(Value::named(
+            id.has_value() && imageIt != ctx.images.end() ? std::to_string(imageIt->second.getWidth()) : "0"));
+    }
+
+    if (ref.name == "getHeight" && ref.descriptor == "()I") {
+        return handledValue(Value::named(
+            id.has_value() && imageIt != ctx.images.end() ? std::to_string(imageIt->second.getHeight()) : "0"));
+    }
+
+    if (ref.name == "getGraphics" && ref.descriptor == "()Ljavax/microedition/lcdui/Graphics;") {
+        return id.has_value()
+            ? handledValue(Value::named("graphics:image#" + std::to_string(*id)))
+            : handledValue(Value::named("graphics:<missing-image>"));
+    }
+
+    return NativeCallResult{};
+}
+
+} // namespace jvmpoc::native_methods

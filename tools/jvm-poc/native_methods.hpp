@@ -2,6 +2,7 @@
 
 #include "class_file.hpp"
 #include "interpreter.hpp"
+#include "j2me_port/Canvas.hpp"
 #include "value.hpp"
 
 #include <functional>
@@ -19,6 +20,8 @@ struct NativeCallContext {
     const std::vector<ClassFile>* classes = nullptr;
     ExecutionTrace& trace;
     std::map<uint32_t, std::string>& strings;
+    std::map<uint32_t, port::Image>& images;
+    uint32_t& nextImageId;
     Value& displayRef;
     Value& currentDisplayable;
     std::optional<std::reference_wrapper<std::vector<uint16_t>>> graphicsFramebuffer;

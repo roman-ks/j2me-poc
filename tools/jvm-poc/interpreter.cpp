@@ -156,6 +156,7 @@ struct IntArray {
 using Heap = std::map<uint32_t, HeapObject>;
 using IntArrayHeap = std::map<uint32_t, IntArray>;
 using StringHeap = std::map<uint32_t, std::string>;
+using ImageHeap = std::map<uint32_t, port::Image>;
 
 struct RuntimeFrame {
     std::string label;
@@ -168,10 +169,12 @@ struct Runtime {
     Heap heap;
     IntArrayHeap arrays;
     StringHeap strings;
+    ImageHeap images;
     std::map<std::string, uint32_t> internedStrings;
     uint32_t nextObjectId = 1;
     uint32_t nextArrayId = 1;
     uint32_t nextStringId = 1;
+    uint32_t nextImageId = 1;
     std::vector<uint32_t> freeObjectIds;
     std::vector<uint32_t> freeArrayIds;
     std::vector<uint32_t> freeStringIds;
@@ -454,6 +457,8 @@ std::optional<Value> executeMethod(
             &classes,
             rt.trace,
             rt.strings,
+            rt.images,
+            rt.nextImageId,
             rt.displayRef,
             rt.currentDisplayable,
             rt.graphicsFramebuffer,

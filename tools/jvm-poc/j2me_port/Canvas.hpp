@@ -51,6 +51,8 @@ private:
 
 class Image {
 public:
+    using Decoder = bool (*)(const std::vector<uint8_t>& encoded, Image& out);
+
     int width = 0;
     int height = 0;
     std::vector<uint16_t> pixels;
@@ -63,6 +65,7 @@ public:
 
     static Image createImage(const std::string& path);
     static Image createImage(int width, int height);
+    static void setDecoder(Decoder decoder);
 
     Canvas getGraphics();
 };

@@ -1,4 +1,6 @@
 #include "jvm_midlet_app.hpp"
+#include "j2me_port/J2MECompat.hpp"
+#include "sdl_image_decoder.hpp"
 
 #include <SDL.h>
 
@@ -103,7 +105,7 @@ void printUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " <midlet-class/name> <class-file> [class-file...]\n";
+    std::cerr << "usage: " << argv0 << " [--assets dir] <midlet-class/name> <class-file> [class-file...]\n";
 }
 
 } // namespace
@@ -120,6 +122,34 @@ int main(int argc, char** argv) {
     }
 
     try {
+        jvmpoc::installSdlImageDecoder();
+
+        std::string assetsDir;
+        int argIndex = 1;
+        while (argIndex < argc) {
+            std::string arg = argv[argIndex];
+            if (arg == "--assets") {
+                if (argIndex + 1 >= argc) {
+                    printUsage(argv[0]);
+                    SDL_Quit();
+                    return 2;
+                }
+                assetsDir = argv[argIndex + 1];
+                argIndex += 2;
+                continue;
+            }
+            break;
+        }
+        if (!assetsDir.empty()) {
+            port::setResourceRoot(assetsDir);
+        }
+
+        if (argc - argIndex < 2) {
+            printUsage(argv[0]);
+            SDL_Quit();
+            return 2;
+        }
+
         constexpr int width = 240;
         constexpr int height = 320;
         constexpr int scale = 2;
@@ -128,11 +158,11 @@ int main(int argc, char** argv) {
         jvmpoc::JvmMidletApp app(host);
 
         std::vector<std::string> classFiles;
-        for (int i = 2; i < argc; ++i) {
+        for (int i = argIndex + 1; i < argc; ++i) {
             classFiles.push_back(argv[i]);
         }
         app.loadClasses(classFiles);
-        const jvmpoc::ExecutionTrace& startTrace = app.start(argv[1]);
+        const jvmpoc::ExecutionTrace& startTrace = app.start(argv[argIndex]);
         printUnknownCalls(startTrace);
         (void)app.render();
 

@@ -223,6 +223,8 @@ public:
 
 void setResourceFs(esp_gallery::Fs* fs);
 esp_gallery::Fs* resourceFs();
+void setResourceRoot(const std::string& root);
+const std::string& resourceRoot();
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out);
 
 } // namespace port

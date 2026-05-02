@@ -7,7 +7,18 @@
 namespace jvmpoc::native_methods {
 namespace {
 
-std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx) {
+std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
+    std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
+    if (targetImage.has_value()) {
+        auto imageIt = ctx.images.find(*targetImage);
+        if (imageIt == ctx.images.end()) {
+            return std::nullopt;
+        }
+        port::Canvas canvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels);
+        canvas.setColor(ctx.graphicsColorRgb);
+        return canvas;
+    }
+
     if (!ctx.graphicsFramebuffer.has_value() || ctx.graphicsWidth <= 0 || ctx.graphicsHeight <= 0) {
         return std::nullopt;
     }
@@ -24,6 +35,8 @@ NativeCallResult handleGraphics(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
+    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+
     if (ref.name == "setColor" && ref.descriptor == "(III)V") {
         ctx.graphicsColorRgb = (intArg(args, 1) << 16) | (intArg(args, 2) << 8) | intArg(args, 3);
         ctx.trace.graphicsOps.push_back(GraphicsOp{
@@ -39,7 +52,7 @@ NativeCallResult handleGraphics(
         int y = intArg(args, 2);
         int width = intArg(args, 3);
         int height = intArg(args, 4);
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx);
+        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
         if (canvas.has_value()) {
             canvas->fillRect(x, y, width, height);
         }
@@ -57,7 +70,7 @@ NativeCallResult handleGraphics(
         int x = intArg(args, 2);
         int y = intArg(args, 3);
         int anchor = intArg(args, 4);
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx);
+        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
         if (canvas.has_value()) {
             canvas->drawString(text, x, y, anchor);
         }
@@ -65,6 +78,22 @@ NativeCallResult handleGraphics(
             methodLabel,
             pc,
             "drawString(\"" + text + "\"," + argText(args, 2) + "," +
+                argText(args, 3) + "," + argText(args, 4) + ")",
+        });
+        return handledVoid();
+    }
+
+    if (ref.name == "drawImage" && ref.descriptor == "(Ljavax/microedition/lcdui/Image;III)V") {
+        std::optional<uint32_t> image = imageId(args.size() > 1 ? args[1] : Value::named(""));
+        auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
+        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
+        if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
+            canvas->drawImage(imageIt->second, intArg(args, 2), intArg(args, 3), intArg(args, 4));
+        }
+        ctx.trace.graphicsOps.push_back(GraphicsOp{
+            methodLabel,
+            pc,
+            "drawImage(" + argText(args, 1) + "," + argText(args, 2) + "," +
                 argText(args, 3) + "," + argText(args, 4) + ")",
         });
         return handledVoid();

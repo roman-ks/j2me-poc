@@ -7,12 +7,12 @@ BUILD_DIR := build
 
 COMMON_SRCS := class_file.cpp bytecode.cpp frame.cpp interpreter.cpp jvm_midlet_app.cpp method_resolution.cpp \
 	native_methods/helpers.cpp native_methods/native_runtime.cpp native_methods/display.cpp \
-	native_methods/midlet.cpp native_methods/canvas.cpp native_methods/graphics.cpp \
+	native_methods/midlet.cpp native_methods/canvas.cpp native_methods/image.cpp native_methods/graphics.cpp \
 	native_methods/string.cpp native_methods/dispatch.cpp \
 	j2me_port/Canvas.cpp j2me_port/J2MECompat.cpp
 COMMON_OBJS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(COMMON_SRCS))
 APP_OBJS := $(BUILD_DIR)/main.o $(COMMON_OBJS)
-SDL_DEMO_OBJS := $(BUILD_DIR)/demo_sdl_main.o $(COMMON_OBJS)
+SDL_DEMO_OBJS := $(BUILD_DIR)/demo_sdl_main.o $(BUILD_DIR)/sdl_image_decoder.o $(COMMON_OBJS)
 TEST_OBJS := $(BUILD_DIR)/tests.o $(COMMON_OBJS)
 
 all: $(BUILD_DIR)/jvm-poc

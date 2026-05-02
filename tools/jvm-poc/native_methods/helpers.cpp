@@ -32,6 +32,14 @@ std::optional<uint32_t> stringId(const Value& value) {
     return parseHandle(value, "str#");
 }
 
+std::optional<uint32_t> imageId(const Value& value) {
+    return parseHandle(value, "image#");
+}
+
+std::optional<uint32_t> imageGraphicsId(const Value& value) {
+    return parseHandle(value, "graphics:image#");
+}
+
 std::string methodName(const MethodRef& ref) {
     return ref.className + "." + ref.name + ref.descriptor;
 }

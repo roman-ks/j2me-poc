@@ -20,6 +20,10 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleDisplay(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "javax/microedition/lcdui/Image") {
+        return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
+    }
+
     return NativeCallResult{};
 }
 
@@ -29,6 +33,8 @@ NativeCallResult handleNativeInstanceCall(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
+    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+
     if (ref.className == "javax/microedition/midlet/MIDlet") {
         return native_methods::handleMidlet(ctx, methodLabel, pc, ref, args);
     }
@@ -41,6 +47,10 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleGraphics(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "javax/microedition/lcdui/Image" || native_methods::imageId(receiver).has_value()) {
+        return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
+    }
+
     const bool receiverIsCanvas =
         ctx.classes != nullptr &&
         isClassOrSubclassOf(*ctx.classes, ctx.receiverClassName, "javax/microedition/lcdui/Canvas");
@@ -49,7 +59,6 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleCanvas(ctx, methodLabel, pc, ref, args);
     }
 
-    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
     if (ref.className == "java/lang/String" || native_methods::stringId(receiver).has_value()) {
         return native_methods::handleString(ctx, methodLabel, pc, ref, args);
     }

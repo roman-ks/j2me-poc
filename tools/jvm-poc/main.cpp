@@ -200,6 +200,15 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         }
     }
 
+    if (!trace.imageLoads.empty()) {
+        std::cout << "  images:\n";
+        for (const jvmpoc::ImageLoad& load : trace.imageLoads) {
+            std::cout << "    " << load.methodLabel << " pc=" << load.pc
+                      << " " << load.image.text << " = " << load.source
+                      << " (" << load.width << "x" << load.height << ")\n";
+        }
+    }
+
     if (!trace.unsupportedStringCalls.empty()) {
         std::cout << "  unsupported string calls:\n";
         for (const jvmpoc::UnsupportedStringCall& call : trace.unsupportedStringCalls) {
@@ -287,7 +296,8 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
     if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() &&
         trace.objectAllocs.empty() && trace.fieldWrites.empty() &&
         trace.arrayAllocs.empty() && trace.arrayWrites.empty() && trace.runtimePrints.empty() &&
-        trace.unsupportedStringCalls.empty() && trace.unknownMethodCalls.empty() && trace.gcReports.empty()) {
+        trace.unsupportedStringCalls.empty() && trace.unknownMethodCalls.empty() && trace.gcReports.empty() &&
+        trace.imageLoads.empty() && trace.graphicsOps.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
     if (trace.stepLimitHit) {

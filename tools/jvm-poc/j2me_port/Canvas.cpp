@@ -14,6 +14,8 @@ namespace port {
 
 namespace {
 
+Image::Decoder g_imageDecoder = nullptr;
+
 uint16_t rgbToRgb565(uint8_t r, uint8_t g, uint8_t b) {
     return static_cast<uint16_t>(((static_cast<uint16_t>(r) >> 3u) << 11u) |
                                  ((static_cast<uint16_t>(g) >> 2u) << 5u) |
@@ -67,6 +69,13 @@ Image Image::createImage(const std::string& path) {
     image.sourcePath = path;
 
     std::vector<uint8_t> encoded;
+    if (g_imageDecoder != nullptr && readResourceAll(path, encoded) && !encoded.empty()) {
+        if (g_imageDecoder(encoded, image)) {
+            image.sourcePath = path;
+            return image;
+        }
+    }
+
     const std::string binaryPath = path + ".b";
     if (readResourceAll(binaryPath, encoded) == false || encoded.size() < 5) {
         LOGF_W("Failed to load image resource: %s (binary path: %s)", path.c_str(), binaryPath.c_str());
@@ -111,6 +120,10 @@ Image Image::createImage(const std::string& path) {
     }
 
     return image;
+}
+
+void Image::setDecoder(Decoder decoder) {
+    g_imageDecoder = decoder;
 }
 
 Image Image::createImage(int width, int height) {

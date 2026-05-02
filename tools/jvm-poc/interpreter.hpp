@@ -111,6 +111,15 @@ struct GraphicsOp {
     std::string op;
 };
 
+struct ImageLoad {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value image;
+    std::string source;
+    int width = 0;
+    int height = 0;
+};
+
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
@@ -126,6 +135,7 @@ struct ExecutionTrace {
     std::vector<DisplaySetCurrent> displaySetCurrents;
     std::vector<CanvasSizeQuery> canvasSizeQueries;
     std::vector<GraphicsOp> graphicsOps;
+    std::vector<ImageLoad> imageLoads;
     bool stepLimitHit = false;
 };
 

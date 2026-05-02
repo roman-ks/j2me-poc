@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <string>
 #if defined(__linux__)
 #include <limits.h>
@@ -17,6 +18,17 @@ namespace port {
 namespace {
 esp_gallery::Fs* g_resourceFs = nullptr;
 std::string g_gameName = "default_game";
+std::string g_resourceRoot = FS_ROOT_PATH;
+
+std::string withTrailingSlash(std::string path) {
+    if (path.empty()) {
+        return "./";
+    }
+    if (path.back() != '/' && path.back() != '\\') {
+        path.push_back('/');
+    }
+    return path;
+}
 
 std::string resolveAssetPath(const std::string& rawPath) {
     if (rawPath.empty()) {
@@ -24,11 +36,12 @@ std::string resolveAssetPath(const std::string& rawPath) {
     }
 
     const std::string noSlash = (rawPath[0] == '/') ? rawPath.substr(1) : rawPath;
+    const std::string root = withTrailingSlash(g_resourceRoot);
     const std::array<std::string, 6> candidates = {
-        std::string(FS_ROOT_PATH) + "esp_gallery_data/" + g_gameName + "/" + noSlash,
-        std::string(FS_ROOT_PATH) + "esp_gallery_data/" + noSlash,
-        std::string(FS_ROOT_PATH) + noSlash,
-        std::string(FS_ROOT_PATH) + rawPath,
+        root + "esp_gallery_data/" + g_gameName + "/" + noSlash,
+        root + "esp_gallery_data/" + noSlash,
+        root + g_gameName + "/" + noSlash,
+        root + noSlash,
         noSlash,
         rawPath
     };
@@ -50,7 +63,12 @@ bool readFileAll(const std::string& path, std::vector<uint8_t>& out) {
     out.clear();
 
     if (g_resourceFs == nullptr) {
-        return false;
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            return false;
+        }
+        out.assign(std::istreambuf_iterator<char>(in), {});
+        return true;
     }
 
     auto file = g_resourceFs->open(path.c_str(), FILE_READ, false);
@@ -95,7 +113,7 @@ bool ensureDirTree(const std::string& dirPath) {
 }
 
 std::string recordStoreBaseDir() {
-    return std::string(FS_ROOT_PATH) + "esp_gallery_data/" + g_gameName + "/save";
+    return withTrailingSlash(g_resourceRoot) + "esp_gallery_data/" + g_gameName + "/save";
 }
 
 std::string sanitizeStoreName(const std::string& raw) {
@@ -122,6 +140,14 @@ void setResourceFs(esp_gallery::Fs* fs) {
 
 esp_gallery::Fs* resourceFs() {
     return g_resourceFs;
+}
+
+void setResourceRoot(const std::string& root) {
+    g_resourceRoot = withTrailingSlash(root);
+}
+
+const std::string& resourceRoot() {
+    return g_resourceRoot;
 }
 
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out) {
