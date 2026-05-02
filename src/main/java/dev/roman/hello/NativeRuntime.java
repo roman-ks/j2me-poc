@@ -1,4 +1,4 @@
-package dev.roman.j2mepoc;
+package dev.roman.hello;
 
 public final class NativeRuntime {
     private NativeRuntime() {

@@ -1,6 +1,6 @@
-package dev.roman.j2mepoc;
+package dev.roman.hello;
 
-public class HelloBranch {
+public class Branch {
     public static void main(String[] args) {
         int a = 5;
         int b = 10;

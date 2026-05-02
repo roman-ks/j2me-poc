@@ -41,6 +41,17 @@ const char* compareOpText(uint8_t op) {
     }
 }
 
+bool isNativeRuntimePrintInt(const MethodRef& ref) {
+    const std::string suffix = "/NativeRuntime";
+    bool classMatches = ref.className == "NativeRuntime";
+    if (ref.className.size() >= suffix.size()) {
+        classMatches = classMatches ||
+                       ref.className.compare(ref.className.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    return classMatches && ref.name == "printInt" && ref.descriptor == "(I)V";
+}
+
 } // namespace
 
 ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method) {
@@ -136,9 +147,7 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
             case 0xb8: {
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
-                if (ref.className == "dev/roman/j2mepoc/NativeRuntime" &&
-                    ref.name == "printInt" &&
-                    ref.descriptor == "(I)V") {
+                if (isNativeRuntimePrintInt(ref)) {
                     trace.runtimePrints.push_back(RuntimePrint{callPc, frame.pop()});
                 }
                 pc += 3;
