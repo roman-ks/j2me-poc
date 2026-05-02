@@ -99,6 +99,16 @@ std::vector<std::string> graphicsOps(const jvmpoc::ExecutionTrace& trace) {
     return ops;
 }
 
+std::vector<std::string> appendAll(
+    const std::vector<std::string>& first,
+    const std::vector<std::string>& second,
+    const std::vector<std::string>& third) {
+    std::vector<std::string> values = first;
+    values.insert(values.end(), second.begin(), second.end());
+    values.insert(values.end(), third.begin(), third.end());
+    return values;
+}
+
 std::vector<std::string> valueTexts(const std::vector<jvmpoc::Value>& values) {
     std::vector<std::string> texts;
     for (const jvmpoc::Value& value : values) {
@@ -174,18 +184,28 @@ bool runCase(const std::string& root, const TestCase& test) {
 
     jvmpoc::ExecutionTrace trace;
     jvmpoc::ExecutionTrace renderTrace;
+    jvmpoc::ExecutionTrace pressTrace;
+    jvmpoc::ExecutionTrace releaseTrace;
+    const bool inputMidletTest = test.name == "canvas key events";
     if (test.midlet) {
         TestHost host;
         jvmpoc::JvmMidletApp app(host);
         app.setClasses(classes);
         trace = app.start(test.mainClass);
         renderTrace = app.render();
-        if (host.presentCount != 1 || host.lastPresentWidth != host.screenWidth() ||
+        if (inputMidletTest) {
+            host.handlePress(-3);
+            pressTrace = app.render();
+            host.handleRelease(-3);
+            releaseTrace = app.render();
+        }
+        const int expectedPresentCount = inputMidletTest ? 3 : 1;
+        if (host.presentCount != expectedPresentCount || host.lastPresentWidth != host.screenWidth() ||
             host.lastPresentHeight != host.screenHeight()) {
             std::cout << "FAIL " << test.name << ": render did not present expected frame\n";
             return false;
         }
-        if (host.lastPixels.empty() || host.lastPixels[0] != 0xffff) {
+        if (!inputMidletTest && (host.lastPixels.empty() || host.lastPixels[0] != 0xffff)) {
             std::cout << "FAIL " << test.name << ": render did not fill white background\n";
             return false;
         }
@@ -193,7 +213,7 @@ bool runCase(const std::string& root, const TestCase& test) {
         for (uint16_t pixel : host.lastPixels) {
             hasBlackPixel = hasBlackPixel || pixel == 0x0000;
         }
-        if (!hasBlackPixel) {
+        if (!inputMidletTest && !hasBlackPixel) {
             std::cout << "FAIL " << test.name << ": render did not draw black foreground pixels\n";
             return false;
         }
@@ -201,7 +221,15 @@ bool runCase(const std::string& root, const TestCase& test) {
         trace = jvmpoc::executeStraightLine(classes, *mainClass, *main);
     }
     bool ok = true;
-    ok = expectList(test.name, "stdout", stdoutValues(trace), test.expectedStdout) && ok;
+    if (inputMidletTest) {
+        ok = expectList(
+                 test.name,
+                 "stdout",
+                 appendAll(stdoutValues(trace), stdoutValues(pressTrace), stdoutValues(releaseTrace)),
+                 test.expectedStdout) && ok;
+    } else {
+        ok = expectList(test.name, "stdout", stdoutValues(trace), test.expectedStdout) && ok;
+    }
     ok = expectList(test.name, "freed objects", lastFreedObjects(trace), test.expectedFreedObjects) && ok;
     ok = expectList(test.name, "freed arrays", lastFreedArrays(trace), test.expectedFreedArrays) && ok;
     ok = expectList(test.name, "freed strings", lastFreedStrings(trace), test.expectedFreedStrings) && ok;
@@ -306,6 +334,24 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+        },
+        TestCase{
+            "canvas key events",
+            "dev/roman/hello/InputMidlet",
+            {"dev/roman/hello/InputMidlet", "dev/roman/hello/InputCanvas"},
+            {"pressed:-3", "released:-3"},
+            {},
+            {},
+            {},
+            {},
+            {"display#1.setCurrent(obj#2)"},
+            {
+                "setColor(255,255,255)",
+                "fillRect(0,0,240,320)",
+                "setColor(0,0,0)",
+                "fillRect(1,1,1,1)",
+            },
+            true,
         },
         TestCase{
             "gc roots",

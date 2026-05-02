@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -115,6 +116,28 @@ void printUsage(const char* argv0) {
               << "       " << argv0 << " [--assets dir] <midlet-class/name> <class-file> [class-file...]\n";
 }
 
+std::optional<int> midpKeyCode(SDL_Keycode key) {
+    switch (key) {
+        case SDLK_UP: return -1;
+        case SDLK_DOWN: return -2;
+        case SDLK_LEFT: return -3;
+        case SDLK_RIGHT: return -4;
+        case SDLK_KP_0: return '0';
+        case SDLK_KP_1: return '1';
+        case SDLK_KP_2: return '2';
+        case SDLK_KP_3: return '3';
+        case SDLK_KP_4: return '4';
+        case SDLK_KP_5: return '5';
+        case SDLK_KP_6: return '6';
+        case SDLK_KP_7: return '7';
+        case SDLK_KP_8: return '8';
+        case SDLK_KP_9: return '9';
+        case SDLK_KP_PERIOD: return -6;
+        case SDLK_KP_ENTER: return -7;
+        default: return std::nullopt;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -208,6 +231,16 @@ int main(int argc, char** argv) {
                     running = false;
                 } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
                     running = false;
+                } else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
+                    std::optional<int> keyCode = midpKeyCode(event.key.keysym.sym);
+                    if (keyCode.has_value()) {
+                        host.handlePress(*keyCode);
+                    }
+                } else if (event.type == SDL_KEYUP) {
+                    std::optional<int> keyCode = midpKeyCode(event.key.keysym.sym);
+                    if (keyCode.has_value()) {
+                        host.handleRelease(*keyCode);
+                    }
                 }
             }
 

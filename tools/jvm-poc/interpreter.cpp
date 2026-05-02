@@ -1240,6 +1240,44 @@ ExecutionTrace startSession(MidletSession& session) {
     return rt.trace;
 }
 
+void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
+    Runtime& rt = session.runtime();
+
+    std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
+    if (!displayableId.has_value()) {
+        return;
+    }
+    auto displayableIt = rt.heap.find(*displayableId);
+    if (displayableIt == rt.heap.end()) {
+        return;
+    }
+
+    const std::vector<ClassFile>& classes = session.classes();
+    if (!isClassOrSubclassOf(classes, displayableIt->second.className, "javax/microedition/lcdui/Canvas")) {
+        return;
+    }
+
+    const char* methodName = event.type == HostKeyEventType::Press ? "keyPressed" : "keyReleased";
+    const ClassFile* owner = nullptr;
+    const MethodInfo* handler = findMethodInHierarchy(
+        classes,
+        displayableIt->second.className,
+        methodName,
+        "(I)V",
+        &owner);
+    if (owner == nullptr || handler == nullptr) {
+        return;
+    }
+
+    (void)executeMethod(
+        classes,
+        *owner,
+        *handler,
+        {rt.currentDisplayable, Value::named(std::to_string(event.keyCode))},
+        rt,
+        0);
+}
+
 ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixels, int width, int height) {
     Runtime& rt = session.runtime();
     resetRuntimeTrace(rt);
@@ -1249,6 +1287,12 @@ ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixe
 
     if (!session.started()) {
         return startSession(session);
+    }
+
+    if (rt.host != nullptr) {
+        for (const HostKeyEvent& event : rt.host->drainInputEvents()) {
+            dispatchCanvasKeyEvent(session, event);
+        }
     }
 
     const uint32_t now = rt.host != nullptr ? rt.host->millis() : 0;

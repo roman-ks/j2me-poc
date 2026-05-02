@@ -19,5 +19,11 @@ public abstract class Canvas extends Displayable {
 
     public native void setFullScreenMode(boolean mode);
 
+    protected void keyPressed(int keyCode) {
+    }
+
+    protected void keyReleased(int keyCode) {
+    }
+
     protected abstract void paint(Graphics g);
 }
