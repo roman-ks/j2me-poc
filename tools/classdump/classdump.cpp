@@ -1,6 +1,5 @@
 #include <cstdint>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -201,7 +200,7 @@ size_t fieldSlots(const std::string& desc) {
 }
 
 size_t argumentSlots(const MethodInfo& method) {
-    size_t slots = has(method.access, 0x0008) ? 0 : 1; // local 0 is this
+    size_t slots = has(method.access, 0x0008) ? 0 : 1;
     size_t pos = 0;
     if (method.descriptor.empty() || method.descriptor[pos++] != '(') {
         return slots;
@@ -217,8 +216,7 @@ void skipAttributes(Reader& r, const std::vector<CpEntry>& cp) {
     uint16_t count = r.u2();
     for (uint16_t i = 0; i < count; ++i) {
         (void)utf8(cp, r.u2());
-        uint32_t len = r.u4();
-        r.skip(len);
+        r.skip(r.u4());
     }
 }
 
@@ -241,41 +239,41 @@ MethodInfo readMethod(Reader& r, const std::vector<CpEntry>& cp) {
     for (uint16_t i = 0; i < attributesCount; ++i) {
         std::string attrName = utf8(cp, r.u2());
         uint32_t attrLen = r.u4();
-        if (attrName == "Code") {
-            std::vector<uint8_t> attrBytes = r.bytes(attrLen);
-            Reader code(attrBytes);
-            method.hasCode = true;
-            method.maxStack = code.u2();
-            method.maxLocals = code.u2();
-            method.codeLength = code.u4();
-            code.skip(method.codeLength);
-
-            uint16_t exceptionTableLength = code.u2();
-            code.skip(static_cast<size_t>(exceptionTableLength) * 8);
-
-            uint16_t codeAttributesCount = code.u2();
-            for (uint16_t j = 0; j < codeAttributesCount; ++j) {
-                std::string codeAttrName = utf8(cp, code.u2());
-                uint32_t codeAttrLen = code.u4();
-                if (codeAttrName == "LocalVariableTable") {
-                    std::vector<uint8_t> lvtBytes = code.bytes(codeAttrLen);
-                    Reader lvt(lvtBytes);
-                    uint16_t localCount = lvt.u2();
-                    for (uint16_t k = 0; k < localCount; ++k) {
-                        MethodInfo::LocalVariable local;
-                        local.startPc = lvt.u2();
-                        local.length = lvt.u2();
-                        local.name = utf8(cp, lvt.u2());
-                        local.descriptor = utf8(cp, lvt.u2());
-                        local.index = lvt.u2();
-                        method.locals.push_back(local);
-                    }
-                } else {
-                    code.skip(codeAttrLen);
-                }
-            }
-        } else {
+        if (attrName != "Code") {
             r.skip(attrLen);
+            continue;
+        }
+
+        Reader code(r.bytes(attrLen));
+        method.hasCode = true;
+        method.maxStack = code.u2();
+        method.maxLocals = code.u2();
+        method.codeLength = code.u4();
+        code.skip(method.codeLength);
+
+        uint16_t exceptionTableLength = code.u2();
+        code.skip(static_cast<size_t>(exceptionTableLength) * 8);
+
+        uint16_t codeAttributesCount = code.u2();
+        for (uint16_t j = 0; j < codeAttributesCount; ++j) {
+            std::string codeAttrName = utf8(cp, code.u2());
+            uint32_t codeAttrLen = code.u4();
+            if (codeAttrName != "LocalVariableTable") {
+                code.skip(codeAttrLen);
+                continue;
+            }
+
+            Reader lvt(code.bytes(codeAttrLen));
+            uint16_t localCount = lvt.u2();
+            for (uint16_t k = 0; k < localCount; ++k) {
+                MethodInfo::LocalVariable local;
+                local.startPc = lvt.u2();
+                local.length = lvt.u2();
+                local.name = utf8(cp, lvt.u2());
+                local.descriptor = utf8(cp, lvt.u2());
+                local.index = lvt.u2();
+                method.locals.push_back(local);
+            }
         }
     }
 
@@ -359,9 +357,8 @@ ClassFile parseClass(const std::string& path) {
     uint16_t attrCount = r.u2();
     for (uint16_t i = 0; i < attrCount; ++i) {
         std::string name = utf8(cls.cp, r.u2());
-        uint32_t len = r.u4();
         cls.attributes.push_back(name);
-        r.skip(len);
+        r.skip(r.u4());
     }
 
     return cls;
