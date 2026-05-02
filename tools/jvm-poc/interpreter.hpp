@@ -21,6 +21,15 @@ struct UnsupportedStringCall {
     Value receiver;
 };
 
+struct UnknownMethodCall {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    std::string methodName;
+    std::vector<Value> args;
+    bool nooped = false;
+    std::string result;
+};
+
 struct BranchTrace {
     std::string methodLabel;
     uint32_t pc = 0;
@@ -82,6 +91,7 @@ struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
     std::vector<UnsupportedStringCall> unsupportedStringCalls;
+    std::vector<UnknownMethodCall> unknownMethodCalls;
     std::vector<BranchTrace> branches;
     std::vector<StaticWrite> staticWrites;
     std::vector<ObjectAlloc> objectAllocs;
@@ -93,5 +103,6 @@ struct ExecutionTrace {
 };
 
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method);
+ExecutionTrace executeMidlet(const std::vector<ClassFile>& classes, const std::string& className);
 
 } // namespace jvmpoc

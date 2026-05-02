@@ -170,6 +170,10 @@ bool returnsValue(const std::string& descriptor) {
     return close != std::string::npos && close + 1 < descriptor.size() && descriptor[close + 1] != 'V';
 }
 
+std::string callName(const MethodRef& ref) {
+    return ref.className + "." + ref.name + ref.descriptor;
+}
+
 struct HeapObject {
     std::string className;
     std::map<std::string, Value> fields;
@@ -215,6 +219,43 @@ Value arrayRef(uint32_t id) {
 
 Value stringRef(uint32_t id) {
     return Value::named("str#" + std::to_string(id));
+}
+
+Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const std::string& className) {
+    uint32_t id = 0;
+    if (!rt.freeObjectIds.empty()) {
+        id = rt.freeObjectIds.back();
+        rt.freeObjectIds.pop_back();
+    } else {
+        id = rt.nextObjectId++;
+    }
+    rt.heap[id] = HeapObject{className, {}};
+    Value ref = objectRef(id);
+    rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
+    return ref;
+}
+
+std::optional<Value> recordUnknownCall(
+    Runtime& rt,
+    const std::string& label,
+    uint32_t pc,
+    const MethodRef& ref,
+    const std::vector<Value>& args) {
+    std::optional<Value> result;
+    if (returnsValue(ref.descriptor)) {
+        result = Value::named("<call:" + callName(ref) + ">");
+    }
+
+    bool nooped = ref.name == "<init>" || !returnsValue(ref.descriptor);
+    rt.trace.unknownMethodCalls.push_back(UnknownMethodCall{
+        label,
+        pc,
+        callName(ref),
+        args,
+        nooped,
+        result.has_value() ? result->text : "",
+    });
+    return result;
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
@@ -692,8 +733,11 @@ std::optional<Value> executeMethod(
                         if (result.has_value()) {
                             frame.push(*result);
                         }
-                    } else if (returnsValue(ref.descriptor)) {
-                        frame.push(Value::named("<call:" + ref.className + "." + ref.name + ref.descriptor + ">"));
+                    } else {
+                        std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
+                        if (result.has_value()) {
+                            frame.push(*result);
+                        }
                     }
                 }
                 pc += 3;
@@ -755,8 +799,11 @@ std::optional<Value> executeMethod(
                     if (result.has_value()) {
                         frame.push(*result);
                     }
-                } else if (returnsValue(ref.descriptor)) {
-                    frame.push(Value::named("<call:" + ref.className + "." + ref.name + ref.descriptor + ">"));
+                } else {
+                    std::optional<Value> result = recordUnknownCall(rt, label, static_cast<uint32_t>(pc), ref, callArgs);
+                    if (result.has_value()) {
+                        frame.push(*result);
+                    }
                 }
                 pc += 3;
                 break;
@@ -766,17 +813,7 @@ std::optional<Value> executeMethod(
             {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(method.code, pc + 1));
-                uint32_t id = 0;
-                if (!rt.freeObjectIds.empty()) {
-                    id = rt.freeObjectIds.back();
-                    rt.freeObjectIds.pop_back();
-                } else {
-                    id = rt.nextObjectId++;
-                }
-                rt.heap[id] = HeapObject{className, {}};
-                Value ref = objectRef(id);
-                rt.trace.objectAllocs.push_back(ObjectAlloc{label, allocPc, ref, className});
-                frame.push(ref);
+                frame.push(allocateObject(rt, label, allocPc, className));
                 pc += 3;
                 break;
             }
@@ -842,6 +879,38 @@ ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const 
     Runtime rt;
     rt.callStack.reserve(kMaxCallDepth + 1);
     (void)executeMethod(classes, cls, method, {}, rt, 0);
+    return rt.trace;
+}
+
+ExecutionTrace executeMidlet(const std::vector<ClassFile>& classes, const std::string& className) {
+    Runtime rt;
+    rt.callStack.reserve(kMaxCallDepth + 1);
+
+    const ClassFile* midletClass = findClass(classes, className);
+    if (midletClass == nullptr) {
+        MethodRef missing{className, "<load>", "()V"};
+        (void)recordUnknownCall(rt, "<midlet>", 0, missing, {});
+        return rt.trace;
+    }
+
+    Value midlet = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
+    const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
+    if (init != nullptr) {
+        (void)executeMethod(classes, *midletClass, *init, {midlet}, rt, 0);
+    } else {
+        MethodRef ref{midletClass->thisClass, "<init>", "()V"};
+        (void)recordUnknownCall(rt, "<midlet>", 0, ref, {midlet});
+    }
+
+    const ClassFile* startOwner = nullptr;
+    const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
+    if (startOwner != nullptr && startApp != nullptr) {
+        (void)executeMethod(classes, *startOwner, *startApp, {midlet}, rt, 0);
+    } else {
+        MethodRef ref{midletClass->thisClass, "startApp", "()V"};
+        (void)recordUnknownCall(rt, "<midlet>", 0, ref, {midlet});
+    }
+
     return rt.trace;
 }
 

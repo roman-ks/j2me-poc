@@ -16,6 +16,8 @@ struct TestCase {
     std::vector<std::string> expectedFreedObjects;
     std::vector<std::string> expectedFreedArrays;
     std::vector<std::string> expectedFreedStrings;
+    std::vector<std::string> expectedUnknownCalls;
+    bool midlet = false;
 };
 
 std::string classPath(const std::string& root, const std::string& className) {
@@ -47,6 +49,14 @@ std::vector<std::string> stdoutValues(const jvmpoc::ExecutionTrace& trace) {
         values.push_back(print.value.text);
     }
     return values;
+}
+
+std::vector<std::string> unknownCalls(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> calls;
+    for (const jvmpoc::UnknownMethodCall& call : trace.unknownMethodCalls) {
+        calls.push_back(call.methodName);
+    }
+    return calls;
 }
 
 std::vector<std::string> valueTexts(const std::vector<jvmpoc::Value>& values) {
@@ -114,18 +124,21 @@ bool runCase(const std::string& root, const TestCase& test) {
         return false;
     }
 
-    const jvmpoc::MethodInfo* main = findMain(*mainClass);
-    if (main == nullptr) {
+    const jvmpoc::MethodInfo* main = test.midlet ? nullptr : findMain(*mainClass);
+    if (!test.midlet && main == nullptr) {
         std::cout << "FAIL " << test.name << ": main method not found\n";
         return false;
     }
 
-    jvmpoc::ExecutionTrace trace = jvmpoc::executeStraightLine(classes, *mainClass, *main);
+    jvmpoc::ExecutionTrace trace = test.midlet
+        ? jvmpoc::executeMidlet(classes, test.mainClass)
+        : jvmpoc::executeStraightLine(classes, *mainClass, *main);
     bool ok = true;
     ok = expectList(test.name, "stdout", stdoutValues(trace), test.expectedStdout) && ok;
     ok = expectList(test.name, "freed objects", lastFreedObjects(trace), test.expectedFreedObjects) && ok;
     ok = expectList(test.name, "freed arrays", lastFreedArrays(trace), test.expectedFreedArrays) && ok;
     ok = expectList(test.name, "freed strings", lastFreedStrings(trace), test.expectedFreedStrings) && ok;
+    ok = expectList(test.name, "unknown calls", unknownCalls(trace), test.expectedUnknownCalls) && ok;
 
     if (ok) {
         std::cout << "PASS " << test.name << "\n";
@@ -146,6 +159,7 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+            {},
         },
         TestCase{
             "strings",
@@ -155,12 +169,14 @@ int main(int argc, char** argv) {
             {},
             {},
             {"str#2"},
+            {},
         },
         TestCase{
             "string length",
             "dev/roman/hello/StringLength",
             {"dev/roman/hello/StringLength"},
             {"3", "5"},
+            {},
             {},
             {},
             {},
@@ -173,6 +189,11 @@ int main(int argc, char** argv) {
             {"obj#2"},
             {"arr#1"},
             {},
+            {
+                "java/lang/Object.<init>()V",
+                "java/lang/Object.<init>()V",
+                "java/lang/Object.<init>()V",
+            },
         },
         TestCase{
             "inherited method lookup",
@@ -186,6 +207,26 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+            {"java/lang/Object.<init>()V"},
+        },
+        TestCase{
+            "midlet lifecycle unknowns",
+            "dev/roman/j2mepoc/HelloMidletMini",
+            {
+                "dev/roman/j2mepoc/HelloMidletMini",
+                "dev/roman/j2mepoc/HelloMidletMini$MyCanvas",
+            },
+            {},
+            {},
+            {},
+            {},
+            {
+                "javax/microedition/midlet/MIDlet.<init>()V",
+                "javax/microedition/lcdui/Canvas.<init>()V",
+                "javax/microedition/lcdui/Display.getDisplay(Ljavax/microedition/midlet/MIDlet;)Ljavax/microedition/lcdui/Display;",
+                "javax/microedition/lcdui/Display.setCurrent(Ljavax/microedition/lcdui/Displayable;)V",
+            },
+            true,
         },
     };
 

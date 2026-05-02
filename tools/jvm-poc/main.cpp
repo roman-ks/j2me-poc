@@ -100,10 +100,7 @@ const jvmpoc::MethodInfo* findMain(const jvmpoc::ClassFile& cls) {
     return nullptr;
 }
 
-void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& method) {
-    std::cout << "runtime " << cls.thisClass << "." << method.name << method.descriptor << "\n";
-    jvmpoc::ExecutionTrace trace = jvmpoc::executeStraightLine(classes, cls, method);
-
+void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
     if (!trace.localWrites.empty()) {
         std::cout << "  local writes:\n";
         for (const jvmpoc::LocalWrite& write : trace.localWrites) {
@@ -184,6 +181,21 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
+    if (!trace.unknownMethodCalls.empty()) {
+        std::cout << "  unknown method calls:\n";
+        for (const jvmpoc::UnknownMethodCall& call : trace.unknownMethodCalls) {
+            std::cout << "    " << call.methodLabel << " pc=" << call.pc
+                      << " " << call.methodName;
+            if (call.nooped) {
+                std::cout << " noop";
+            }
+            if (!call.result.empty()) {
+                std::cout << " -> " << call.result;
+            }
+            std::cout << "\n";
+        }
+    }
+
     if (!trace.gcReports.empty()) {
         std::cout << "  gc reports:\n";
         for (const jvmpoc::GcReport& report : trace.gcReports) {
@@ -248,12 +260,22 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
     if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() &&
         trace.objectAllocs.empty() && trace.fieldWrites.empty() &&
         trace.arrayAllocs.empty() && trace.arrayWrites.empty() && trace.runtimePrints.empty() &&
-        trace.unsupportedStringCalls.empty() && trace.gcReports.empty()) {
+        trace.unsupportedStringCalls.empty() && trace.unknownMethodCalls.empty() && trace.gcReports.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
     if (trace.stepLimitHit) {
         std::cout << "  stopped: execution step limit hit\n";
     }
+}
+
+void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& method) {
+    std::cout << "runtime " << cls.thisClass << "." << method.name << method.descriptor << "\n";
+    printTraceBody(jvmpoc::executeStraightLine(classes, cls, method));
+}
+
+void printMidletTrace(const std::vector<jvmpoc::ClassFile>& classes, const std::string& className) {
+    std::cout << "runtime midlet " << className << "\n";
+    printTraceBody(jvmpoc::executeMidlet(classes, className));
 }
 
 void printStdoutOnly(const jvmpoc::ExecutionTrace& trace) {
@@ -263,7 +285,7 @@ void printStdoutOnly(const jvmpoc::ExecutionTrace& trace) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [--metadata] [--stdout-only] <class-file> [class-file...]\n";
+    std::cerr << "usage: " << argv0 << " [--metadata] [--stdout-only] [--midlet class/name] <class-file> [class-file...]\n";
 }
 
 } // namespace
@@ -277,6 +299,7 @@ int main(int argc, char** argv) {
     try {
         bool showMetadata = false;
         bool stdoutOnly = false;
+        std::string midletClass;
         std::vector<std::string> paths;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -284,6 +307,12 @@ int main(int argc, char** argv) {
                 showMetadata = true;
             } else if (arg == "--stdout-only") {
                 stdoutOnly = true;
+            } else if (arg == "--midlet") {
+                if (i + 1 >= argc) {
+                    printUsage(argv[0]);
+                    return 2;
+                }
+                midletClass = argv[++i];
             } else if (arg == "--help" || arg == "-h") {
                 printUsage(argv[0]);
                 return 0;
@@ -312,23 +341,36 @@ int main(int argc, char** argv) {
         }
 
         bool ran = false;
-        for (const jvmpoc::ClassFile& cls : classes) {
-            const jvmpoc::MethodInfo* mainMethod = findMain(cls);
-            if (mainMethod == nullptr) {
-                continue;
-            }
+        if (!midletClass.empty()) {
             if (stdoutOnly) {
-                printStdoutOnly(jvmpoc::executeStraightLine(classes, cls, *mainMethod));
+                printStdoutOnly(jvmpoc::executeMidlet(classes, midletClass));
             } else {
-                if (showMetadata || ran) {
+                if (showMetadata) {
                     std::cout << "\n";
                 }
-                if (!ran) {
-                    std::cout << "runtime\n";
-                }
-                printRuntimeTrace(classes, cls, *mainMethod);
+                std::cout << "runtime\n";
+                printMidletTrace(classes, midletClass);
             }
             ran = true;
+        } else {
+            for (const jvmpoc::ClassFile& cls : classes) {
+                const jvmpoc::MethodInfo* mainMethod = findMain(cls);
+                if (mainMethod == nullptr) {
+                    continue;
+                }
+                if (stdoutOnly) {
+                    printStdoutOnly(jvmpoc::executeStraightLine(classes, cls, *mainMethod));
+                } else {
+                    if (showMetadata || ran) {
+                        std::cout << "\n";
+                    }
+                    if (!ran) {
+                        std::cout << "runtime\n";
+                    }
+                    printRuntimeTrace(classes, cls, *mainMethod);
+                }
+                ran = true;
+            }
         }
 
         if (!ran && !stdoutOnly) {
