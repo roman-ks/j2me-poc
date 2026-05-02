@@ -1,5 +1,6 @@
 #include "class_file.hpp"
 #include "interpreter.hpp"
+#include "jvm_midlet_app.hpp"
 
 #include <exception>
 #include <iostream>
@@ -275,7 +276,10 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
 
 void printMidletTrace(const std::vector<jvmpoc::ClassFile>& classes, const std::string& className) {
     std::cout << "runtime midlet " << className << "\n";
-    printTraceBody(jvmpoc::executeMidlet(classes, className));
+    jvmpoc::NullJvmHost host;
+    jvmpoc::JvmMidletApp app(host);
+    app.setClasses(classes);
+    printTraceBody(app.start(className));
 }
 
 void printStdoutOnly(const jvmpoc::ExecutionTrace& trace) {
@@ -343,7 +347,10 @@ int main(int argc, char** argv) {
         bool ran = false;
         if (!midletClass.empty()) {
             if (stdoutOnly) {
-                printStdoutOnly(jvmpoc::executeMidlet(classes, midletClass));
+                jvmpoc::NullJvmHost host;
+                jvmpoc::JvmMidletApp app(host);
+                app.setClasses(classes);
+                printStdoutOnly(app.start(midletClass));
             } else {
                 if (showMetadata) {
                     std::cout << "\n";

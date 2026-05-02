@@ -1,5 +1,6 @@
 #include "class_file.hpp"
 #include "interpreter.hpp"
+#include "jvm_midlet_app.hpp"
 
 #include <exception>
 #include <iostream>
@@ -18,6 +19,22 @@ struct TestCase {
     std::vector<std::string> expectedFreedStrings;
     std::vector<std::string> expectedUnknownCalls;
     bool midlet = false;
+};
+
+class TestHost final : public jvmpoc::JvmHost {
+public:
+    int screenWidth() const override { return 240; }
+    int screenHeight() const override { return 320; }
+    uint32_t millis() const override { return 123; }
+    void present(const uint16_t* /*pixels*/, int width, int height) override {
+        lastPresentWidth = width;
+        lastPresentHeight = height;
+        ++presentCount;
+    }
+
+    int lastPresentWidth = 0;
+    int lastPresentHeight = 0;
+    int presentCount = 0;
 };
 
 std::string classPath(const std::string& root, const std::string& className) {
@@ -130,9 +147,15 @@ bool runCase(const std::string& root, const TestCase& test) {
         return false;
     }
 
-    jvmpoc::ExecutionTrace trace = test.midlet
-        ? jvmpoc::executeMidlet(classes, test.mainClass)
-        : jvmpoc::executeStraightLine(classes, *mainClass, *main);
+    jvmpoc::ExecutionTrace trace;
+    if (test.midlet) {
+        TestHost host;
+        jvmpoc::JvmMidletApp app(host);
+        app.setClasses(classes);
+        trace = app.start(test.mainClass);
+    } else {
+        trace = jvmpoc::executeStraightLine(classes, *mainClass, *main);
+    }
     bool ok = true;
     ok = expectList(test.name, "stdout", stdoutValues(trace), test.expectedStdout) && ok;
     ok = expectList(test.name, "freed objects", lastFreedObjects(trace), test.expectedFreedObjects) && ok;
