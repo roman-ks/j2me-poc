@@ -46,11 +46,5 @@ NativeCallResult handleString(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
-NativeCallResult handleStringBuffer(
-    NativeCallContext& ctx,
-    const std::string& methodLabel,
-    uint32_t pc,
-    const MethodRef& ref,
-    const std::vector<Value>& args);
 
 } // namespace jvmpoc::native_methods

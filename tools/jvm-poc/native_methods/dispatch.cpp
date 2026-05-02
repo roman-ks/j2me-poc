@@ -24,10 +24,6 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
     }
 
-    if (ref.className == "java/lang/StringBuffer") {
-        return native_methods::handleStringBuffer(ctx, methodLabel, pc, ref, args);
-    }
-
     return NativeCallResult{};
 }
 
