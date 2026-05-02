@@ -25,6 +25,24 @@ public final class String {
         init(value, offset, count);
     }
 
+    public String(byte[] value) {
+        this(value, 0, value.length);
+    }
+
+    public String(byte[] value, int offset, int count) {
+        char[] chars = new char[count];
+        int i = 0;
+        while (i < count) {
+            int b = value[offset + i];
+            if (b < 0) {
+                b += 256;
+            }
+            chars[i] = (char) b;
+            i++;
+        }
+        init(chars, 0, count);
+    }
+
     public static String valueOf(int value) {
         return new StringBuffer().append(value).toString();
     }
@@ -38,6 +56,28 @@ public final class String {
         char[] chars = new char[length];
         getChars(0, length, chars, 0);
         return chars;
+    }
+
+    public String substring(int beginIndex) {
+        return substring(beginIndex, length());
+    }
+
+    public String substring(int beginIndex, int endIndex) {
+        int stringLength = length();
+        if (beginIndex < 0) {
+            beginIndex = 0;
+        }
+        if (endIndex < beginIndex) {
+            endIndex = beginIndex;
+        }
+        if (endIndex > stringLength) {
+            endIndex = stringLength;
+        }
+
+        int count = endIndex - beginIndex;
+        char[] chars = new char[count];
+        getChars(beginIndex, endIndex, chars, 0);
+        return new String(chars);
     }
 
     public native int length();
