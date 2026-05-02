@@ -49,6 +49,30 @@ bool compareInts(int lhs, int rhs, uint8_t op) {
     }
 }
 
+bool compareIntWithZero(int value, uint8_t op) {
+    switch (op) {
+        case 0x99: return value == 0;
+        case 0x9a: return value != 0;
+        case 0x9b: return value < 0;
+        case 0x9c: return value >= 0;
+        case 0x9d: return value > 0;
+        case 0x9e: return value <= 0;
+        default: return false;
+    }
+}
+
+const char* compareZeroOpText(uint8_t op) {
+    switch (op) {
+        case 0x99: return "==";
+        case 0x9a: return "!=";
+        case 0x9b: return "<";
+        case 0x9c: return ">=";
+        case 0x9d: return ">";
+        case 0x9e: return "<=";
+        default: return "?";
+    }
+}
+
 const char* compareOpText(uint8_t op) {
     switch (op) {
         case 0x9f: return "==";
@@ -147,6 +171,30 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                 const char* opText = op == 0x60 ? "+" : op == 0x64 ? "-" : op == 0x68 ? "*" : "/";
                 frame.push(intBinaryOp(lhs, rhs, opText, op));
                 ++pc;
+                break;
+            }
+
+            case 0x99:
+            case 0x9a:
+            case 0x9b:
+            case 0x9c:
+            case 0x9d:
+            case 0x9e: {
+                uint32_t branchPc = static_cast<uint32_t>(pc);
+                int16_t offset = codeS2(method.code, pc + 1);
+                uint32_t target = branchTarget(pc, offset);
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                bool known = parsed.has_value();
+                bool taken = known && compareIntWithZero(*parsed, op);
+                trace.branches.push_back(BranchTrace{
+                    branchPc,
+                    compareText(value, compareZeroOpText(op), Value::named("0")),
+                    known,
+                    taken,
+                    target,
+                });
+                pc = taken ? target : pc + 3;
                 break;
             }
 
