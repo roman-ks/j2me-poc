@@ -25,6 +25,8 @@ public:
     Value local(uint16_t index) const;
     void push(Value value);
     Value pop();
+    const std::vector<Value>& locals() const { return locals_; }
+    const std::vector<Value>& stack() const { return stack_; }
 
 private:
     std::vector<Value> locals_;

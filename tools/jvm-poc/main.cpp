@@ -175,9 +175,41 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
+    if (!trace.gcReports.empty()) {
+        std::cout << "  gc reports:\n";
+        for (const jvmpoc::GcReport& report : trace.gcReports) {
+            std::cout << "    " << report.when << "\n";
+            if (!report.roots.empty()) {
+                std::cout << "      roots:";
+                for (const std::string& root : report.roots) {
+                    std::cout << " " << root;
+                }
+                std::cout << "\n";
+            }
+            if (!report.unreachableObjects.empty()) {
+                std::cout << "      unreachable objects:";
+                for (const jvmpoc::Value& value : report.unreachableObjects) {
+                    std::cout << " " << value.text;
+                }
+                std::cout << "\n";
+            }
+            if (!report.unreachableArrays.empty()) {
+                std::cout << "      unreachable arrays:";
+                for (const jvmpoc::Value& value : report.unreachableArrays) {
+                    std::cout << " " << value.text;
+                }
+                std::cout << "\n";
+            }
+            if (report.roots.empty() && report.unreachableObjects.empty() && report.unreachableArrays.empty()) {
+                std::cout << "      <empty heap>\n";
+            }
+        }
+    }
+
     if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() &&
         trace.objectAllocs.empty() && trace.fieldWrites.empty() &&
-        trace.arrayAllocs.empty() && trace.arrayWrites.empty() && trace.runtimePrints.empty()) {
+        trace.arrayAllocs.empty() && trace.arrayWrites.empty() && trace.runtimePrints.empty() &&
+        trace.gcReports.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
     if (trace.stepLimitHit) {

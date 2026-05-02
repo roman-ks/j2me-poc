@@ -3,6 +3,7 @@
 #include "class_file.hpp"
 #include "frame.hpp"
 
+#include <string>
 #include <vector>
 
 namespace jvmpoc {
@@ -59,6 +60,13 @@ struct ArrayWrite {
     Value value;
 };
 
+struct GcReport {
+    std::string when;
+    std::vector<std::string> roots;
+    std::vector<Value> unreachableObjects;
+    std::vector<Value> unreachableArrays;
+};
+
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
@@ -68,6 +76,7 @@ struct ExecutionTrace {
     std::vector<FieldWrite> fieldWrites;
     std::vector<ArrayAlloc> arrayAllocs;
     std::vector<ArrayWrite> arrayWrites;
+    std::vector<GcReport> gcReports;
     bool stepLimitHit = false;
 };
 

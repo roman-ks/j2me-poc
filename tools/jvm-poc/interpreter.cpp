@@ -6,7 +6,9 @@
 #include <cstdlib>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jvmpoc {
@@ -175,6 +177,22 @@ struct IntArray {
 using Heap = std::map<uint32_t, HeapObject>;
 using IntArrayHeap = std::map<uint32_t, IntArray>;
 
+struct RuntimeFrame {
+    std::string label;
+    Frame frame;
+};
+
+struct Runtime {
+    std::map<std::string, Value> staticFields;
+    Heap heap;
+    IntArrayHeap arrays;
+    uint32_t nextObjectId = 1;
+    uint32_t nextArrayId = 1;
+    std::vector<RuntimeFrame> callStack;
+    ExecutionTrace trace;
+    size_t steps = 0;
+};
+
 Value objectRef(uint32_t id) {
     return Value::named("obj#" + std::to_string(id));
 }
@@ -203,25 +221,119 @@ std::optional<uint32_t> arrayId(const Value& value) {
     return parseHandle(value, "arr#");
 }
 
+bool isReference(const Value& value) {
+    return objectId(value).has_value() || arrayId(value).has_value();
+}
+
+void markValue(
+    const Value& value,
+    const Runtime& rt,
+    std::set<uint32_t>& markedObjects,
+    std::set<uint32_t>& markedArrays) {
+    std::optional<uint32_t> obj = objectId(value);
+    if (obj.has_value()) {
+        if (!markedObjects.insert(*obj).second) {
+            return;
+        }
+        auto objectIt = rt.heap.find(*obj);
+        if (objectIt == rt.heap.end()) {
+            return;
+        }
+        for (const auto& field : objectIt->second.fields) {
+            markValue(field.second, rt, markedObjects, markedArrays);
+        }
+        return;
+    }
+
+    std::optional<uint32_t> arr = arrayId(value);
+    if (arr.has_value()) {
+        if (!markedArrays.insert(*arr).second) {
+            return;
+        }
+        auto arrayIt = rt.arrays.find(*arr);
+        if (arrayIt == rt.arrays.end()) {
+            return;
+        }
+        for (const Value& element : arrayIt->second.values) {
+            markValue(element, rt, markedObjects, markedArrays);
+        }
+    }
+}
+
+void addRoot(
+    GcReport& report,
+    const std::string& name,
+    const Value& value,
+    const Runtime& rt,
+    std::set<uint32_t>& markedObjects,
+    std::set<uint32_t>& markedArrays) {
+    if (!isReference(value)) {
+        return;
+    }
+    report.roots.push_back(name + "=" + value.text);
+    markValue(value, rt, markedObjects, markedArrays);
+}
+
+void reportGc(Runtime& rt, std::string when, const std::optional<Value>& returnValue) {
+    GcReport report;
+    report.when = std::move(when);
+
+    std::set<uint32_t> markedObjects;
+    std::set<uint32_t> markedArrays;
+    for (const auto& field : rt.staticFields) {
+        addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays);
+    }
+    for (const RuntimeFrame& runtimeFrame : rt.callStack) {
+        const std::vector<Value>& locals = runtimeFrame.frame.locals();
+        for (size_t i = 0; i < locals.size(); ++i) {
+            addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]",
+                    locals[i], rt, markedObjects, markedArrays);
+        }
+
+        const std::vector<Value>& stack = runtimeFrame.frame.stack();
+        for (size_t i = 0; i < stack.size(); ++i) {
+            addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]",
+                    stack[i], rt, markedObjects, markedArrays);
+        }
+    }
+    if (returnValue.has_value()) {
+        addRoot(report, "return", *returnValue, rt, markedObjects, markedArrays);
+    }
+
+    for (const auto& object : rt.heap) {
+        if (markedObjects.find(object.first) == markedObjects.end()) {
+            report.unreachableObjects.push_back(objectRef(object.first));
+        }
+    }
+    for (const auto& array : rt.arrays) {
+        if (markedArrays.find(array.first) == markedArrays.end()) {
+            report.unreachableArrays.push_back(arrayRef(array.first));
+        }
+    }
+
+    rt.trace.gcReports.push_back(report);
+}
+
 std::optional<Value> executeMethod(
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
     const MethodInfo& method,
     const std::vector<Value>& args,
-    std::map<std::string, Value>& staticFields,
-    Heap& heap,
-    IntArrayHeap& arrays,
-    uint32_t& nextObjectId,
-    uint32_t& nextArrayId,
-    ExecutionTrace& trace,
-    size_t& steps,
+    Runtime& rt,
     size_t depth) {
     if (depth > kMaxCallDepth) {
         return Value::named("<call-depth-limit>");
     }
 
-    Frame frame(method.maxLocals);
     const std::string label = methodLabel(cls, method);
+    rt.callStack.push_back(RuntimeFrame{label, Frame(method.maxLocals)});
+    Frame& frame = rt.callStack.back().frame;
+
+    auto finish = [&](std::optional<Value> result) -> std::optional<Value> {
+        rt.callStack.pop_back();
+        reportGc(rt, "after return " + label, result);
+        return result;
+    };
 
     if (args.empty()) {
         for (size_t i = 0; i < argumentSlots(method) && i < method.maxLocals; ++i) {
@@ -235,7 +347,7 @@ std::optional<Value> executeMethod(
     }
 
     auto recordLocal = [&](uint16_t index, uint32_t pc, const Value& value, const std::string& reason) {
-        trace.localWrites.push_back(LocalWrite{label, pc, index, localNameAt(method, index, pc), value, reason});
+        rt.trace.localWrites.push_back(LocalWrite{label, pc, index, localNameAt(method, index, pc), value, reason});
     };
 
     auto store = [&](uint16_t index, uint32_t pc) {
@@ -246,9 +358,9 @@ std::optional<Value> executeMethod(
 
     size_t pc = 0;
     while (pc < method.code.size()) {
-        if (++steps > kMaxSteps) {
-            trace.stepLimitHit = true;
-            return std::nullopt;
+        if (++rt.steps > kMaxSteps) {
+            rt.trace.stepLimitHit = true;
+            return finish(std::nullopt);
         }
 
         uint8_t op = method.code[pc];
@@ -281,8 +393,8 @@ std::optional<Value> executeMethod(
                 std::optional<uint32_t> id = arrayId(arrayValue);
                 std::optional<int> index = parseIntValue(indexValue);
                 if (id.has_value() && index.has_value()) {
-                    auto arrayIt = arrays.find(*id);
-                    if (arrayIt != arrays.end() && *index >= 0 &&
+                    auto arrayIt = rt.arrays.find(*id);
+                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
                         static_cast<size_t>(*index) < arrayIt->second.values.size()) {
                         loaded = arrayIt->second.values[static_cast<size_t>(*index)];
                     }
@@ -311,13 +423,13 @@ std::optional<Value> executeMethod(
                 std::optional<uint32_t> id = arrayId(arrayValue);
                 std::optional<int> index = parseIntValue(indexValue);
                 if (id.has_value() && index.has_value()) {
-                    auto arrayIt = arrays.find(*id);
-                    if (arrayIt != arrays.end() && *index >= 0 &&
+                    auto arrayIt = rt.arrays.find(*id);
+                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
                         static_cast<size_t>(*index) < arrayIt->second.values.size()) {
                         arrayIt->second.values[static_cast<size_t>(*index)] = value;
                     }
                 }
-                trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
+                rt.trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
                 ++pc;
                 break;
             }
@@ -370,7 +482,7 @@ std::optional<Value> executeMethod(
                 std::optional<int> parsed = parseIntValue(value);
                 bool known = parsed.has_value();
                 bool taken = known && compareIntWithZero(*parsed, op);
-                trace.branches.push_back(BranchTrace{
+                rt.trace.branches.push_back(BranchTrace{
                     label,
                     branchPc,
                     compareText(value, compareZeroOpText(op), Value::named("0")),
@@ -397,7 +509,7 @@ std::optional<Value> executeMethod(
                 std::optional<int> right = parseIntValue(rhs);
                 bool known = left.has_value() && right.has_value();
                 bool taken = known && compareInts(*left, *right, op);
-                trace.branches.push_back(BranchTrace{
+                rt.trace.branches.push_back(BranchTrace{
                     label,
                     branchPc,
                     compareText(lhs, compareOpText(op), rhs),
@@ -417,8 +529,8 @@ std::optional<Value> executeMethod(
             {
                 FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
                 std::string key = ref.className + "." + ref.name;
-                auto it = staticFields.find(key);
-                frame.push(it == staticFields.end() ? Value::named("0") : it->second);
+                auto it = rt.staticFields.find(key);
+                frame.push(it == rt.staticFields.end() ? Value::named("0") : it->second);
                 pc += 3;
                 break;
             }
@@ -429,8 +541,8 @@ std::optional<Value> executeMethod(
                 FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
                 std::string key = ref.className + "." + ref.name;
                 Value value = frame.pop();
-                staticFields[key] = value;
-                trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
+                rt.staticFields[key] = value;
+                rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
                 pc += 3;
                 break;
             }
@@ -442,8 +554,8 @@ std::optional<Value> executeMethod(
                 std::optional<uint32_t> id = objectId(object);
                 Value value = Value::named("0");
                 if (id.has_value()) {
-                    auto objectIt = heap.find(*id);
-                    if (objectIt != heap.end()) {
+                    auto objectIt = rt.heap.find(*id);
+                    if (objectIt != rt.heap.end()) {
                         auto fieldIt = objectIt->second.fields.find(ref.name);
                         if (fieldIt != objectIt->second.fields.end()) {
                             value = fieldIt->second;
@@ -463,9 +575,9 @@ std::optional<Value> executeMethod(
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 if (id.has_value()) {
-                    heap[*id].fields[ref.name] = value;
+                    rt.heap[*id].fields[ref.name] = value;
                 }
-                trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
+                rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
                 pc += 3;
                 break;
             }
@@ -474,7 +586,7 @@ std::optional<Value> executeMethod(
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
                 if (isNativeRuntimePrintInt(ref)) {
-                    trace.runtimePrints.push_back(RuntimePrint{label, callPc, frame.pop()});
+                    rt.trace.runtimePrints.push_back(RuntimePrint{label, callPc, frame.pop()});
                 } else {
                     std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
                     std::vector<Value> callArgs(widths.size());
@@ -486,7 +598,7 @@ std::optional<Value> executeMethod(
                     const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, callArgs, staticFields, heap, arrays, nextObjectId, nextArrayId, trace, steps, depth + 1);
+                            classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -513,8 +625,8 @@ std::optional<Value> executeMethod(
                 if (targetClass == nullptr) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
-                        auto objectIt = heap.find(*id);
-                        if (objectIt != heap.end()) {
+                        auto objectIt = rt.heap.find(*id);
+                        if (objectIt != rt.heap.end()) {
                             targetClass = findClass(classes, objectIt->second.className);
                         }
                     }
@@ -522,7 +634,7 @@ std::optional<Value> executeMethod(
                 const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     std::optional<Value> result = executeMethod(
-                        classes, *targetClass, *targetMethod, callArgs, staticFields, heap, arrays, nextObjectId, nextArrayId, trace, steps, depth + 1);
+                        classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                     if (result.has_value()) {
                         frame.push(*result);
                     }
@@ -537,10 +649,10 @@ std::optional<Value> executeMethod(
             {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(method.code, pc + 1));
-                uint32_t id = nextObjectId++;
-                heap[id] = HeapObject{className, {}};
+                uint32_t id = rt.nextObjectId++;
+                rt.heap[id] = HeapObject{className, {}};
                 Value ref = objectRef(id);
-                trace.objectAllocs.push_back(ObjectAlloc{label, allocPc, ref, className});
+                rt.trace.objectAllocs.push_back(ObjectAlloc{label, allocPc, ref, className});
                 frame.push(ref);
                 pc += 3;
                 break;
@@ -553,10 +665,10 @@ std::optional<Value> executeMethod(
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
                 if (atype == 10 && count.has_value() && *count >= 0) {
-                    uint32_t id = nextArrayId++;
-                    arrays[id] = IntArray{std::vector<Value>(static_cast<size_t>(*count), Value::named("0"))};
+                    uint32_t id = rt.nextArrayId++;
+                    rt.arrays[id] = IntArray{std::vector<Value>(static_cast<size_t>(*count), Value::named("0"))};
                     Value ref = arrayRef(id);
-                    trace.arrayAllocs.push_back(ArrayAlloc{label, allocPc, ref, static_cast<size_t>(*count)});
+                    rt.trace.arrayAllocs.push_back(ArrayAlloc{label, allocPc, ref, static_cast<size_t>(*count)});
                     frame.push(ref);
                 } else {
                     frame.push(Value::named("<array>"));
@@ -569,8 +681,8 @@ std::optional<Value> executeMethod(
             {
                 Value arrayValue = frame.pop();
                 std::optional<uint32_t> id = arrayId(arrayValue);
-                auto arrayIt = id.has_value() ? arrays.find(*id) : arrays.end();
-                if (id.has_value() && arrayIt != arrays.end()) {
+                auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
+                if (id.has_value() && arrayIt != rt.arrays.end()) {
                     frame.push(Value::named(std::to_string(arrayIt->second.values.size())));
                 } else {
                     frame.push(Value::named("<arraylength:" + arrayValue.text + ">"));
@@ -580,10 +692,11 @@ std::optional<Value> executeMethod(
             }
 
             case 0xac:
-                return frame.pop();
+            case 0xb0:
+                return finish(frame.pop());
 
             case 0xb1:
-                return std::nullopt;
+                return finish(std::nullopt);
 
             default:
                 pc += instructionLength(op);
@@ -591,21 +704,16 @@ std::optional<Value> executeMethod(
         }
     }
 
-    return std::nullopt;
+    return finish(std::nullopt);
 }
 
 } // namespace
 
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
-    ExecutionTrace trace;
-    std::map<std::string, Value> staticFields;
-    Heap heap;
-    IntArrayHeap arrays;
-    uint32_t nextObjectId = 1;
-    uint32_t nextArrayId = 1;
-    size_t steps = 0;
-    (void)executeMethod(classes, cls, method, {}, staticFields, heap, arrays, nextObjectId, nextArrayId, trace, steps, 0);
-    return trace;
+    Runtime rt;
+    rt.callStack.reserve(kMaxCallDepth + 1);
+    (void)executeMethod(classes, cls, method, {}, rt, 0);
+    return rt.trace;
 }
 
 } // namespace jvmpoc
