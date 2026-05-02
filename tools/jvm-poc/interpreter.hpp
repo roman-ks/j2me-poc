@@ -8,11 +8,13 @@
 namespace jvmpoc {
 
 struct RuntimePrint {
+    std::string methodLabel;
     uint32_t pc = 0;
     Value value;
 };
 
 struct BranchTrace {
+    std::string methodLabel;
     uint32_t pc = 0;
     std::string condition;
     bool known = false;
@@ -27,6 +29,6 @@ struct ExecutionTrace {
     bool stepLimitHit = false;
 };
 
-ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method);
+ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method);
 
 } // namespace jvmpoc

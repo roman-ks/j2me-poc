@@ -99,16 +99,16 @@ const jvmpoc::MethodInfo* findMain(const jvmpoc::ClassFile& cls) {
     return nullptr;
 }
 
-void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& method) {
+void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& method) {
     std::cout << "runtime " << cls.thisClass << "." << method.name << method.descriptor << "\n";
-    jvmpoc::ExecutionTrace trace = jvmpoc::executeStraightLine(cls, method);
+    jvmpoc::ExecutionTrace trace = jvmpoc::executeStraightLine(classes, cls, method);
 
     if (!trace.localWrites.empty()) {
         std::cout << "  local writes:\n";
         for (const jvmpoc::LocalWrite& write : trace.localWrites) {
-            std::cout << "    pc=" << write.pc << " ["
+            std::cout << "    " << write.methodLabel << " pc=" << write.pc << " ["
                       << write.index << "] "
-                      << jvmpoc::localNameAt(method, write.index, write.pc)
+                      << (write.localName.empty() ? "local" + std::to_string(write.index) : write.localName)
                       << " = " << write.value.text;
             if (!write.reason.empty() && write.reason != "store") {
                 std::cout << " (" << write.reason << ")";
@@ -120,7 +120,7 @@ void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& m
     if (!trace.branches.empty()) {
         std::cout << "  branches:\n";
         for (const jvmpoc::BranchTrace& branch : trace.branches) {
-            std::cout << "    pc=" << branch.pc << " if " << branch.condition
+            std::cout << "    " << branch.methodLabel << " pc=" << branch.pc << " if " << branch.condition
                       << " -> " << (branch.known ? (branch.taken ? "taken" : "not taken") : "unknown")
                       << " target=" << branch.targetPc << "\n";
         }
@@ -129,7 +129,7 @@ void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& m
     if (!trace.runtimePrints.empty()) {
         std::cout << "  stdout:\n";
         for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
-            std::cout << "    pc=" << print.pc << ": " << print.value.text << "\n";
+            std::cout << "    " << print.methodLabel << " pc=" << print.pc << ": " << print.value.text << "\n";
         }
     }
 
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
             if (!ran) {
                 std::cout << "runtime\n";
             }
-            printRuntimeTrace(cls, *mainMethod);
+            printRuntimeTrace(classes, cls, *mainMethod);
             ran = true;
         }
 

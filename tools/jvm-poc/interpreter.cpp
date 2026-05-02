@@ -5,9 +5,13 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace jvmpoc {
 namespace {
+
+constexpr size_t kMaxSteps = 10000;
+constexpr size_t kMaxCallDepth = 64;
 
 uint32_t branchTarget(size_t pc, int16_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
@@ -96,31 +100,108 @@ bool isNativeRuntimePrintInt(const MethodRef& ref) {
     return classMatches && ref.name == "printInt" && ref.descriptor == "(I)V";
 }
 
-constexpr size_t kMaxSteps = 10000;
+std::string methodLabel(const ClassFile& cls, const MethodInfo& method) {
+    return cls.thisClass + "." + method.name + method.descriptor;
+}
 
-} // namespace
-
-ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method) {
-    ExecutionTrace trace;
-    Frame frame(method.maxLocals);
-
-    for (size_t i = 0; i < argumentSlots(method) && i < method.maxLocals; ++i) {
-        frame.setLocal(static_cast<uint16_t>(i),
-                       Value::named("<arg:" + localNameAt(method, static_cast<uint16_t>(i), 0) + ">"));
+const ClassFile* findClass(const std::vector<ClassFile>& classes, const std::string& name) {
+    for (const ClassFile& cls : classes) {
+        if (cls.thisClass == name) {
+            return &cls;
+        }
     }
+    return nullptr;
+}
+
+const MethodInfo* findMethod(const ClassFile& cls, const MethodRef& ref) {
+    for (const MethodInfo& method : cls.methods) {
+        if (method.name == ref.name && method.descriptor == ref.descriptor) {
+            return &method;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<size_t> argumentSlotWidths(const std::string& descriptor) {
+    std::vector<size_t> widths;
+    size_t pos = 0;
+    if (descriptor.empty() || descriptor[pos++] != '(') {
+        return widths;
+    }
+
+    while (pos < descriptor.size() && descriptor[pos] != ')') {
+        char c = descriptor[pos++];
+        if (c == 'J' || c == 'D') {
+            widths.push_back(2);
+        } else if (c == 'L') {
+            while (pos < descriptor.size() && descriptor[pos++] != ';') {
+            }
+            widths.push_back(1);
+        } else if (c == '[') {
+            while (pos < descriptor.size() && descriptor[pos] == '[') {
+                ++pos;
+            }
+            if (pos < descriptor.size() && descriptor[pos] == 'L') {
+                while (pos < descriptor.size() && descriptor[pos++] != ';') {
+                }
+            } else if (pos < descriptor.size()) {
+                ++pos;
+            }
+            widths.push_back(1);
+        } else {
+            widths.push_back(1);
+        }
+    }
+
+    return widths;
+}
+
+bool returnsValue(const std::string& descriptor) {
+    size_t close = descriptor.find(')');
+    return close != std::string::npos && close + 1 < descriptor.size() && descriptor[close + 1] != 'V';
+}
+
+std::optional<Value> executeMethod(
+    const std::vector<ClassFile>& classes,
+    const ClassFile& cls,
+    const MethodInfo& method,
+    const std::vector<Value>& args,
+    ExecutionTrace& trace,
+    size_t& steps,
+    size_t depth) {
+    if (depth > kMaxCallDepth) {
+        return Value::named("<call-depth-limit>");
+    }
+
+    Frame frame(method.maxLocals);
+    const std::string label = methodLabel(cls, method);
+
+    if (args.empty()) {
+        for (size_t i = 0; i < argumentSlots(method) && i < method.maxLocals; ++i) {
+            frame.setLocal(static_cast<uint16_t>(i),
+                           Value::named("<arg:" + localNameAt(method, static_cast<uint16_t>(i), 0) + ">"));
+        }
+    } else {
+        for (size_t i = 0; i < args.size() && i < method.maxLocals; ++i) {
+            frame.setLocal(static_cast<uint16_t>(i), args[i]);
+        }
+    }
+
+    auto recordLocal = [&](uint16_t index, uint32_t pc, const Value& value, const std::string& reason) {
+        trace.localWrites.push_back(LocalWrite{label, pc, index, localNameAt(method, index, pc), value, reason});
+    };
 
     auto store = [&](uint16_t index, uint32_t pc) {
         Value value = frame.pop();
         frame.setLocal(index, value);
-        trace.localWrites.push_back(LocalWrite{pc, index, value, "store"});
+        recordLocal(index, pc, value, "store");
     };
 
     size_t pc = 0;
-    size_t steps = 0;
     while (pc < method.code.size()) {
         if (++steps > kMaxSteps) {
             trace.stepLimitHit = true;
-            return trace;
+            return std::nullopt;
         }
 
         uint8_t op = method.code[pc];
@@ -157,7 +238,7 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                     ? Value::named(std::to_string(*oldInt + delta))
                     : Value::named("(" + oldValue.text + " + " + std::to_string(delta) + ")");
                 frame.setLocal(index, newValue);
-                trace.localWrites.push_back(LocalWrite{iincPc, index, newValue, "iinc"});
+                recordLocal(index, iincPc, newValue, "iinc");
                 pc += 3;
                 break;
             }
@@ -188,6 +269,7 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                 bool known = parsed.has_value();
                 bool taken = known && compareIntWithZero(*parsed, op);
                 trace.branches.push_back(BranchTrace{
+                    label,
                     branchPc,
                     compareText(value, compareZeroOpText(op), Value::named("0")),
                     known,
@@ -214,6 +296,7 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                 bool known = left.has_value() && right.has_value();
                 bool taken = known && compareInts(*left, *right, op);
                 trace.branches.push_back(BranchTrace{
+                    label,
                     branchPc,
                     compareText(lhs, compareOpText(op), rhs),
                     known,
@@ -237,7 +320,25 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
                 if (isNativeRuntimePrintInt(ref)) {
-                    trace.runtimePrints.push_back(RuntimePrint{callPc, frame.pop()});
+                    trace.runtimePrints.push_back(RuntimePrint{label, callPc, frame.pop()});
+                } else {
+                    std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
+                    std::vector<Value> callArgs(widths.size());
+                    for (size_t i = widths.size(); i > 0; --i) {
+                        callArgs[i - 1] = frame.pop();
+                    }
+
+                    const ClassFile* targetClass = findClass(classes, ref.className);
+                    const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
+                    if (targetClass != nullptr && targetMethod != nullptr) {
+                        std::optional<Value> result = executeMethod(
+                            classes, *targetClass, *targetMethod, callArgs, trace, steps, depth + 1);
+                        if (result.has_value()) {
+                            frame.push(*result);
+                        }
+                    } else if (returnsValue(ref.descriptor)) {
+                        frame.push(Value::named("<call:" + ref.className + "." + ref.name + ref.descriptor + ">"));
+                    }
                 }
                 pc += 3;
                 break;
@@ -249,8 +350,11 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                 pc += 3;
                 break;
 
+            case 0xac:
+                return frame.pop();
+
             case 0xb1:
-                return trace;
+                return std::nullopt;
 
             default:
                 pc += instructionLength(op);
@@ -258,6 +362,15 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
         }
     }
 
+    return std::nullopt;
+}
+
+} // namespace
+
+ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
+    ExecutionTrace trace;
+    size_t steps = 0;
+    (void)executeMethod(classes, cls, method, {}, trace, steps, 0);
     return trace;
 }
 

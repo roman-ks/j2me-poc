@@ -9,8 +9,10 @@
 namespace jvmpoc {
 
 struct LocalWrite {
+    std::string methodLabel;
     uint32_t pc = 0;
     uint16_t index = 0;
+    std::string localName;
     Value value;
     std::string reason;
 };
