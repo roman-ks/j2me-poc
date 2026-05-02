@@ -104,6 +104,17 @@ bool isNativeRuntimePrintInt(const MethodRef& ref) {
     return classMatches && ref.name == "printInt" && ref.descriptor == "(I)V";
 }
 
+bool isNativeRuntimePrintString(const MethodRef& ref) {
+    const std::string suffix = "/NativeRuntime";
+    bool classMatches = ref.className == "NativeRuntime";
+    if (ref.className.size() >= suffix.size()) {
+        classMatches = classMatches ||
+                       ref.className.compare(ref.className.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    return classMatches && ref.name == "printString" && ref.descriptor == "(Ljava/lang/String;)V";
+}
+
 bool isNativeRuntimeGc(const MethodRef& ref) {
     const std::string suffix = "/NativeRuntime";
     bool classMatches = ref.className == "NativeRuntime";
@@ -187,6 +198,7 @@ struct IntArray {
 
 using Heap = std::map<uint32_t, HeapObject>;
 using IntArrayHeap = std::map<uint32_t, IntArray>;
+using StringHeap = std::map<uint32_t, std::string>;
 
 struct RuntimeFrame {
     std::string label;
@@ -197,10 +209,14 @@ struct Runtime {
     std::map<std::string, Value> staticFields;
     Heap heap;
     IntArrayHeap arrays;
+    StringHeap strings;
+    std::map<std::string, uint32_t> internedStrings;
     uint32_t nextObjectId = 1;
     uint32_t nextArrayId = 1;
+    uint32_t nextStringId = 1;
     std::vector<uint32_t> freeObjectIds;
     std::vector<uint32_t> freeArrayIds;
+    std::vector<uint32_t> freeStringIds;
     std::vector<RuntimeFrame> callStack;
     ExecutionTrace trace;
     size_t steps = 0;
@@ -212,6 +228,10 @@ Value objectRef(uint32_t id) {
 
 Value arrayRef(uint32_t id) {
     return Value::named("arr#" + std::to_string(id));
+}
+
+Value stringRef(uint32_t id) {
+    return Value::named("str#" + std::to_string(id));
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
@@ -234,15 +254,38 @@ std::optional<uint32_t> arrayId(const Value& value) {
     return parseHandle(value, "arr#");
 }
 
+std::optional<uint32_t> stringId(const Value& value) {
+    return parseHandle(value, "str#");
+}
+
 bool isReference(const Value& value) {
-    return objectId(value).has_value() || arrayId(value).has_value();
+    return objectId(value).has_value() || arrayId(value).has_value() || stringId(value).has_value();
+}
+
+Value internString(Runtime& rt, const std::string& text) {
+    auto internIt = rt.internedStrings.find(text);
+    if (internIt != rt.internedStrings.end() && rt.strings.find(internIt->second) != rt.strings.end()) {
+        return stringRef(internIt->second);
+    }
+
+    uint32_t id = 0;
+    if (!rt.freeStringIds.empty()) {
+        id = rt.freeStringIds.back();
+        rt.freeStringIds.pop_back();
+    } else {
+        id = rt.nextStringId++;
+    }
+    rt.strings[id] = text;
+    rt.internedStrings[text] = id;
+    return stringRef(id);
 }
 
 void markValue(
     const Value& value,
     const Runtime& rt,
     std::set<uint32_t>& markedObjects,
-    std::set<uint32_t>& markedArrays) {
+    std::set<uint32_t>& markedArrays,
+    std::set<uint32_t>& markedStrings) {
     std::optional<uint32_t> obj = objectId(value);
     if (obj.has_value()) {
         if (!markedObjects.insert(*obj).second) {
@@ -253,7 +296,7 @@ void markValue(
             return;
         }
         for (const auto& field : objectIt->second.fields) {
-            markValue(field.second, rt, markedObjects, markedArrays);
+            markValue(field.second, rt, markedObjects, markedArrays, markedStrings);
         }
         return;
     }
@@ -268,8 +311,14 @@ void markValue(
             return;
         }
         for (const Value& element : arrayIt->second.values) {
-            markValue(element, rt, markedObjects, markedArrays);
+            markValue(element, rt, markedObjects, markedArrays, markedStrings);
         }
+        return;
+    }
+
+    std::optional<uint32_t> str = stringId(value);
+    if (str.has_value()) {
+        markedStrings.insert(*str);
     }
 }
 
@@ -279,12 +328,13 @@ void addRoot(
     const Value& value,
     const Runtime& rt,
     std::set<uint32_t>& markedObjects,
-    std::set<uint32_t>& markedArrays) {
+    std::set<uint32_t>& markedArrays,
+    std::set<uint32_t>& markedStrings) {
     if (!isReference(value)) {
         return;
     }
     report.roots.push_back(name + "=" + value.text);
-    markValue(value, rt, markedObjects, markedArrays);
+    markValue(value, rt, markedObjects, markedArrays, markedStrings);
 }
 
 void collectGarbage(Runtime& rt, std::string when) {
@@ -293,20 +343,21 @@ void collectGarbage(Runtime& rt, std::string when) {
 
     std::set<uint32_t> markedObjects;
     std::set<uint32_t> markedArrays;
+    std::set<uint32_t> markedStrings;
     for (const auto& field : rt.staticFields) {
-        addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays);
+        addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays, markedStrings);
     }
     for (const RuntimeFrame& runtimeFrame : rt.callStack) {
         const std::vector<Value>& locals = runtimeFrame.frame.locals();
         for (size_t i = 0; i < locals.size(); ++i) {
             addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]",
-                    locals[i], rt, markedObjects, markedArrays);
+                    locals[i], rt, markedObjects, markedArrays, markedStrings);
         }
 
         const std::vector<Value>& stack = runtimeFrame.frame.stack();
         for (size_t i = 0; i < stack.size(); ++i) {
             addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]",
-                    stack[i], rt, markedObjects, markedArrays);
+                    stack[i], rt, markedObjects, markedArrays, markedStrings);
         }
     }
 
@@ -324,6 +375,13 @@ void collectGarbage(Runtime& rt, std::string when) {
             arraysToFree.push_back(array.first);
         }
     }
+    std::vector<uint32_t> stringsToFree;
+    for (const auto& str : rt.strings) {
+        if (markedStrings.find(str.first) == markedStrings.end()) {
+            report.unreachableStrings.push_back(stringRef(str.first));
+            stringsToFree.push_back(str.first);
+        }
+    }
 
     for (uint32_t id : objectsToFree) {
         rt.heap.erase(id);
@@ -334,6 +392,15 @@ void collectGarbage(Runtime& rt, std::string when) {
         rt.arrays.erase(id);
         rt.freeArrayIds.push_back(id);
         report.freedArrays.push_back(arrayRef(id));
+    }
+    for (uint32_t id : stringsToFree) {
+        auto strIt = rt.strings.find(id);
+        if (strIt != rt.strings.end()) {
+            rt.internedStrings.erase(strIt->second);
+        }
+        rt.strings.erase(id);
+        rt.freeStringIds.push_back(id);
+        report.freedStrings.push_back(stringRef(id));
     }
 
     rt.trace.gcReports.push_back(report);
@@ -398,6 +465,8 @@ std::optional<Value> executeMethod(
             case 0x08: frame.push(Value::named("5")); ++pc; break;
             case 0x10: frame.push(Value::named(std::to_string(codeS1(method.code, pc + 1)))); pc += 2; break;
             case 0x11: frame.push(Value::named(std::to_string(codeS2(method.code, pc + 1)))); pc += 3; break;
+            case 0x12: frame.push(internString(rt, resolveStringConstant(cls, codeU1(method.code, pc + 1)))); pc += 2; break;
+            case 0x13: frame.push(internString(rt, resolveStringConstant(cls, codeU2(method.code, pc + 1)))); pc += 3; break;
 
             case 0x1a: frame.push(frame.local(0)); ++pc; break;
             case 0x1b: frame.push(frame.local(1)); ++pc; break;
@@ -611,6 +680,17 @@ std::optional<Value> executeMethod(
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
                 if (isNativeRuntimePrintInt(ref)) {
                     rt.trace.runtimePrints.push_back(RuntimePrint{label, callPc, frame.pop()});
+                } else if (isNativeRuntimePrintString(ref)) {
+                    Value value = frame.pop();
+                    std::optional<uint32_t> id = stringId(value);
+                    auto strIt = id.has_value() ? rt.strings.find(*id) : rt.strings.end();
+                    rt.trace.runtimePrints.push_back(RuntimePrint{
+                        label,
+                        callPc,
+                        id.has_value() && strIt != rt.strings.end()
+                            ? Value::named(strIt->second)
+                            : Value::named("<string:" + value.text + ">"),
+                    });
                 } else if (isNativeRuntimeGc(ref)) {
                     collectGarbage(rt, label + " pc=" + std::to_string(callPc));
                 } else {
@@ -646,6 +726,20 @@ std::optional<Value> executeMethod(
                 }
                 Value object = frame.pop();
                 callArgs[0] = object;
+
+                if (ref.className == "java/lang/String" || stringId(object).has_value()) {
+                    rt.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        ref.className + "." + ref.name + ref.descriptor,
+                        object,
+                    });
+                    if (returnsValue(ref.descriptor)) {
+                        frame.push(Value::named("<unsupported-string-call:" + ref.name + ">"));
+                    }
+                    pc += 3;
+                    break;
+                }
 
                 const ClassFile* targetClass = findClass(classes, ref.className);
                 if (targetClass == nullptr) {

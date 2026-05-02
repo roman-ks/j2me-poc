@@ -241,6 +241,13 @@ std::string resolveClassRef(const ClassFile& cls, uint16_t index) {
     return className(cls.cp, index);
 }
 
+std::string resolveStringConstant(const ClassFile& cls, uint16_t index) {
+    if (index == 0 || index >= cls.cp.size() || cls.cp[index].tag != CpString) {
+        throw std::runtime_error("bad String constant pool reference #" + std::to_string(index));
+    }
+    return utf8(cls.cp, cls.cp[index].a);
+}
+
 ClassFile parseClassFile(const std::string& path) {
     Reader r(readFile(path));
     if (r.u4() != 0xCAFEBABE) {

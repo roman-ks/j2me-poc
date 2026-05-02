@@ -14,6 +14,13 @@ struct RuntimePrint {
     Value value;
 };
 
+struct UnsupportedStringCall {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    std::string methodName;
+    Value receiver;
+};
+
 struct BranchTrace {
     std::string methodLabel;
     uint32_t pc = 0;
@@ -65,13 +72,16 @@ struct GcReport {
     std::vector<std::string> roots;
     std::vector<Value> unreachableObjects;
     std::vector<Value> unreachableArrays;
+    std::vector<Value> unreachableStrings;
     std::vector<Value> freedObjects;
     std::vector<Value> freedArrays;
+    std::vector<Value> freedStrings;
 };
 
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
+    std::vector<UnsupportedStringCall> unsupportedStringCalls;
     std::vector<BranchTrace> branches;
     std::vector<StaticWrite> staticWrites;
     std::vector<ObjectAlloc> objectAllocs;

@@ -175,6 +175,14 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
         }
     }
 
+    if (!trace.unsupportedStringCalls.empty()) {
+        std::cout << "  unsupported string calls:\n";
+        for (const jvmpoc::UnsupportedStringCall& call : trace.unsupportedStringCalls) {
+            std::cout << "    " << call.methodLabel << " pc=" << call.pc
+                      << " " << call.receiver.text << "." << call.methodName << "\n";
+        }
+    }
+
     if (!trace.gcReports.empty()) {
         std::cout << "  gc reports:\n";
         for (const jvmpoc::GcReport& report : trace.gcReports) {
@@ -200,6 +208,13 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
                 }
                 std::cout << "\n";
             }
+            if (!report.unreachableStrings.empty()) {
+                std::cout << "      unreachable strings:";
+                for (const jvmpoc::Value& value : report.unreachableStrings) {
+                    std::cout << " " << value.text;
+                }
+                std::cout << "\n";
+            }
             if (!report.freedObjects.empty()) {
                 std::cout << "      freed objects:";
                 for (const jvmpoc::Value& value : report.freedObjects) {
@@ -214,8 +229,16 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
                 }
                 std::cout << "\n";
             }
+            if (!report.freedStrings.empty()) {
+                std::cout << "      freed strings:";
+                for (const jvmpoc::Value& value : report.freedStrings) {
+                    std::cout << " " << value.text;
+                }
+                std::cout << "\n";
+            }
             if (report.roots.empty() && report.unreachableObjects.empty() && report.unreachableArrays.empty() &&
-                report.freedObjects.empty() && report.freedArrays.empty()) {
+                report.unreachableStrings.empty() && report.freedObjects.empty() && report.freedArrays.empty() &&
+                report.freedStrings.empty()) {
                 std::cout << "      <nothing to collect>\n";
             }
         }
@@ -224,7 +247,7 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
     if (trace.localWrites.empty() && trace.branches.empty() && trace.staticWrites.empty() &&
         trace.objectAllocs.empty() && trace.fieldWrites.empty() &&
         trace.arrayAllocs.empty() && trace.arrayWrites.empty() && trace.runtimePrints.empty() &&
-        trace.gcReports.empty()) {
+        trace.unsupportedStringCalls.empty() && trace.gcReports.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
     if (trace.stepLimitHit) {
