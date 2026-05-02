@@ -12,6 +12,8 @@ public final class Graphics {
     private Graphics() {
     }
 
+    public native void setColor(int rgb);
+
     public native void setColor(int red, int green, int blue);
 
     public native void fillRect(int x, int y, int width, int height);

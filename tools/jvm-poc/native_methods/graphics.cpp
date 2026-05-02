@@ -37,6 +37,16 @@ NativeCallResult handleGraphics(
     const std::vector<Value>& args) {
     Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
 
+    if (ref.name == "setColor" && ref.descriptor == "(I)V") {
+        ctx.graphicsColorRgb = intArg(args, 1);
+        ctx.trace.graphicsOps.push_back(GraphicsOp{
+            methodLabel,
+            pc,
+            "setColor(" + argText(args, 1) + ")",
+        });
+        return handledVoid();
+    }
+
     if (ref.name == "setColor" && ref.descriptor == "(III)V") {
         ctx.graphicsColorRgb = (intArg(args, 1) << 16) | (intArg(args, 2) << 8) | intArg(args, 3);
         ctx.trace.graphicsOps.push_back(GraphicsOp{

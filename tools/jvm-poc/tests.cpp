@@ -23,6 +23,7 @@ struct TestCase {
     std::vector<std::string> expectedDisplayCurrents;
     std::vector<std::string> expectedRenderGraphicsOps;
     bool midlet = false;
+    std::vector<std::pair<size_t, uint16_t>> expectedPixels;
 };
 
 class TestHost final : public jvmpoc::JvmHost {
@@ -189,7 +190,9 @@ bool runCase(const std::string& root, const TestCase& test) {
     jvmpoc::ExecutionTrace renderTrace;
     jvmpoc::ExecutionTrace pressTrace;
     jvmpoc::ExecutionTrace releaseTrace;
+    std::vector<uint16_t> renderedPixels;
     const bool inputMidletTest = test.name == "canvas key events";
+    const bool explicitPixelTest = !test.expectedPixels.empty();
     if (test.midlet) {
         TestHost host;
         jvmpoc::JvmMidletApp app(host);
@@ -208,7 +211,7 @@ bool runCase(const std::string& root, const TestCase& test) {
             std::cout << "FAIL " << test.name << ": render did not present expected frame\n";
             return false;
         }
-        if (!inputMidletTest && (host.lastPixels.empty() || host.lastPixels[0] != 0xffff)) {
+        if (!inputMidletTest && !explicitPixelTest && (host.lastPixels.empty() || host.lastPixels[0] != 0xffff)) {
             std::cout << "FAIL " << test.name << ": render did not fill white background\n";
             return false;
         }
@@ -216,10 +219,11 @@ bool runCase(const std::string& root, const TestCase& test) {
         for (uint16_t pixel : host.lastPixels) {
             hasBlackPixel = hasBlackPixel || pixel == 0x0000;
         }
-        if (!inputMidletTest && !hasBlackPixel) {
+        if (!inputMidletTest && !explicitPixelTest && !hasBlackPixel) {
             std::cout << "FAIL " << test.name << ": render did not draw black foreground pixels\n";
             return false;
         }
+        renderedPixels = host.lastPixels;
     } else {
         trace = jvmpoc::executeStraightLine(classes, *mainClass, *main);
     }
@@ -241,6 +245,16 @@ bool runCase(const std::string& root, const TestCase& test) {
     if (test.midlet) {
         ok = expectList(test.name, "render unknown calls", unknownCalls(renderTrace), test.expectedUnknownCalls) && ok;
         ok = expectList(test.name, "render graphics ops", graphicsOps(renderTrace), test.expectedRenderGraphicsOps) && ok;
+        for (const auto& expectedPixel : test.expectedPixels) {
+            if (expectedPixel.first >= renderedPixels.size() || renderedPixels[expectedPixel.first] != expectedPixel.second) {
+                std::cout << "FAIL " << test.name << ": pixel[" << expectedPixel.first << "]\n"
+                          << "  expected " << expectedPixel.second << "\n"
+                          << "  actual   "
+                          << (expectedPixel.first < renderedPixels.size() ? std::to_string(renderedPixels[expectedPixel.first]) : std::string("<out-of-range>"))
+                          << "\n";
+                ok = false;
+            }
+        }
     }
 
     if (ok) {
@@ -391,6 +405,25 @@ int main(int argc, char** argv) {
                 "fillRect(1,1,1,1)",
             },
             true,
+        },
+        TestCase{
+            "graphics setColor int",
+            "dev/roman/hello/GraphicsColorMidlet",
+            {"dev/roman/hello/GraphicsColorMidlet", "dev/roman/hello/GraphicsColorCanvas"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {"display#1.setCurrent(obj#2)"},
+            {
+                "setColor(255)",
+                "fillRect(0,0,240,320)",
+                "setColor(16711680)",
+                "fillRect(0,0,10,10)",
+            },
+            true,
+            {{0, 0xf800}, {4820, 0x001f}},
         },
         TestCase{
             "gc roots",
