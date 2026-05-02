@@ -284,6 +284,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "boot Thread",
+            "dev/roman/hello/ThreadBoot",
+            {"dev/roman/hello/ThreadBoot", "dev/roman/hello/ThreadBootTask"},
+            {"thread-run", "main-done"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "gc roots",
             "dev/roman/hello/GcRoots",
             {"dev/roman/hello/Objects", "dev/roman/hello/GcRoots"},

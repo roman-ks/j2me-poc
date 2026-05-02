@@ -68,6 +68,10 @@ public:
         return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
     }
 
+    void sleepMillis(uint32_t ms) const override {
+        SDL_Delay(ms);
+    }
+
     void present(const uint16_t* pixels, int width, int height) override {
         if (pixels == nullptr || width != width_ || height != height_) {
             return;

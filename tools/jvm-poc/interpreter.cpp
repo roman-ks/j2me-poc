@@ -826,7 +826,8 @@ std::optional<Value> executeMethod(
             }
 
             case 0xb6:
-            case 0xb7: {
+            case 0xb7:
+            case 0xb9: {
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
                 std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
                 std::vector<Value> callArgs(widths.size() + 1);
@@ -837,7 +838,7 @@ std::optional<Value> executeMethod(
                 callArgs[0] = object;
 
                 std::string lookupClassName = ref.className;
-                if (op == 0xb6) {
+                if (op == 0xb6 || op == 0xb9) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
                         auto objectIt = rt.heap.find(*id);
@@ -885,7 +886,7 @@ std::optional<Value> executeMethod(
                         frame.push(*result);
                     }
                 }
-                pc += 3;
+                pc += op == 0xb9 ? 5 : 3;
                 break;
             }
 

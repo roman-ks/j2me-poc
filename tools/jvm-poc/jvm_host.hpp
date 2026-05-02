@@ -11,6 +11,7 @@ public:
     virtual int screenWidth() const = 0;
     virtual int screenHeight() const = 0;
     virtual uint32_t millis() const = 0;
+    virtual void sleepMillis(uint32_t /*ms*/) const {}
     virtual void present(const uint16_t* pixels, int width, int height) = 0;
 };
 
