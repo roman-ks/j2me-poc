@@ -21,10 +21,10 @@ struct NativeCallContext {
     std::map<uint32_t, std::string>& strings;
     Value& displayRef;
     Value& currentDisplayable;
-    uint16_t*& graphicsPixels;
+    std::optional<std::reference_wrapper<std::vector<uint16_t>>> graphicsFramebuffer;
     int& graphicsWidth;
     int& graphicsHeight;
-    uint16_t& graphicsColor;
+    int& graphicsColorRgb;
     std::string receiverClassName;
     std::function<void(std::string)> collectGarbage;
 };

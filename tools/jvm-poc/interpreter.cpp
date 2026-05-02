@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -177,10 +178,10 @@ struct Runtime {
     std::vector<RuntimeFrame> callStack;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
-    uint16_t* graphicsPixels = nullptr;
+    std::optional<std::reference_wrapper<std::vector<uint16_t>>> graphicsFramebuffer;
     int graphicsWidth = 0;
     int graphicsHeight = 0;
-    uint16_t graphicsColor = 0x0000;
+    int graphicsColorRgb = 0x000000;
     ExecutionTrace trace;
     size_t steps = 0;
 };
@@ -455,10 +456,10 @@ std::optional<Value> executeMethod(
             rt.strings,
             rt.displayRef,
             rt.currentDisplayable,
-            rt.graphicsPixels,
+            rt.graphicsFramebuffer,
             rt.graphicsWidth,
             rt.graphicsHeight,
-            rt.graphicsColor,
+            rt.graphicsColorRgb,
             {},
             [&](std::string when) {
                 collectGarbage(rt, std::move(when));
@@ -901,12 +902,12 @@ ExecutionTrace renderMidletFrame(
     const std::vector<ClassFile>& classes,
     const std::string& className,
     const JvmHost* host,
-    uint16_t* pixels,
+    std::vector<uint16_t>& pixels,
     int width,
     int height) {
     Runtime rt;
     rt.host = host;
-    rt.graphicsPixels = pixels;
+    rt.graphicsFramebuffer = pixels;
     rt.graphicsWidth = width;
     rt.graphicsHeight = height;
     rt.callStack.reserve(kMaxCallDepth + 1);

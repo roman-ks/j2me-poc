@@ -138,7 +138,7 @@ ExecutionTrace renderMidletFrame(
     const std::vector<ClassFile>& classes,
     const std::string& className,
     const JvmHost* host,
-    uint16_t* pixels,
+    std::vector<uint16_t>& pixels,
     int width,
     int height);
 

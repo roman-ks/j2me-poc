@@ -34,7 +34,7 @@ const ExecutionTrace& JvmMidletApp::render() {
     }
 
     framebuffer_.assign(static_cast<size_t>(width * height), 0x39e7);
-    lastTrace_ = renderMidletFrame(classes_, midletClassName_, &host_, framebuffer_.data(), width, height);
+    lastTrace_ = renderMidletFrame(classes_, midletClassName_, &host_, framebuffer_, width, height);
     if (!lastTrace_.displaySetCurrents.empty()) {
         currentDisplayable_ = lastTrace_.displaySetCurrents.back().displayable;
     }

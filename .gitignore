@@ -6,3 +6,4 @@ tools/jvm-poc/*.o
 tools/jvm-poc/jvm-poc
 tools/jvm-poc/jvm-poc-sdl-demo
 tools/jvm-poc/jvm-poc-tests
+tools/jvm-poc/build/
