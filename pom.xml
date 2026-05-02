@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>dev.roman</groupId>
+    <artifactId>j2me-poc</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>j2me-poc</name>
+
+    <properties>
+        <maven.compiler.source>1.3</maven.compiler.source>
+        <maven.compiler.target>1.3</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <midlet.name>J2ME POC</midlet.name>
+        <midlet.class>dev.roman.j2mepoc.HelloMidletMini</midlet.class>
+        <midlet.vendor>roman</midlet.vendor>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.microemu</groupId>
+            <artifactId>midpapi20</artifactId>
+            <version>2.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.microemu</groupId>
+            <artifactId>cldcapi11</artifactId>
+            <version>2.0.4</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive>
+                        <manifestEntries>
+                            <MIDlet-Name>${midlet.name}</MIDlet-Name>
+                            <MIDlet-Version>${project.version}</MIDlet-Version>
+                            <MIDlet-Vendor>${midlet.vendor}</MIDlet-Vendor>
+                            <MIDlet-1>${midlet.name},,${midlet.class}</MIDlet-1>
+                            <MicroEdition-Configuration>CLDC-1.1</MicroEdition-Configuration>
+                            <MicroEdition-Profile>MIDP-2.0</MicroEdition-Profile>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
