@@ -2,9 +2,46 @@
 
 #include "bytecode.hpp"
 
+#include <cstdint>
 #include <optional>
+#include <string>
 
 namespace jvmpoc {
+namespace {
+
+uint32_t branchTarget(size_t pc, int16_t offset) {
+    return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
+}
+
+std::string compareText(const Value& lhs, const char* op, const Value& rhs) {
+    return lhs.text + " " + op + " " + rhs.text;
+}
+
+bool compareInts(int lhs, int rhs, uint8_t op) {
+    switch (op) {
+        case 0x9f: return lhs == rhs;
+        case 0xa0: return lhs != rhs;
+        case 0xa1: return lhs < rhs;
+        case 0xa2: return lhs >= rhs;
+        case 0xa3: return lhs > rhs;
+        case 0xa4: return lhs <= rhs;
+        default: return false;
+    }
+}
+
+const char* compareOpText(uint8_t op) {
+    switch (op) {
+        case 0x9f: return "==";
+        case 0xa0: return "!=";
+        case 0xa1: return "<";
+        case 0xa2: return ">=";
+        case 0xa3: return ">";
+        case 0xa4: return "<=";
+        default: return "?";
+    }
+}
+
+} // namespace
 
 ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& method) {
     ExecutionTrace trace;
@@ -60,6 +97,36 @@ ExecutionTrace executeStraightLine(const ClassFile& cls, const MethodInfo& metho
                 ++pc;
                 break;
             }
+
+            case 0x9f:
+            case 0xa0:
+            case 0xa1:
+            case 0xa2:
+            case 0xa3:
+            case 0xa4: {
+                uint32_t branchPc = static_cast<uint32_t>(pc);
+                int16_t offset = codeS2(method.code, pc + 1);
+                uint32_t target = branchTarget(pc, offset);
+                Value rhs = frame.pop();
+                Value lhs = frame.pop();
+                std::optional<int> left = parseIntValue(lhs);
+                std::optional<int> right = parseIntValue(rhs);
+                bool known = left.has_value() && right.has_value();
+                bool taken = known && compareInts(*left, *right, op);
+                trace.branches.push_back(BranchTrace{
+                    branchPc,
+                    compareText(lhs, compareOpText(op), rhs),
+                    known,
+                    taken,
+                    target,
+                });
+                pc = taken ? target : pc + 3;
+                break;
+            }
+
+            case 0xa7:
+                pc = branchTarget(pc, codeS2(method.code, pc + 1));
+                break;
 
             case 0xb2:
                 frame.push(Value::named("<static-field#" + std::to_string(codeU2(method.code, pc + 1)) + ">"));

@@ -113,6 +113,15 @@ void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& m
         }
     }
 
+    if (!trace.branches.empty()) {
+        std::cout << "  branches:\n";
+        for (const jvmpoc::BranchTrace& branch : trace.branches) {
+            std::cout << "    pc=" << branch.pc << " if " << branch.condition
+                      << " -> " << (branch.known ? (branch.taken ? "taken" : "not taken") : "unknown")
+                      << " target=" << branch.targetPc << "\n";
+        }
+    }
+
     if (!trace.runtimePrints.empty()) {
         std::cout << "  stdout:\n";
         for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
@@ -120,7 +129,7 @@ void printRuntimeTrace(const jvmpoc::ClassFile& cls, const jvmpoc::MethodInfo& m
         }
     }
 
-    if (trace.localWrites.empty() && trace.runtimePrints.empty()) {
+    if (trace.localWrites.empty() && trace.branches.empty() && trace.runtimePrints.empty()) {
         std::cout << "  <no observable toy-runtime effects>\n";
     }
 }
