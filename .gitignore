@@ -1,3 +1,4 @@
 .m2/
 target/
 tools/freej2me
+tools/classdump/classdump
