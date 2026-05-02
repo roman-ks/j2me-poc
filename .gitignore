@@ -4,3 +4,4 @@ tools/freej2me
 tools/classdump/classdump
 tools/jvm-poc/*.o
 tools/jvm-poc/jvm-poc
+tools/jvm-poc/jvm-poc-tests

@@ -727,6 +727,17 @@ std::optional<Value> executeMethod(
                 Value object = frame.pop();
                 callArgs[0] = object;
 
+                if ((ref.className == "java/lang/String" || stringId(object).has_value()) &&
+                    ref.name == "length" && ref.descriptor == "()I") {
+                    std::optional<uint32_t> id = stringId(object);
+                    auto strIt = id.has_value() ? rt.strings.find(*id) : rt.strings.end();
+                    frame.push(id.has_value() && strIt != rt.strings.end()
+                        ? Value::named(std::to_string(strIt->second.size()))
+                        : Value::named("<string-length:" + object.text + ">"));
+                    pc += 3;
+                    break;
+                }
+
                 if (ref.className == "java/lang/String" || stringId(object).has_value()) {
                     rt.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{
                         label,

@@ -3,6 +3,7 @@
 
 #include <exception>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -255,26 +256,59 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
     }
 }
 
+void printStdoutOnly(const jvmpoc::ExecutionTrace& trace) {
+    for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
+        std::cout << print.value.text << "\n";
+    }
+}
+
+void printUsage(const char* argv0) {
+    std::cerr << "usage: " << argv0 << " [--metadata] [--stdout-only] <class-file> [class-file...]\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "usage: " << argv[0] << " <class-file> [class-file...]\n";
+        printUsage(argv[0]);
         return 2;
     }
 
     try {
-        std::vector<jvmpoc::ClassFile> classes;
+        bool showMetadata = false;
+        bool stdoutOnly = false;
+        std::vector<std::string> paths;
         for (int i = 1; i < argc; ++i) {
-            classes.push_back(jvmpoc::parseClassFile(argv[i]));
+            std::string arg = argv[i];
+            if (arg == "--metadata") {
+                showMetadata = true;
+            } else if (arg == "--stdout-only") {
+                stdoutOnly = true;
+            } else if (arg == "--help" || arg == "-h") {
+                printUsage(argv[0]);
+                return 0;
+            } else {
+                paths.push_back(arg);
+            }
+        }
+        if (paths.empty()) {
+            printUsage(argv[0]);
+            return 2;
         }
 
-        std::cout << "metadata\n";
-        for (int i = 1; i < argc; ++i) {
-            if (i > 1) {
-                std::cout << "\n";
+        std::vector<jvmpoc::ClassFile> classes;
+        for (const std::string& path : paths) {
+            classes.push_back(jvmpoc::parseClassFile(path));
+        }
+
+        if (showMetadata && !stdoutOnly) {
+            std::cout << "metadata\n";
+            for (size_t i = 0; i < classes.size(); ++i) {
+                if (i > 0) {
+                    std::cout << "\n";
+                }
+                printClass(classes[i]);
             }
-            printClass(classes[static_cast<size_t>(i - 1)]);
         }
 
         bool ran = false;
@@ -283,15 +317,24 @@ int main(int argc, char** argv) {
             if (mainMethod == nullptr) {
                 continue;
             }
-            std::cout << "\n";
-            if (!ran) {
-                std::cout << "runtime\n";
+            if (stdoutOnly) {
+                printStdoutOnly(jvmpoc::executeStraightLine(classes, cls, *mainMethod));
+            } else {
+                if (showMetadata || ran) {
+                    std::cout << "\n";
+                }
+                if (!ran) {
+                    std::cout << "runtime\n";
+                }
+                printRuntimeTrace(classes, cls, *mainMethod);
             }
-            printRuntimeTrace(classes, cls, *mainMethod);
             ran = true;
         }
 
-        if (!ran) {
+        if (!ran && !stdoutOnly) {
+            if (showMetadata) {
+                std::cout << "\n";
+            }
             std::cout << "\nruntime\n  <no public static main([Ljava/lang/String;)V found>\n";
         }
     } catch (const std::exception& e) {
