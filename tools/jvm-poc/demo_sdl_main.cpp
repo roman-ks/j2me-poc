@@ -1,3 +1,4 @@
+#include "extracted_midlet.hpp"
 #include "jvm_midlet_app.hpp"
 #include "j2me_port/J2MECompat.hpp"
 #include "sdl_image_decoder.hpp"
@@ -105,13 +106,15 @@ void printUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [--assets dir] <midlet-class/name> <class-file> [class-file...]\n";
+    std::cerr << "usage: " << argv0
+              << " [--midlet class/name] <extracted-midlet-root>\n"
+              << "       " << argv0 << " [--assets dir] <midlet-class/name> <class-file> [class-file...]\n";
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
+    if (argc < 2) {
         printUsage(argv[0]);
         return 2;
     }
@@ -125,6 +128,7 @@ int main(int argc, char** argv) {
         jvmpoc::installSdlImageDecoder();
 
         std::string assetsDir;
+        std::string midletOverride;
         int argIndex = 1;
         while (argIndex < argc) {
             std::string arg = argv[argIndex];
@@ -137,14 +141,20 @@ int main(int argc, char** argv) {
                 assetsDir = argv[argIndex + 1];
                 argIndex += 2;
                 continue;
+            } else if (arg == "--midlet") {
+                if (argIndex + 1 >= argc) {
+                    printUsage(argv[0]);
+                    SDL_Quit();
+                    return 2;
+                }
+                midletOverride = argv[argIndex + 1];
+                argIndex += 2;
+                continue;
             }
             break;
         }
-        if (!assetsDir.empty()) {
-            port::setResourceRoot(assetsDir);
-        }
 
-        if (argc - argIndex < 2) {
+        if (argc - argIndex < 1) {
             printUsage(argv[0]);
             SDL_Quit();
             return 2;
@@ -157,12 +167,32 @@ int main(int argc, char** argv) {
         SdlJvmHost host(width, height, scale);
         jvmpoc::JvmMidletApp app(host);
 
-        std::vector<std::string> classFiles;
-        for (int i = argIndex + 1; i < argc; ++i) {
-            classFiles.push_back(argv[i]);
+        std::string midletClass;
+        if (argc - argIndex == 1 && jvmpoc::isDirectory(argv[argIndex])) {
+            jvmpoc::ExtractedMidlet extracted = jvmpoc::loadExtractedMidlet(argv[argIndex], midletOverride);
+            port::setResourceRoot(assetsDir.empty() ? extracted.root : assetsDir);
+            app.setClasses(std::move(extracted.classes));
+            midletClass = extracted.midletClass;
+        } else {
+            if (argc - argIndex < 2) {
+                printUsage(argv[0]);
+                SDL_Quit();
+                return 2;
+            }
+            midletClass = argv[argIndex];
+            if (!midletOverride.empty()) {
+                midletClass = midletOverride;
+            }
+            if (!assetsDir.empty()) {
+                port::setResourceRoot(assetsDir);
+            }
+            std::vector<std::string> classFiles;
+            for (int i = argIndex + 1; i < argc; ++i) {
+                classFiles.push_back(argv[i]);
+            }
+            app.loadClasses(classFiles);
         }
-        app.loadClasses(classFiles);
-        const jvmpoc::ExecutionTrace& startTrace = app.start(argv[argIndex]);
+        const jvmpoc::ExecutionTrace& startTrace = app.start(midletClass);
         printUnknownCalls(startTrace);
         (void)app.render();
 

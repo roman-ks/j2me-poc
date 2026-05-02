@@ -1,5 +1,7 @@
 #include "class_file.hpp"
+#include "extracted_midlet.hpp"
 #include "interpreter.hpp"
+#include "j2me_port/J2MECompat.hpp"
 #include "jvm_midlet_app.hpp"
 
 #include <exception>
@@ -325,7 +327,8 @@ void printStdoutOnly(const jvmpoc::ExecutionTrace& trace) {
 }
 
 void printUsage(const char* argv0) {
-    std::cerr << "usage: " << argv0 << " [--metadata] [--stdout-only] [--midlet class/name] <class-file> [class-file...]\n";
+    std::cerr << "usage: " << argv0
+              << " [--metadata] [--stdout-only] [--midlet class/name] <extracted-midlet-root | class-file...>\n";
 }
 
 } // namespace
@@ -366,8 +369,15 @@ int main(int argc, char** argv) {
         }
 
         std::vector<jvmpoc::ClassFile> classes;
-        for (const std::string& path : paths) {
-            classes.push_back(jvmpoc::parseClassFile(path));
+        if (paths.size() == 1 && jvmpoc::isDirectory(paths[0])) {
+            jvmpoc::ExtractedMidlet extracted = jvmpoc::loadExtractedMidlet(paths[0], midletClass);
+            port::setResourceRoot(extracted.root);
+            classes = std::move(extracted.classes);
+            midletClass = extracted.midletClass;
+        } else {
+            for (const std::string& path : paths) {
+                classes.push_back(jvmpoc::parseClassFile(path));
+            }
         }
 
         if (showMetadata && !stdoutOnly) {

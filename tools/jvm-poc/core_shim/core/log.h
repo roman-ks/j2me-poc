@@ -36,7 +36,7 @@ inline const char* createLoggerName(const char *file, long line){
 
 #define LOGF(fmt, ...) \
     do { \
-        printf("%-40s " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG(msg) \
@@ -47,7 +47,7 @@ inline const char* createLoggerName(const char *file, long line){
 #if LOG_LEVEL == 0
 #define LOGF_T(fmt, ...) \
     do { \
-        printf("%-40s [TRACE] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [TRACE] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 #define LOG_T(msg) \
     do { \
@@ -56,7 +56,7 @@ inline const char* createLoggerName(const char *file, long line){
 
 #define LOGF_D(fmt, ...) \
     do { \
-        printf("%-40s [DEBUG] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [DEBUG] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 #define LOG_D(msg) \
     do { \
@@ -65,7 +65,7 @@ inline const char* createLoggerName(const char *file, long line){
     
 #define LOGF_I(fmt, ...) \
     do { \
-        printf("%-40s [INFO ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [INFO ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_I(msg) \
@@ -74,7 +74,7 @@ inline const char* createLoggerName(const char *file, long line){
     } while(0)
 #define LOGF_W(fmt, ...) \
     do { \
-        printf("%-40s [WARN ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [WARN ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_W(msg) \
@@ -86,7 +86,7 @@ inline const char* createLoggerName(const char *file, long line){
 #define LOG_T(msg)
 #define LOGF_D(fmt, ...) \
     do { \
-        printf("%-40s [DEBUG] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [DEBUG] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 #define LOG_D(msg) \
     do { \
@@ -95,7 +95,7 @@ inline const char* createLoggerName(const char *file, long line){
     
 #define LOGF_I(fmt, ...) \
     do { \
-        printf("%-40s [INFO ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [INFO ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_I(msg) \
@@ -104,7 +104,7 @@ inline const char* createLoggerName(const char *file, long line){
     } while(0)
 #define LOGF_W(fmt, ...) \
     do { \
-        printf("%-40s [WARN ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [WARN ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_W(msg) \
@@ -118,7 +118,7 @@ inline const char* createLoggerName(const char *file, long line){
 #define LOG_D(msg)
 #define LOGF_I(fmt, ...) \
     do { \
-        printf("%-40s [INFO ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [INFO ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_I(msg) \
@@ -127,7 +127,7 @@ inline const char* createLoggerName(const char *file, long line){
     } while(0)
 #define LOGF_W(fmt, ...) \
     do { \
-        printf("%-40s [WARN ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [WARN ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_W(msg) \
@@ -143,7 +143,7 @@ inline const char* createLoggerName(const char *file, long line){
 #define LOG_I(msg)
 #define LOGF_W(fmt, ...) \
     do { \
-        printf("%-40s [WARN ] " fmt, createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
+        printf("%-40s [WARN ] " fmt "\n", createLoggerName(__FILE__, __LINE__), ##__VA_ARGS__); \
     } while(0)
 
 #define LOG_W(msg) \
