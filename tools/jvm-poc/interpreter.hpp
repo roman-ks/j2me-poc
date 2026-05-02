@@ -65,6 +65,8 @@ struct GcReport {
     std::vector<std::string> roots;
     std::vector<Value> unreachableObjects;
     std::vector<Value> unreachableArrays;
+    std::vector<Value> freedObjects;
+    std::vector<Value> freedArrays;
 };
 
 struct ExecutionTrace {

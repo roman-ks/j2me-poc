@@ -5,4 +5,6 @@ public final class NativeRuntime {
     }
 
     public static native void printInt(int value);
+
+    public static native void gc();
 }

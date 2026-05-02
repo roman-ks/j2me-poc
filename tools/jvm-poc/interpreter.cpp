@@ -104,6 +104,17 @@ bool isNativeRuntimePrintInt(const MethodRef& ref) {
     return classMatches && ref.name == "printInt" && ref.descriptor == "(I)V";
 }
 
+bool isNativeRuntimeGc(const MethodRef& ref) {
+    const std::string suffix = "/NativeRuntime";
+    bool classMatches = ref.className == "NativeRuntime";
+    if (ref.className.size() >= suffix.size()) {
+        classMatches = classMatches ||
+                       ref.className.compare(ref.className.size() - suffix.size(), suffix.size(), suffix) == 0;
+    }
+
+    return classMatches && ref.name == "gc" && ref.descriptor == "()V";
+}
+
 std::string methodLabel(const ClassFile& cls, const MethodInfo& method) {
     return cls.thisClass + "." + method.name + method.descriptor;
 }
@@ -188,6 +199,8 @@ struct Runtime {
     IntArrayHeap arrays;
     uint32_t nextObjectId = 1;
     uint32_t nextArrayId = 1;
+    std::vector<uint32_t> freeObjectIds;
+    std::vector<uint32_t> freeArrayIds;
     std::vector<RuntimeFrame> callStack;
     ExecutionTrace trace;
     size_t steps = 0;
@@ -274,7 +287,7 @@ void addRoot(
     markValue(value, rt, markedObjects, markedArrays);
 }
 
-void reportGc(Runtime& rt, std::string when, const std::optional<Value>& returnValue) {
+void collectGarbage(Runtime& rt, std::string when) {
     GcReport report;
     report.when = std::move(when);
 
@@ -296,19 +309,31 @@ void reportGc(Runtime& rt, std::string when, const std::optional<Value>& returnV
                     stack[i], rt, markedObjects, markedArrays);
         }
     }
-    if (returnValue.has_value()) {
-        addRoot(report, "return", *returnValue, rt, markedObjects, markedArrays);
-    }
 
+    std::vector<uint32_t> objectsToFree;
     for (const auto& object : rt.heap) {
         if (markedObjects.find(object.first) == markedObjects.end()) {
             report.unreachableObjects.push_back(objectRef(object.first));
+            objectsToFree.push_back(object.first);
         }
     }
+    std::vector<uint32_t> arraysToFree;
     for (const auto& array : rt.arrays) {
         if (markedArrays.find(array.first) == markedArrays.end()) {
             report.unreachableArrays.push_back(arrayRef(array.first));
+            arraysToFree.push_back(array.first);
         }
+    }
+
+    for (uint32_t id : objectsToFree) {
+        rt.heap.erase(id);
+        rt.freeObjectIds.push_back(id);
+        report.freedObjects.push_back(objectRef(id));
+    }
+    for (uint32_t id : arraysToFree) {
+        rt.arrays.erase(id);
+        rt.freeArrayIds.push_back(id);
+        report.freedArrays.push_back(arrayRef(id));
     }
 
     rt.trace.gcReports.push_back(report);
@@ -331,7 +356,6 @@ std::optional<Value> executeMethod(
 
     auto finish = [&](std::optional<Value> result) -> std::optional<Value> {
         rt.callStack.pop_back();
-        reportGc(rt, "after return " + label, result);
         return result;
     };
 
@@ -587,6 +611,8 @@ std::optional<Value> executeMethod(
                 MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
                 if (isNativeRuntimePrintInt(ref)) {
                     rt.trace.runtimePrints.push_back(RuntimePrint{label, callPc, frame.pop()});
+                } else if (isNativeRuntimeGc(ref)) {
+                    collectGarbage(rt, label + " pc=" + std::to_string(callPc));
                 } else {
                     std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
                     std::vector<Value> callArgs(widths.size());
@@ -649,7 +675,13 @@ std::optional<Value> executeMethod(
             {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(method.code, pc + 1));
-                uint32_t id = rt.nextObjectId++;
+                uint32_t id = 0;
+                if (!rt.freeObjectIds.empty()) {
+                    id = rt.freeObjectIds.back();
+                    rt.freeObjectIds.pop_back();
+                } else {
+                    id = rt.nextObjectId++;
+                }
                 rt.heap[id] = HeapObject{className, {}};
                 Value ref = objectRef(id);
                 rt.trace.objectAllocs.push_back(ObjectAlloc{label, allocPc, ref, className});
@@ -665,7 +697,13 @@ std::optional<Value> executeMethod(
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
                 if (atype == 10 && count.has_value() && *count >= 0) {
-                    uint32_t id = rt.nextArrayId++;
+                    uint32_t id = 0;
+                    if (!rt.freeArrayIds.empty()) {
+                        id = rt.freeArrayIds.back();
+                        rt.freeArrayIds.pop_back();
+                    } else {
+                        id = rt.nextArrayId++;
+                    }
                     rt.arrays[id] = IntArray{std::vector<Value>(static_cast<size_t>(*count), Value::named("0"))};
                     Value ref = arrayRef(id);
                     rt.trace.arrayAllocs.push_back(ArrayAlloc{label, allocPc, ref, static_cast<size_t>(*count)});

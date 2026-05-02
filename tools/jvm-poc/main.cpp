@@ -200,8 +200,23 @@ void printRuntimeTrace(const std::vector<jvmpoc::ClassFile>& classes, const jvmp
                 }
                 std::cout << "\n";
             }
-            if (report.roots.empty() && report.unreachableObjects.empty() && report.unreachableArrays.empty()) {
-                std::cout << "      <empty heap>\n";
+            if (!report.freedObjects.empty()) {
+                std::cout << "      freed objects:";
+                for (const jvmpoc::Value& value : report.freedObjects) {
+                    std::cout << " " << value.text;
+                }
+                std::cout << "\n";
+            }
+            if (!report.freedArrays.empty()) {
+                std::cout << "      freed arrays:";
+                for (const jvmpoc::Value& value : report.freedArrays) {
+                    std::cout << " " << value.text;
+                }
+                std::cout << "\n";
+            }
+            if (report.roots.empty() && report.unreachableObjects.empty() && report.unreachableArrays.empty() &&
+                report.freedObjects.empty() && report.freedArrays.empty()) {
+                std::cout << "      <nothing to collect>\n";
             }
         }
     }
