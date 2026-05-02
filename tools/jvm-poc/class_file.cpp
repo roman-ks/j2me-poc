@@ -248,6 +248,13 @@ std::string resolveStringConstant(const ClassFile& cls, uint16_t index) {
     return utf8(cls.cp, cls.cp[index].a);
 }
 
+int32_t resolveIntegerConstant(const ClassFile& cls, uint16_t index) {
+    if (index == 0 || index >= cls.cp.size() || cls.cp[index].tag != CpInteger) {
+        throw std::runtime_error("bad Integer constant pool reference #" + std::to_string(index));
+    }
+    return cls.cp[index].intValue;
+}
+
 ClassFile parseClassFile(const std::string& path) {
     Reader r(readFile(path));
     if (r.u4() != 0xCAFEBABE) {
@@ -270,9 +277,11 @@ ClassFile parseClassFile(const std::string& path) {
                 entry.utf8.assign(bytes.begin(), bytes.end());
                 break;
             }
-            case CpInteger:
             case CpFloat:
                 r.skip(4);
+                break;
+            case CpInteger:
+                entry.intValue = static_cast<int32_t>(r.u4());
                 break;
             case CpLong:
             case CpDouble:

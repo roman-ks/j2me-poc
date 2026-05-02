@@ -74,11 +74,50 @@ bool isClassFile(const std::filesystem::path& path) {
     return path.has_extension() && path.extension() == ".class";
 }
 
+bool hasClass(const std::vector<ClassFile>& classes, const std::string& className) {
+    for (const ClassFile& cls : classes) {
+        if (cls.thisClass == className) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 bool isDirectory(const std::string& path) {
     std::error_code ec;
     return std::filesystem::is_directory(path, ec);
+}
+
+std::string defaultBootClassRoot() {
+    return "target/jvm-boot-classes";
+}
+
+void appendClassesFromDirectory(std::vector<ClassFile>& classes, const std::string& root) {
+    if (!isDirectory(root)) {
+        return;
+    }
+
+    std::vector<std::string> classFiles;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file() || !isClassFile(entry.path())) {
+            continue;
+        }
+        classFiles.push_back(entry.path().string());
+    }
+    std::sort(classFiles.begin(), classFiles.end());
+
+    for (const std::string& path : classFiles) {
+        ClassFile cls = parseClassFile(path);
+        if (!hasClass(classes, cls.thisClass)) {
+            classes.push_back(std::move(cls));
+        }
+    }
+}
+
+void appendDefaultBootClasses(std::vector<ClassFile>& classes) {
+    appendClassesFromDirectory(classes, defaultBootClassRoot());
 }
 
 std::string readMidletClassFromManifest(const std::string& root) {
@@ -112,6 +151,7 @@ ExtractedMidlet loadExtractedMidlet(const std::string& root, const std::string& 
     for (const std::string& path : result.classFiles) {
         result.classes.push_back(parseClassFile(path));
     }
+    appendDefaultBootClasses(result.classes);
 
     return result;
 }

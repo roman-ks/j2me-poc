@@ -20,6 +20,29 @@ NativeCallResult handleString(
             : Value::named("<string-length:" + receiver.text + ">"));
     }
 
+    if (ref.name == "getChars" && ref.descriptor == "(II[CI)V") {
+        std::optional<uint32_t> string = stringId(receiver);
+        int srcBegin = intArg(args, 1);
+        int srcEnd = intArg(args, 2);
+        std::optional<uint32_t> dst = args.size() > 3 ? arrayId(args[3]) : std::nullopt;
+        int dstBegin = intArg(args, 4);
+
+        auto strIt = string.has_value() ? ctx.strings.find(*string) : ctx.strings.end();
+        auto arrayIt = dst.has_value() ? ctx.arrays.find(*dst) : ctx.arrays.end();
+        if (string.has_value() && strIt != ctx.strings.end() &&
+            dst.has_value() && arrayIt != ctx.arrays.end() &&
+            srcBegin >= 0 && srcEnd >= srcBegin &&
+            static_cast<size_t>(srcEnd) <= strIt->second.size() &&
+            dstBegin >= 0 &&
+            static_cast<size_t>(dstBegin + (srcEnd - srcBegin)) <= arrayIt->second.size()) {
+            for (int i = srcBegin; i < srcEnd; ++i) {
+                unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(i)]);
+                arrayIt->second[static_cast<size_t>(dstBegin + i - srcBegin)] = Value::named(std::to_string(static_cast<int>(c)));
+            }
+        }
+        return handledVoid();
+    }
+
     ctx.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{
         methodLabel,
         pc,

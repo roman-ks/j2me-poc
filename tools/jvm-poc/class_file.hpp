@@ -29,6 +29,7 @@ struct CpEntry {
     std::string utf8;
     uint16_t a = 0;
     uint16_t b = 0;
+    int32_t intValue = 0;
 };
 
 struct FieldInfo {
@@ -91,6 +92,7 @@ MethodRef resolveMethodRef(const ClassFile& cls, uint16_t index);
 FieldRef resolveFieldRef(const ClassFile& cls, uint16_t index);
 std::string resolveClassRef(const ClassFile& cls, uint16_t index);
 std::string resolveStringConstant(const ClassFile& cls, uint16_t index);
+int32_t resolveIntegerConstant(const ClassFile& cls, uint16_t index);
 
 ClassFile parseClassFile(const std::string& path);
 

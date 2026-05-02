@@ -1,4 +1,5 @@
 #include "class_file.hpp"
+#include "extracted_midlet.hpp"
 #include "interpreter.hpp"
 #include "jvm_midlet_app.hpp"
 
@@ -156,6 +157,7 @@ bool runCase(const std::string& root, const TestCase& test) {
     for (const std::string& classFile : test.classFiles) {
         classes.push_back(jvmpoc::parseClassFile(classPath(root, classFile)));
     }
+    jvmpoc::appendDefaultBootClasses(classes);
 
     const jvmpoc::ClassFile* mainClass = findClass(classes, test.mainClass);
     if (mainClass == nullptr) {
@@ -257,6 +259,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "boot StringBuffer",
+            "dev/roman/hello/StringBufferBoot",
+            {"dev/roman/hello/StringBufferBoot"},
+            {"enemy[2]10.png", "14", "16"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "gc roots",
             "dev/roman/hello/GcRoots",
             {"dev/roman/hello/Objects", "dev/roman/hello/GcRoots"},
@@ -264,11 +278,7 @@ int main(int argc, char** argv) {
             {"obj#2"},
             {"arr#1"},
             {},
-            {
-                "java/lang/Object.<init>()V",
-                "java/lang/Object.<init>()V",
-                "java/lang/Object.<init>()V",
-            },
+            {},
             {},
             {},
         },
@@ -284,7 +294,7 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
-            {"java/lang/Object.<init>()V"},
+            {},
             {},
             {},
         },

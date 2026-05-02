@@ -149,12 +149,8 @@ struct HeapObject {
     std::map<std::string, Value> fields;
 };
 
-struct IntArray {
-    std::vector<Value> values;
-};
-
 using Heap = std::map<uint32_t, HeapObject>;
-using IntArrayHeap = std::map<uint32_t, IntArray>;
+using ArrayHeap = std::map<uint32_t, std::vector<Value>>;
 using StringHeap = std::map<uint32_t, std::string>;
 using ImageHeap = std::map<uint32_t, port::Image>;
 
@@ -167,7 +163,7 @@ struct Runtime {
     const JvmHost* host = nullptr;
     std::map<std::string, Value> staticFields;
     Heap heap;
-    IntArrayHeap arrays;
+    ArrayHeap arrays;
     StringHeap strings;
     ImageHeap images;
     std::map<std::string, uint32_t> internedStrings;
@@ -314,7 +310,7 @@ void markValue(
         if (arrayIt == rt.arrays.end()) {
             return;
         }
-        for (const Value& element : arrayIt->second.values) {
+        for (const Value& element : arrayIt->second) {
             markValue(element, rt, markedObjects, markedArrays, markedStrings);
         }
         return;
@@ -457,6 +453,7 @@ std::optional<Value> executeMethod(
             &classes,
             rt.trace,
             rt.strings,
+            rt.arrays,
             rt.images,
             rt.nextImageId,
             rt.displayRef,
@@ -468,6 +465,9 @@ std::optional<Value> executeMethod(
             {},
             [&](std::string when) {
                 collectGarbage(rt, std::move(when));
+            },
+            [&](const std::string& text) {
+                return internString(rt, text);
             },
         };
     };
@@ -481,6 +481,7 @@ std::optional<Value> executeMethod(
 
         uint8_t op = method.code[pc];
         switch (op) {
+            case 0x01: frame.push(Value::named("0")); ++pc; break;
             case 0x02: frame.push(Value::named("-1")); ++pc; break;
             case 0x03: frame.push(Value::named("0")); ++pc; break;
             case 0x04: frame.push(Value::named("1")); ++pc; break;
@@ -490,8 +491,22 @@ std::optional<Value> executeMethod(
             case 0x08: frame.push(Value::named("5")); ++pc; break;
             case 0x10: frame.push(Value::named(std::to_string(codeS1(method.code, pc + 1)))); pc += 2; break;
             case 0x11: frame.push(Value::named(std::to_string(codeS2(method.code, pc + 1)))); pc += 3; break;
-            case 0x12: frame.push(internString(rt, resolveStringConstant(cls, codeU1(method.code, pc + 1)))); pc += 2; break;
-            case 0x13: frame.push(internString(rt, resolveStringConstant(cls, codeU2(method.code, pc + 1)))); pc += 3; break;
+            case 0x12: {
+                uint16_t index = codeU1(method.code, pc + 1);
+                frame.push(cls.cp[index].tag == CpInteger
+                    ? Value::named(std::to_string(resolveIntegerConstant(cls, index)))
+                    : internString(rt, resolveStringConstant(cls, index)));
+                pc += 2;
+                break;
+            }
+            case 0x13: {
+                uint16_t index = codeU2(method.code, pc + 1);
+                frame.push(cls.cp[index].tag == CpInteger
+                    ? Value::named(std::to_string(resolveIntegerConstant(cls, index)))
+                    : internString(rt, resolveStringConstant(cls, index)));
+                pc += 3;
+                break;
+            }
 
             case 0x1a: frame.push(frame.local(0)); ++pc; break;
             case 0x1b: frame.push(frame.local(1)); ++pc; break;
@@ -513,8 +528,26 @@ std::optional<Value> executeMethod(
                 if (id.has_value() && index.has_value()) {
                     auto arrayIt = rt.arrays.find(*id);
                     if (arrayIt != rt.arrays.end() && *index >= 0 &&
-                        static_cast<size_t>(*index) < arrayIt->second.values.size()) {
-                        loaded = arrayIt->second.values[static_cast<size_t>(*index)];
+                        static_cast<size_t>(*index) < arrayIt->second.size()) {
+                        loaded = arrayIt->second[static_cast<size_t>(*index)];
+                    }
+                }
+                frame.push(loaded);
+                ++pc;
+                break;
+            }
+
+            case 0x34: {
+                Value indexValue = frame.pop();
+                Value arrayValue = frame.pop();
+                Value loaded = Value::named("0");
+                std::optional<uint32_t> id = arrayId(arrayValue);
+                std::optional<int> index = parseIntValue(indexValue);
+                if (id.has_value() && index.has_value()) {
+                    auto arrayIt = rt.arrays.find(*id);
+                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
+                        static_cast<size_t>(*index) < arrayIt->second.size()) {
+                        loaded = arrayIt->second[static_cast<size_t>(*index)];
                     }
                 }
                 frame.push(loaded);
@@ -543,8 +576,27 @@ std::optional<Value> executeMethod(
                 if (id.has_value() && index.has_value()) {
                     auto arrayIt = rt.arrays.find(*id);
                     if (arrayIt != rt.arrays.end() && *index >= 0 &&
-                        static_cast<size_t>(*index) < arrayIt->second.values.size()) {
-                        arrayIt->second.values[static_cast<size_t>(*index)] = value;
+                        static_cast<size_t>(*index) < arrayIt->second.size()) {
+                        arrayIt->second[static_cast<size_t>(*index)] = value;
+                    }
+                }
+                rt.trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
+                ++pc;
+                break;
+            }
+
+            case 0x55: {
+                uint32_t writePc = static_cast<uint32_t>(pc);
+                Value value = frame.pop();
+                Value indexValue = frame.pop();
+                Value arrayValue = frame.pop();
+                std::optional<uint32_t> id = arrayId(arrayValue);
+                std::optional<int> index = parseIntValue(indexValue);
+                if (id.has_value() && index.has_value()) {
+                    auto arrayIt = rt.arrays.find(*id);
+                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
+                        static_cast<size_t>(*index) < arrayIt->second.size()) {
+                        arrayIt->second[static_cast<size_t>(*index)] = value;
                     }
                 }
                 rt.trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
@@ -559,6 +611,11 @@ std::optional<Value> executeMethod(
                 ++pc;
                 break;
             }
+
+            case 0x57:
+                (void)frame.pop();
+                ++pc;
+                break;
 
             case 0x84: {
                 uint32_t iincPc = static_cast<uint32_t>(pc);
@@ -578,14 +635,35 @@ std::optional<Value> executeMethod(
             case 0x60:
             case 0x64:
             case 0x68:
-            case 0x6c: {
+            case 0x6c:
+            case 0x70: {
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
-                const char* opText = op == 0x60 ? "+" : op == 0x64 ? "-" : op == 0x68 ? "*" : "/";
-                frame.push(intBinaryOp(lhs, rhs, opText, op));
+                const char* opText = op == 0x60 ? "+" : op == 0x64 ? "-" : op == 0x68 ? "*" : op == 0x6c ? "/" : "%";
+                std::optional<int> left = parseIntValue(lhs);
+                std::optional<int> right = parseIntValue(rhs);
+                if (op == 0x70 && left.has_value() && right.has_value()) {
+                    frame.push(*right == 0 ? Value::named("<divide-by-zero>") : Value::named(std::to_string(*left % *right)));
+                } else {
+                    frame.push(intBinaryOp(lhs, rhs, opText, op));
+                }
                 ++pc;
                 break;
             }
+
+            case 0x74: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value()
+                    ? Value::named(std::to_string(-*parsed))
+                    : Value::named("(-" + value.text + ")"));
+                ++pc;
+                break;
+            }
+
+            case 0x92:
+                ++pc;
+                break;
 
             case 0x99:
             case 0x9a:
@@ -642,6 +720,26 @@ std::optional<Value> executeMethod(
             case 0xa7:
                 pc = branchTarget(pc, codeS2(method.code, pc + 1));
                 break;
+
+            case 0xc6:
+            case 0xc7: {
+                uint32_t branchPc = static_cast<uint32_t>(pc);
+                int16_t offset = codeS2(method.code, pc + 1);
+                uint32_t target = branchTarget(pc, offset);
+                Value value = frame.pop();
+                bool known = value.text == "0";
+                bool taken = op == 0xc6 ? known : !known;
+                rt.trace.branches.push_back(BranchTrace{
+                    label,
+                    branchPc,
+                    value.text + (op == 0xc6 ? " == null" : " != null"),
+                    true,
+                    taken,
+                    target,
+                });
+                pc = taken ? target : pc + 3;
+                break;
+            }
 
             case 0xb2:
             {
@@ -809,7 +907,7 @@ std::optional<Value> executeMethod(
                 uint8_t atype = codeU1(method.code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
-                if (atype == 10 && count.has_value() && *count >= 0) {
+                if ((atype == 5 || atype == 10) && count.has_value() && *count >= 0) {
                     uint32_t id = 0;
                     if (!rt.freeArrayIds.empty()) {
                         id = rt.freeArrayIds.back();
@@ -817,7 +915,7 @@ std::optional<Value> executeMethod(
                     } else {
                         id = rt.nextArrayId++;
                     }
-                    rt.arrays[id] = IntArray{std::vector<Value>(static_cast<size_t>(*count), Value::named("0"))};
+                    rt.arrays[id] = std::vector<Value>(static_cast<size_t>(*count), Value::named("0"));
                     Value ref = arrayRef(id);
                     rt.trace.arrayAllocs.push_back(ArrayAlloc{label, allocPc, ref, static_cast<size_t>(*count)});
                     frame.push(ref);
@@ -834,7 +932,7 @@ std::optional<Value> executeMethod(
                 std::optional<uint32_t> id = arrayId(arrayValue);
                 auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
                 if (id.has_value() && arrayIt != rt.arrays.end()) {
-                    frame.push(Value::named(std::to_string(arrayIt->second.values.size())));
+                    frame.push(Value::named(std::to_string(arrayIt->second.size())));
                 } else {
                     frame.push(Value::named("<arraylength:" + arrayValue.text + ">"));
                 }

@@ -32,6 +32,10 @@ std::optional<uint32_t> stringId(const Value& value) {
     return parseHandle(value, "str#");
 }
 
+std::optional<uint32_t> arrayId(const Value& value) {
+    return parseHandle(value, "arr#");
+}
+
 std::optional<uint32_t> imageId(const Value& value) {
     return parseHandle(value, "image#");
 }

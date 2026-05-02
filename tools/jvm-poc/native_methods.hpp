@@ -20,6 +20,7 @@ struct NativeCallContext {
     const std::vector<ClassFile>* classes = nullptr;
     ExecutionTrace& trace;
     std::map<uint32_t, std::string>& strings;
+    std::map<uint32_t, std::vector<Value>>& arrays;
     std::map<uint32_t, port::Image>& images;
     uint32_t& nextImageId;
     Value& displayRef;
@@ -30,6 +31,7 @@ struct NativeCallContext {
     int& graphicsColorRgb;
     std::string receiverClassName;
     std::function<void(std::string)> collectGarbage;
+    std::function<Value(const std::string&)> internString;
 };
 
 struct NativeCallResult {

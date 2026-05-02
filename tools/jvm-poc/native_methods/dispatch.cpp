@@ -24,6 +24,10 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "java/lang/StringBuffer") {
+        return native_methods::handleStringBuffer(ctx, methodLabel, pc, ref, args);
+    }
+
     return NativeCallResult{};
 }
 
@@ -37,6 +41,10 @@ NativeCallResult handleNativeInstanceCall(
 
     if (ref.className == "javax/microedition/midlet/MIDlet") {
         return native_methods::handleMidlet(ctx, methodLabel, pc, ref, args);
+    }
+
+    if (ref.className == "java/lang/Object") {
+        return native_methods::handleObject(ctx, methodLabel, pc, ref, args);
     }
 
     if (ref.className == "javax/microedition/lcdui/Display") {

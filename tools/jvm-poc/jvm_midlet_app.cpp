@@ -1,5 +1,7 @@
 #include "jvm_midlet_app.hpp"
 
+#include "extracted_midlet.hpp"
+
 namespace jvmpoc {
 
 JvmMidletApp::JvmMidletApp(JvmHost& host) : host_(host) {}
@@ -10,10 +12,12 @@ void JvmMidletApp::loadClasses(const std::vector<std::string>& classFiles) {
     for (const std::string& path : classFiles) {
         classes_.push_back(parseClassFile(path));
     }
+    appendDefaultBootClasses(classes_);
 }
 
 void JvmMidletApp::setClasses(std::vector<ClassFile> classes) {
     classes_ = std::move(classes);
+    appendDefaultBootClasses(classes_);
 }
 
 const ExecutionTrace& JvmMidletApp::start(const std::string& className) {

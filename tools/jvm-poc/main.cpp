@@ -381,6 +381,7 @@ int main(int argc, char** argv) {
             for (const std::string& path : paths) {
                 classes.push_back(jvmpoc::parseClassFile(path));
             }
+            jvmpoc::appendDefaultBootClasses(classes);
         }
 
         if (showMetadata && !stdoutOnly) {

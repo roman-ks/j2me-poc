@@ -15,6 +15,9 @@ struct ExtractedMidlet {
 };
 
 bool isDirectory(const std::string& path);
+std::string defaultBootClassRoot();
+void appendClassesFromDirectory(std::vector<ClassFile>& classes, const std::string& root);
+void appendDefaultBootClasses(std::vector<ClassFile>& classes);
 std::string readMidletClassFromManifest(const std::string& root);
 ExtractedMidlet loadExtractedMidlet(const std::string& root, const std::string& midletOverride = {});
 
