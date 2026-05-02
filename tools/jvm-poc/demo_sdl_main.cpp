@@ -1,7 +1,7 @@
 #include "extracted_midlet.hpp"
 #include "jvm_midlet_app.hpp"
 #include "j2me_port/J2MECompat.hpp"
-#include "sdl_image_decoder.hpp"
+#include "stb_image_decoder.hpp"
 
 #include <SDL.h>
 
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
     }
 
     try {
-        jvmpoc::installSdlImageDecoder();
+        jvmpoc::installStbImageDecoder();
 
         std::string assetsDir;
         std::string midletOverride;

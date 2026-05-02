@@ -3,6 +3,7 @@
 #include "interpreter.hpp"
 #include "j2me_port/J2MECompat.hpp"
 #include "jvm_midlet_app.hpp"
+#include "stb_image_decoder.hpp"
 
 #include <exception>
 #include <iostream>
@@ -334,6 +335,8 @@ void printUsage(const char* argv0) {
 } // namespace
 
 int main(int argc, char** argv) {
+    jvmpoc::installStbImageDecoder();
+
     if (argc < 2) {
         printUsage(argv[0]);
         return 2;

@@ -3,8 +3,6 @@
 #include "BitmapFont5x7.hpp"
 
 #include <algorithm>
-#include <array>
-#include <cstring>
 #include <string>
 #include <vector>
 #include <core/log.h>
@@ -37,88 +35,29 @@ bool alphaMaskBitIsSet(const std::vector<uint8_t>& mask, int width, int x, int y
     return (mask[byteIndex] & bit) != 0;
 }
 
-bool maskHasRealTransparency(const std::vector<uint8_t>& mask, int width, int height) {
-    if (mask.empty() || width <= 0 || height <= 0) {
-        return false;
-    }
-
-    bool sawOpaque = false;
-    bool sawTransparent = false;
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (alphaMaskBitIsSet(mask, width, x, y)) {
-                sawOpaque = true;
-            } else {
-                sawTransparent = true;
-            }
-
-            if (sawOpaque && sawTransparent) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-
 } // namespace
 
 Image Image::createImage(const std::string& path) {
     Image image;
     image.sourcePath = path;
 
+    if (g_imageDecoder == nullptr) {
+        LOGF_W("No image decoder installed for resource: %s", path.c_str());
+        return image;
+    }
+
     std::vector<uint8_t> encoded;
-    if (g_imageDecoder != nullptr && readResourceAll(path, encoded) && !encoded.empty()) {
-        if (g_imageDecoder(encoded, image)) {
-            image.sourcePath = path;
-            return image;
-        }
-    }
-
-    const std::string binaryPath = path + ".b";
-    if (readResourceAll(binaryPath, encoded) == false || encoded.size() < 5) {
-        LOGF_W("Failed to load image resource: %s (binary path: %s)", path.c_str(), binaryPath.c_str());
+    if (!readResourceAll(path, encoded) || encoded.empty()) {
+        LOGF_W("Failed to load image resource: %s", path.c_str());
         return image;
     }
 
-    const uint16_t decodedWidth = static_cast<uint16_t>(encoded[0] | (static_cast<uint16_t>(encoded[1]) << 8u));
-    const uint16_t decodedHeight = static_cast<uint16_t>(encoded[2] | (static_cast<uint16_t>(encoded[3]) << 8u));
-    const bool hasAlpha = encoded[4] != 0;
-    if (decodedWidth == 0 || decodedHeight == 0) {
-        LOGF_W("Invalid image dimensions in resource: %s (width: %u, height: %u)", path.c_str(), decodedWidth, decodedHeight);
+    if (!g_imageDecoder(encoded, image)) {
+        LOGF_W("Failed to decode image resource: %s", path.c_str());
         return image;
     }
 
-    const size_t pixelCount = static_cast<size_t>(decodedWidth) * static_cast<size_t>(decodedHeight);
-    const size_t colorBytes = pixelCount * sizeof(uint16_t);
-    const size_t alphaBytesPerRow = (static_cast<size_t>(decodedWidth) + 7u) >> 3u;
-    const size_t alphaBytes = hasAlpha ? (alphaBytesPerRow * static_cast<size_t>(decodedHeight)) : 0u;
-    const size_t expectedSize = 5u + colorBytes + alphaBytes;
-    if (encoded.size() != expectedSize) {
-        LOGF_W("Unexpected image data size in resource: %s (expected: %zu, actual: %zu)", path.c_str(), expectedSize, encoded.size());
-        return image;
-    }
-
-    image.width = static_cast<int>(decodedWidth);
-    image.height = static_cast<int>(decodedHeight);
-    image.pixels.resize(pixelCount);
-
-    size_t offset = 5u;
-    for (size_t i = 0; i < pixelCount; ++i) {
-        image.pixels[i] = static_cast<uint16_t>(encoded[offset] | (static_cast<uint16_t>(encoded[offset + 1]) << 8u));
-        offset += 2u;
-    }
-
-    if (hasAlpha && alphaBytes > 0) {
-        image.alphaMask.resize(alphaBytes);
-        std::memcpy(image.alphaMask.data(), encoded.data() + static_cast<std::ptrdiff_t>(offset), alphaBytes);
-        image.hasAlphaMask = maskHasRealTransparency(image.alphaMask, image.width, image.height);
-        if (!image.hasAlphaMask) {
-            image.alphaMask.clear();
-        }
-    }
-
+    image.sourcePath = path;
     return image;
 }
 

@@ -47,7 +47,13 @@ std::string resolveAssetPath(const std::string& rawPath) {
     };
 
     if (g_resourceFs == nullptr) {
-        return candidates[0];
+        for (const auto& candidate : candidates) {
+            std::ifstream in(candidate, std::ios::binary);
+            if (in) {
+                return candidate;
+            }
+        }
+        return noSlash;
     }
 
     for (const auto& candidate : candidates) {
