@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -108,6 +109,168 @@ void printUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
         }
         std::cout << "\n";
     }
+}
+
+bool isIgnorableUnknownCall(const jvmpoc::UnknownMethodCall& call) {
+    return call.methodName == "java/io/PrintStream.println(Ljava/lang/String;)V";
+}
+
+bool hasMeaningfulUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
+    for (const jvmpoc::UnknownMethodCall& call : trace.unknownMethodCalls) {
+        if (!isIgnorableUnknownCall(call)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void printMeaningfulUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
+    bool printedHeader = false;
+    for (const jvmpoc::UnknownMethodCall& call : trace.unknownMethodCalls) {
+        if (isIgnorableUnknownCall(call)) {
+            continue;
+        }
+        if (!printedHeader) {
+            std::cout << "unknown method calls:\n";
+            printedHeader = true;
+        }
+        std::cout << "  " << call.methodName;
+        if (call.nooped) {
+            std::cout << " noop";
+        }
+        if (!call.result.empty()) {
+            std::cout << " -> " << call.result;
+        }
+        std::cout << "\n";
+    }
+}
+
+void printSuspiciousFrame(const jvmpoc::ExecutionTrace& trace, int blankFrames) {
+    std::cout << "suspicious frame: blankFrames=" << blankFrames;
+    if (!trace.currentDisplayableClass.empty()) {
+        std::cout << " displayable=" << trace.currentDisplayableClass;
+    }
+    std::cout << "\n";
+
+    if (trace.stepLimitHit) {
+        std::cout << "  step limit hit\n";
+    }
+    if (!trace.currentDisplayableFields.empty()) {
+        std::cout << "  displayable fields:";
+        for (const std::string& field : trace.currentDisplayableFields) {
+            std::cout << " " << field;
+        }
+        std::cout << "\n";
+    }
+    if (!trace.stackSnapshot.empty()) {
+        std::cout << "  stack snapshot:\n";
+        for (const std::string& frame : trace.stackSnapshot) {
+            std::cout << "    " << frame << "\n";
+        }
+    }
+    if (!trace.suspendedTasks.empty()) {
+        std::cout << "  suspended tasks:\n";
+        for (const std::string& task : trace.suspendedTasks) {
+            std::cout << "    " << task << "\n";
+        }
+    }
+    printMeaningfulUnknownCalls(trace);
+}
+
+bool shouldPrintSuspiciousFrame(const jvmpoc::ExecutionTrace& trace, int blankFrames) {
+    if (trace.stepLimitHit || hasMeaningfulUnknownCalls(trace)) {
+        return true;
+    }
+    if (blankFrames < 30) {
+        return false;
+    }
+    return blankFrames == 30 || blankFrames % 120 == 0;
+}
+
+std::map<std::string, std::string> fieldMap(const jvmpoc::ExecutionTrace& trace) {
+    std::map<std::string, std::string> fields;
+    for (const std::string& field : trace.currentDisplayableFields) {
+        size_t split = field.find('=');
+        if (split == std::string::npos) {
+            continue;
+        }
+        fields[field.substr(0, split)] = field.substr(split + 1);
+    }
+    return fields;
+}
+
+std::string fieldOrMissing(const std::map<std::string, std::string>& fields, const std::string& name) {
+    auto it = fields.find(name);
+    return it == fields.end() ? "<unset>" : it->second;
+}
+
+std::string trackedStateKey(const jvmpoc::ExecutionTrace& trace) {
+    std::map<std::string, std::string> fields = fieldMap(trace);
+    return trace.currentDisplayableClass +
+        " screen=" + fieldOrMissing(fields, "screen") +
+        " state=" + fieldOrMissing(fields, "state") +
+        " ani_step=" + fieldOrMissing(fields, "ani_step") +
+        " m_mode=" + fieldOrMissing(fields, "m_mode") +
+        " p_mode=" + fieldOrMissing(fields, "p_mode") +
+        " game_on=" + fieldOrMissing(fields, "game_on") +
+        " msg=" + fieldOrMissing(fields, "msg");
+}
+
+void printStateTransition(const jvmpoc::ExecutionTrace& trace) {
+    if (trace.currentDisplayableClass.empty()) {
+        return;
+    }
+    std::cout << "state transition: " << trackedStateKey(trace) << "\n";
+}
+
+void printStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) {
+    std::cout << "stalled state: repeatedFrames=" << repeatedFrames
+              << " " << trackedStateKey(trace) << "\n";
+    if (trace.stepLimitHit) {
+        std::cout << "  step limit hit\n";
+    }
+    if (!trace.fieldWrites.empty()) {
+        std::cout << "  field writes:\n";
+        for (const jvmpoc::FieldWrite& write : trace.fieldWrites) {
+            std::cout << "    " << write.methodLabel << " pc=" << write.pc
+                      << " " << write.fieldName << "=" << write.value.text << "\n";
+        }
+    }
+    if (!trace.imageLoads.empty()) {
+        std::cout << "  image loads:\n";
+        for (const jvmpoc::ImageLoad& load : trace.imageLoads) {
+            std::cout << "    " << load.methodLabel << " pc=" << load.pc
+                      << " source=" << load.source
+                      << " size=" << load.width << "x" << load.height << "\n";
+        }
+    }
+    if (!trace.stackSnapshot.empty()) {
+        std::cout << "  stack snapshot:\n";
+        for (const std::string& frame : trace.stackSnapshot) {
+            std::cout << "    " << frame << "\n";
+        }
+    }
+    if (!trace.suspendedTasks.empty()) {
+        std::cout << "  suspended tasks:\n";
+        for (const std::string& task : trace.suspendedTasks) {
+            std::cout << "    " << task << "\n";
+        }
+    }
+    printMeaningfulUnknownCalls(trace);
+}
+
+bool shouldPrintStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) {
+    if (trace.currentDisplayableClass != "GameScreen") {
+        return false;
+    }
+
+    std::map<std::string, std::string> fields = fieldMap(trace);
+    auto screenIt = fields.find("screen");
+    if (screenIt == fields.end() || screenIt->second != "333") {
+        return false;
+    }
+
+    return repeatedFrames == 30 || repeatedFrames % 120 == 0;
 }
 
 void printUsage(const char* argv0) {
@@ -221,9 +384,15 @@ int main(int argc, char** argv) {
         }
         const jvmpoc::ExecutionTrace& startTrace = app.start(midletClass);
         printUnknownCalls(startTrace);
-        (void)app.render();
+        const jvmpoc::ExecutionTrace& firstRenderTrace = app.render();
+        std::string lastStateKey = trackedStateKey(firstRenderTrace);
+        int repeatedStateFrames = 0;
+        if (!lastStateKey.empty()) {
+            printStateTransition(firstRenderTrace);
+        }
 
         bool running = true;
+        int blankFrames = 0;
         while (running) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
@@ -244,7 +413,36 @@ int main(int argc, char** argv) {
                 }
             }
 
-            (void)app.render();
+            const jvmpoc::ExecutionTrace& renderTrace = app.render();
+            std::string stateKey = trackedStateKey(renderTrace);
+            if (!stateKey.empty()) {
+                if (stateKey != lastStateKey) {
+                    printStateTransition(renderTrace);
+                    lastStateKey = stateKey;
+                    repeatedStateFrames = 0;
+                } else {
+                    ++repeatedStateFrames;
+                    if (shouldPrintStalledState(renderTrace, repeatedStateFrames)) {
+                        printStalledState(renderTrace, repeatedStateFrames);
+                    }
+                }
+            } else {
+                lastStateKey.clear();
+                repeatedStateFrames = 0;
+            }
+            const bool suspiciousFrame = renderTrace.graphicsOps.empty() &&
+                (renderTrace.stepLimitHit ||
+                 !renderTrace.currentDisplayableClass.empty() ||
+                 !renderTrace.unknownMethodCalls.empty() ||
+                 !renderTrace.suspendedTasks.empty());
+            if (suspiciousFrame) {
+                ++blankFrames;
+                if (shouldPrintSuspiciousFrame(renderTrace, blankFrames)) {
+                    printSuspiciousFrame(renderTrace, blankFrames);
+                }
+            } else {
+                blankFrames = 0;
+            }
             SDL_Delay(16);
         }
     } catch (const std::exception& e) {

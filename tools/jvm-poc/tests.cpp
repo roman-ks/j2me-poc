@@ -1,6 +1,7 @@
 #include "class_file.hpp"
 #include "extracted_midlet.hpp"
 #include "interpreter.hpp"
+#include "j2me_port/J2MECompat.hpp"
 #include "jvm_midlet_app.hpp"
 
 #include <exception>
@@ -163,6 +164,8 @@ bool expectList(const std::string& testName, const std::string& field, const std
 }
 
 bool runCase(const std::string& root, const TestCase& test) {
+    port::setResourceRoot(root + "/target/classes");
+
     std::vector<jvmpoc::ClassFile> classes;
     for (const std::string& classFile : test.classFiles) {
         classes.push_back(jvmpoc::parseClassFile(classPath(root, classFile)));
@@ -264,6 +267,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "resource bytes",
+            "dev/roman/hello/ResourceBytes",
+            {"dev/roman/hello/ResourceBytes"},
+            {"4", "65", "23", "68", "tile"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "strings",
             "dev/roman/hello/Strings",
             {"dev/roman/hello/Strings"},
@@ -304,6 +319,18 @@ int main(int argc, char** argv) {
             "dev/roman/hello/StringBufferBoot",
             {"dev/roman/hello/StringBufferBoot"},
             {"enemy[2]10.png", "14", "16"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            "boot String.valueOf",
+            "dev/roman/hello/StringValueOf",
+            {"dev/roman/hello/StringValueOf"},
+            {"0", "/1000.map"},
             {},
             {},
             {},

@@ -25,6 +25,14 @@ public final class String {
         init(value, offset, count);
     }
 
+    public static String valueOf(int value) {
+        return new StringBuffer().append(value).toString();
+    }
+
+    public static String valueOf(char value) {
+        return new StringBuffer().append(value).toString();
+    }
+
     public native int length();
 
     public native void getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin);

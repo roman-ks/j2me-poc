@@ -138,6 +138,10 @@ struct ExecutionTrace {
     std::vector<CanvasSizeQuery> canvasSizeQueries;
     std::vector<GraphicsOp> graphicsOps;
     std::vector<ImageLoad> imageLoads;
+    std::vector<std::string> stackSnapshot;
+    std::vector<std::string> suspendedTasks;
+    std::string currentDisplayableClass;
+    std::vector<std::string> currentDisplayableFields;
     bool stepLimitHit = false;
 };
 

@@ -4,7 +4,9 @@
 #include "jvm_host.hpp"
 #include "method_resolution.hpp"
 #include "native_methods.hpp"
+#include "j2me_port/J2MECompat.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -18,9 +20,11 @@
 namespace jvmpoc {
 namespace {
 
-constexpr size_t kMaxSteps = 10000;
+constexpr size_t kMaxSteps = 100000;
 constexpr size_t kMaxCallDepth = 64;
 constexpr uint16_t kAccNative = 0x0100;
+constexpr const char* kClassHandlePrefix = "class:";
+constexpr const char* kResourceStreamHandlePrefix = "resource-stream:";
 
 uint32_t branchTarget(size_t pc, int16_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
@@ -258,12 +262,43 @@ struct YieldThreadSleep {
 
 namespace {
 
+void captureStackSnapshot(ExecutionTrace& trace, const std::vector<RuntimeFrame>& callStack) {
+    trace.stackSnapshot.clear();
+    for (auto it = callStack.rbegin(); it != callStack.rend(); ++it) {
+        trace.stackSnapshot.push_back(it->label + " pc=" + std::to_string(it->pc));
+    }
+}
+
+void captureSuspendedTasks(ExecutionTrace& trace, const MidletSession& session) {
+    trace.suspendedTasks.clear();
+    for (const ThreadTask& task : session.tasks()) {
+        if (task.finished) {
+            continue;
+        }
+        std::string state = task.method != nullptr
+            ? task.cls->thisClass + "." + task.method->name + task.method->descriptor
+            : std::string("<unknown-task>");
+        state += " wake=" + std::to_string(task.wakeAtMillis);
+        if (task.suspendedFrame.has_value()) {
+            state += " suspended=" + task.suspendedFrame->label + " pc=" + std::to_string(task.suspendedFrame->pc);
+        }
+        trace.suspendedTasks.push_back(std::move(state));
+    }
+}
+
 Value objectRef(uint32_t id) {
     return Value::named("obj#" + std::to_string(id));
 }
 
 Value arrayRef(uint32_t id) {
     return Value::named("arr#" + std::to_string(id));
+}
+
+std::optional<std::string> parseTextHandle(const Value& value, const std::string& prefix) {
+    if (value.text.compare(0, prefix.size(), prefix) != 0) {
+        return std::nullopt;
+    }
+    return value.text.substr(prefix.size());
 }
 
 uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
@@ -283,6 +318,151 @@ Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const s
     Value ref = objectRef(id);
     rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
     return ref;
+}
+
+Value allocateArray(Runtime& rt, const std::string& label, uint32_t pc, size_t length) {
+    uint32_t id = 0;
+    if (!rt.freeArrayIds.empty()) {
+        id = rt.freeArrayIds.back();
+        rt.freeArrayIds.pop_back();
+    } else {
+        id = rt.nextArrayId++;
+    }
+    rt.arrays[id] = std::vector<Value>(length, Value::named("0"));
+    Value ref = arrayRef(id);
+    rt.trace.arrayAllocs.push_back(ArrayAlloc{label, pc, ref, length});
+    return ref;
+}
+
+std::optional<uint32_t> objectId(const Value& value);
+std::optional<uint32_t> arrayId(const Value& value);
+
+Value allocateMultiArray(
+    Runtime& rt,
+    const std::string& label,
+    uint32_t pc,
+    const std::vector<int>& counts,
+    size_t depth) {
+    Value ref = allocateArray(rt, label, pc, static_cast<size_t>(counts[depth]));
+    if (depth + 1 >= counts.size()) {
+        return ref;
+    }
+
+    std::optional<uint32_t> id = arrayId(ref);
+    if (!id.has_value()) {
+        return ref;
+    }
+
+    std::vector<Value>& elements = rt.arrays[*id];
+    for (Value& element : elements) {
+        element = allocateMultiArray(rt, label, pc, counts, depth + 1);
+    }
+    return ref;
+}
+
+std::optional<std::string> runtimeString(const Runtime& rt, const Value& value) {
+    std::optional<uint32_t> id = objectId(value);
+    if (!id.has_value()) {
+        return std::nullopt;
+    }
+    auto stringIt = rt.strings.find(*id);
+    if (stringIt == rt.strings.end()) {
+        return std::nullopt;
+    }
+    return stringIt->second;
+}
+
+Value loadArrayElement(Runtime& rt, const Value& arrayValue, const Value& indexValue) {
+    Value loaded = Value::named("0");
+    std::optional<uint32_t> id = arrayId(arrayValue);
+    std::optional<int> index = parseIntValue(indexValue);
+    if (id.has_value() && index.has_value()) {
+        auto arrayIt = rt.arrays.find(*id);
+        if (arrayIt != rt.arrays.end() && *index >= 0 &&
+            static_cast<size_t>(*index) < arrayIt->second.size()) {
+            loaded = arrayIt->second[static_cast<size_t>(*index)];
+        }
+    }
+    return loaded;
+}
+
+Value normalizeByteValue(const Value& value) {
+    std::optional<int> parsed = parseIntValue(value);
+    if (!parsed.has_value()) {
+        return value;
+    }
+    return Value::named(std::to_string(static_cast<int>(static_cast<int8_t>(*parsed))));
+}
+
+void storeArrayElement(
+    Runtime& rt,
+    const std::string& label,
+    uint32_t pc,
+    const Value& arrayValue,
+    const Value& indexValue,
+    const Value& rawValue,
+    bool normalizeByte) {
+    Value value = normalizeByte ? normalizeByteValue(rawValue) : rawValue;
+    std::optional<uint32_t> id = arrayId(arrayValue);
+    std::optional<int> index = parseIntValue(indexValue);
+    if (id.has_value() && index.has_value()) {
+        auto arrayIt = rt.arrays.find(*id);
+        if (arrayIt != rt.arrays.end() && *index >= 0 &&
+            static_cast<size_t>(*index) < arrayIt->second.size()) {
+            arrayIt->second[static_cast<size_t>(*index)] = value;
+        }
+    }
+    rt.trace.arrayWrites.push_back(ArrayWrite{label, pc, arrayValue, indexValue, value});
+}
+
+NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, const std::vector<Value>& args) {
+    if (ref.className == "java/lang/Object" && ref.name == "getClass" &&
+        ref.descriptor == "()Ljava/lang/Class;") {
+        std::string className = ref.className;
+        if (!args.empty()) {
+            std::optional<uint32_t> id = objectId(args[0]);
+            auto objectIt = id.has_value() ? rt.heap.find(*id) : rt.heap.end();
+            if (id.has_value() && objectIt != rt.heap.end()) {
+                className = objectIt->second.className;
+            }
+        }
+        return NativeCallResult{true, Value::named(std::string(kClassHandlePrefix) + className)};
+    }
+
+    if (ref.className == "java/lang/Class" && ref.name == "getResourceAsStream" &&
+        ref.descriptor == "(Ljava/lang/String;)Ljava/io/InputStream;") {
+        std::string path = args.size() > 1 ? runtimeString(rt, args[1]).value_or(args[1].text) : "";
+        return NativeCallResult{true, path.empty()
+            ? std::optional<Value>(Value::named("0"))
+            : std::optional<Value>(Value::named(std::string(kResourceStreamHandlePrefix) + path))};
+    }
+
+    if (ref.className == "java/io/InputStream" && ref.name == "read" && ref.descriptor == "([B)I") {
+        if (args.size() < 2) {
+            return NativeCallResult{true, Value::named("0")};
+        }
+
+        std::optional<std::string> path = parseTextHandle(args[0], kResourceStreamHandlePrefix);
+        std::optional<uint32_t> id = arrayId(args[1]);
+        auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
+        if (!path.has_value() || !id.has_value() || arrayIt == rt.arrays.end()) {
+            return NativeCallResult{true, Value::named("0")};
+        }
+
+        std::vector<uint8_t> data;
+        if (!port::readResourceAll(*path, data) || data.empty()) {
+            return NativeCallResult{true, Value::named("0")};
+        }
+
+        const int count = std::min(static_cast<int>(arrayIt->second.size()), static_cast<int>(data.size()));
+        for (int i = 0; i < count; ++i) {
+            arrayIt->second[static_cast<size_t>(i)] =
+                Value::named(std::to_string(static_cast<int>(static_cast<int8_t>(data[static_cast<size_t>(i)]))));
+        }
+        return NativeCallResult{true, Value::named(std::to_string(count))};
+    }
+
+    return NativeCallResult{};
 }
 
 std::optional<Value> recordUnknownCall(
@@ -330,6 +510,47 @@ std::optional<uint32_t> arrayId(const Value& value) {
 
 bool isReference(const Value& value) {
     return objectId(value).has_value() || arrayId(value).has_value();
+}
+
+std::string debugValueText(const Runtime& rt, const Value& value) {
+    std::optional<uint32_t> id = objectId(value);
+    if (id.has_value()) {
+        auto stringIt = rt.strings.find(*id);
+        if (stringIt != rt.strings.end()) {
+            return '"' + stringIt->second + '"';
+        }
+    }
+    return value.text;
+}
+
+void captureDisplayableFields(ExecutionTrace& trace, const Runtime& rt, const HeapObject& object) {
+    static const char* kInterestingFields[] = {
+        "screen",
+        "state",
+        "ani_step",
+        "p_mode",
+        "m_mode",
+        "game_on",
+        "t_game_on",
+        "msg",
+        "h_x",
+        "h_y",
+        "h_dir",
+        "auto_move",
+        "w_dir",
+        "stage",
+        "chap",
+    };
+
+    trace.currentDisplayableFields.clear();
+    for (const char* fieldName : kInterestingFields) {
+        auto fieldIt = object.fields.find(fieldName);
+        if (fieldIt == object.fields.end()) {
+            continue;
+        }
+        trace.currentDisplayableFields.push_back(
+            std::string(fieldName) + "=" + debugValueText(rt, fieldIt->second));
+    }
 }
 
 Value internString(Runtime& rt, const std::string& text) {
@@ -612,6 +833,7 @@ std::optional<Value> resumeCurrentMethod(
     while (pc < method.code.size()) {
         if (++rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
+            captureStackSnapshot(rt.trace, rt.callStack);
             return finish(std::nullopt);
         }
 
@@ -668,38 +890,13 @@ std::optional<Value> resumeCurrentMethod(
             case 0x2c: frame.push(frame.local(2)); ++pc; break;
             case 0x2d: frame.push(frame.local(3)); ++pc; break;
 
-            case 0x2e: {
-                Value indexValue = frame.pop();
-                Value arrayValue = frame.pop();
-                Value loaded = Value::named("0");
-                std::optional<uint32_t> id = arrayId(arrayValue);
-                std::optional<int> index = parseIntValue(indexValue);
-                if (id.has_value() && index.has_value()) {
-                    auto arrayIt = rt.arrays.find(*id);
-                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
-                        static_cast<size_t>(*index) < arrayIt->second.size()) {
-                        loaded = arrayIt->second[static_cast<size_t>(*index)];
-                    }
-                }
-                frame.push(loaded);
-                ++pc;
-                break;
-            }
-
+            case 0x2e:
+            case 0x32:
+            case 0x33:
             case 0x34: {
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
-                Value loaded = Value::named("0");
-                std::optional<uint32_t> id = arrayId(arrayValue);
-                std::optional<int> index = parseIntValue(indexValue);
-                if (id.has_value() && index.has_value()) {
-                    auto arrayIt = rt.arrays.find(*id);
-                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
-                        static_cast<size_t>(*index) < arrayIt->second.size()) {
-                        loaded = arrayIt->second[static_cast<size_t>(*index)];
-                    }
-                }
-                frame.push(loaded);
+                frame.push(loadArrayElement(rt, arrayValue, indexValue));
                 ++pc;
                 break;
             }
@@ -720,40 +917,15 @@ std::optional<Value> resumeCurrentMethod(
             case 0x4d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x4e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
 
-            case 0x4f: {
-                uint32_t writePc = static_cast<uint32_t>(pc);
-                Value value = frame.pop();
-                Value indexValue = frame.pop();
-                Value arrayValue = frame.pop();
-                std::optional<uint32_t> id = arrayId(arrayValue);
-                std::optional<int> index = parseIntValue(indexValue);
-                if (id.has_value() && index.has_value()) {
-                    auto arrayIt = rt.arrays.find(*id);
-                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
-                        static_cast<size_t>(*index) < arrayIt->second.size()) {
-                        arrayIt->second[static_cast<size_t>(*index)] = value;
-                    }
-                }
-                rt.trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
-                ++pc;
-                break;
-            }
-
+            case 0x4f:
+            case 0x53:
+            case 0x54:
             case 0x55: {
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 Value value = frame.pop();
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
-                std::optional<uint32_t> id = arrayId(arrayValue);
-                std::optional<int> index = parseIntValue(indexValue);
-                if (id.has_value() && index.has_value()) {
-                    auto arrayIt = rt.arrays.find(*id);
-                    if (arrayIt != rt.arrays.end() && *index >= 0 &&
-                        static_cast<size_t>(*index) < arrayIt->second.size()) {
-                        arrayIt->second[static_cast<size_t>(*index)] = value;
-                    }
-                }
-                rt.trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
+                storeArrayElement(rt, label, writePc, arrayValue, indexValue, value, op == 0x54);
                 ++pc;
                 break;
             }
@@ -1105,9 +1277,16 @@ std::optional<Value> resumeCurrentMethod(
                         }
                     }
                 } else {
-                    std::optional<Value> result = recordUnknownCall(rt, label, static_cast<uint32_t>(pc), ref, callArgs);
-                    if (result.has_value()) {
-                        frame.push(*result);
+                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, callArgs);
+                    if (builtInResult.handled) {
+                        if (builtInResult.returnValue.has_value()) {
+                            frame.push(*builtInResult.returnValue);
+                        }
+                    } else {
+                        std::optional<Value> result = recordUnknownCall(rt, label, static_cast<uint32_t>(pc), ref, callArgs);
+                        if (result.has_value()) {
+                            frame.push(*result);
+                        }
                     }
                 }
                 pc += op == 0xb9 ? 5 : 3;
@@ -1129,22 +1308,50 @@ std::optional<Value> resumeCurrentMethod(
                 uint8_t atype = codeU1(method.code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
-                if ((atype == 5 || atype == 10) && count.has_value() && *count >= 0) {
-                    uint32_t id = 0;
-                    if (!rt.freeArrayIds.empty()) {
-                        id = rt.freeArrayIds.back();
-                        rt.freeArrayIds.pop_back();
-                    } else {
-                        id = rt.nextArrayId++;
-                    }
-                    rt.arrays[id] = std::vector<Value>(static_cast<size_t>(*count), Value::named("0"));
-                    Value ref = arrayRef(id);
-                    rt.trace.arrayAllocs.push_back(ArrayAlloc{label, allocPc, ref, static_cast<size_t>(*count)});
-                    frame.push(ref);
+                if ((atype == 4 || atype == 5 || atype == 8 || atype == 10) && count.has_value() && *count >= 0) {
+                    frame.push(allocateArray(rt, label, allocPc, static_cast<size_t>(*count)));
                 } else {
                     frame.push(Value::named("<array>"));
                 }
                 pc += 2;
+                break;
+            }
+
+            case 0xbd:
+            {
+                uint32_t allocPc = static_cast<uint32_t>(pc);
+                Value countValue = frame.pop();
+                std::optional<int> count = parseIntValue(countValue);
+                if (count.has_value() && *count >= 0) {
+                    frame.push(allocateArray(rt, label, allocPc, static_cast<size_t>(*count)));
+                } else {
+                    frame.push(Value::named("<array>"));
+                }
+                pc += 3;
+                break;
+            }
+
+            case 0xc5:
+            {
+                uint32_t allocPc = static_cast<uint32_t>(pc);
+                uint8_t dimensions = codeU1(method.code, pc + 3);
+                std::vector<int> counts(dimensions, -1);
+                for (size_t i = dimensions; i > 0; --i) {
+                    std::optional<int> count = parseIntValue(frame.pop());
+                    counts[i - 1] = count.has_value() ? *count : -1;
+                }
+
+                bool valid = !counts.empty();
+                for (int count : counts) {
+                    valid = valid && count >= 0;
+                }
+
+                if (valid) {
+                    frame.push(allocateMultiArray(rt, label, allocPc, counts, 0));
+                } else {
+                    frame.push(Value::named("<array>"));
+                }
+                pc += 4;
                 break;
             }
 
@@ -1324,12 +1531,16 @@ ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixe
 
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
     if (!displayableId.has_value()) {
+        captureSuspendedTasks(rt.trace, session);
         return rt.trace;
     }
     auto displayableIt = rt.heap.find(*displayableId);
     if (displayableIt == rt.heap.end()) {
+        captureSuspendedTasks(rt.trace, session);
         return rt.trace;
     }
+    rt.trace.currentDisplayableClass = displayableIt->second.className;
+    captureDisplayableFields(rt.trace, rt, displayableIt->second);
 
     const std::vector<ClassFile>& classes = session.classes();
     const ClassFile* paintOwner = nullptr;
@@ -1345,6 +1556,8 @@ ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixe
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::named("graphics#1")});
     }
+
+    captureSuspendedTasks(rt.trace, session);
 
     return rt.trace;
 }

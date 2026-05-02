@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <core/configs.h>
+#include <core/log.h>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -30,6 +32,15 @@ std::string withTrailingSlash(std::string path) {
     return path;
 }
 
+bool isReadableRegularFile(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec);
+}
+
 std::string resolveAssetPath(const std::string& rawPath) {
     if (rawPath.empty()) {
         return rawPath;
@@ -48,8 +59,7 @@ std::string resolveAssetPath(const std::string& rawPath) {
 
     if (g_resourceFs == nullptr) {
         for (const auto& candidate : candidates) {
-            std::ifstream in(candidate, std::ios::binary);
-            if (in) {
+            if (isReadableRegularFile(candidate)) {
                 return candidate;
             }
         }
@@ -69,6 +79,9 @@ bool readFileAll(const std::string& path, std::vector<uint8_t>& out) {
     out.clear();
 
     if (g_resourceFs == nullptr) {
+        if (!isReadableRegularFile(path)) {
+            return false;
+        }
         std::ifstream in(path, std::ios::binary);
         if (!in) {
             return false;
@@ -158,7 +171,11 @@ const std::string& resourceRoot() {
 
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out) {
     const std::string resolved = resolveAssetPath(path);
-    return readFileAll(resolved, out);
+    const bool ok = readFileAll(resolved, out);
+    if (!ok) {
+        LOGF_W("Failed to read resource: raw=%s resolved=%s", path.c_str(), resolved.c_str());
+    }
+    return ok;
 }
 
 RecordStore RecordStore::openRecordStore(const std::string& name, bool createIfMissing) {
