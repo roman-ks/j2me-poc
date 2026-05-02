@@ -174,6 +174,19 @@ int main(int argc, char** argv) {
             {"arr#1"},
             {},
         },
+        TestCase{
+            "inherited method lookup",
+            "dev/roman/hello/Inheritance",
+            {
+                "dev/roman/hello/InheritanceBase",
+                "dev/roman/hello/InheritanceChild",
+                "dev/roman/hello/Inheritance",
+            },
+            {"42"},
+            {},
+            {},
+            {},
+        },
     };
 
     try {

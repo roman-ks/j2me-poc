@@ -1,6 +1,7 @@
 #include "interpreter.hpp"
 
 #include "bytecode.hpp"
+#include "method_resolution.hpp"
 
 #include <cstdint>
 #include <cstdlib>
@@ -128,24 +129,6 @@ bool isNativeRuntimeGc(const MethodRef& ref) {
 
 std::string methodLabel(const ClassFile& cls, const MethodInfo& method) {
     return cls.thisClass + "." + method.name + method.descriptor;
-}
-
-const ClassFile* findClass(const std::vector<ClassFile>& classes, const std::string& name) {
-    for (const ClassFile& cls : classes) {
-        if (cls.thisClass == name) {
-            return &cls;
-        }
-    }
-    return nullptr;
-}
-
-const MethodInfo* findMethod(const ClassFile& cls, const MethodRef& ref) {
-    for (const MethodInfo& method : cls.methods) {
-        if (method.name == ref.name && method.descriptor == ref.descriptor) {
-            return &method;
-        }
-    }
-    return nullptr;
 }
 
 std::vector<size_t> argumentSlotWidths(const std::string& descriptor) {
@@ -700,8 +683,9 @@ std::optional<Value> executeMethod(
                         callArgs[i - 1] = frame.pop();
                     }
 
-                    const ClassFile* targetClass = findClass(classes, ref.className);
-                    const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
+                    const ClassFile* targetClass = nullptr;
+                    const MethodInfo* targetMethod = findMethodInHierarchy(
+                        classes, ref.className, ref.name, ref.descriptor, &targetClass);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
@@ -752,17 +736,19 @@ std::optional<Value> executeMethod(
                     break;
                 }
 
-                const ClassFile* targetClass = findClass(classes, ref.className);
-                if (targetClass == nullptr) {
+                std::string lookupClassName = ref.className;
+                if (op == 0xb6) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
                         auto objectIt = rt.heap.find(*id);
                         if (objectIt != rt.heap.end()) {
-                            targetClass = findClass(classes, objectIt->second.className);
+                            lookupClassName = objectIt->second.className;
                         }
                     }
                 }
-                const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
+                const ClassFile* targetClass = nullptr;
+                const MethodInfo* targetMethod = findMethodInHierarchy(
+                    classes, lookupClassName, ref.name, ref.descriptor, &targetClass);
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     std::optional<Value> result = executeMethod(
                         classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);

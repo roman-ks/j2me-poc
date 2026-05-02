@@ -1,7 +1,7 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -pedantic -O2
 
-COMMON_SRCS := class_file.cpp bytecode.cpp frame.cpp interpreter.cpp
+COMMON_SRCS := class_file.cpp bytecode.cpp frame.cpp interpreter.cpp method_resolution.cpp
 COMMON_OBJS := $(COMMON_SRCS:.cpp=.o)
 APP_OBJS := main.o $(COMMON_OBJS)
 TEST_OBJS := tests.o $(COMMON_OBJS)
