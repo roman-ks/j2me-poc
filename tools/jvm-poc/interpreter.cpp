@@ -168,14 +168,22 @@ struct HeapObject {
     std::map<std::string, Value> fields;
 };
 
+struct IntArray {
+    std::vector<Value> values;
+};
+
 using Heap = std::map<uint32_t, HeapObject>;
+using IntArrayHeap = std::map<uint32_t, IntArray>;
 
 Value objectRef(uint32_t id) {
     return Value::named("obj#" + std::to_string(id));
 }
 
-std::optional<uint32_t> objectId(const Value& value) {
-    const std::string prefix = "obj#";
+Value arrayRef(uint32_t id) {
+    return Value::named("arr#" + std::to_string(id));
+}
+
+std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
     if (value.text.compare(0, prefix.size(), prefix) != 0) {
         return std::nullopt;
     }
@@ -187,6 +195,14 @@ std::optional<uint32_t> objectId(const Value& value) {
     return static_cast<uint32_t>(parsed);
 }
 
+std::optional<uint32_t> objectId(const Value& value) {
+    return parseHandle(value, "obj#");
+}
+
+std::optional<uint32_t> arrayId(const Value& value) {
+    return parseHandle(value, "arr#");
+}
+
 std::optional<Value> executeMethod(
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
@@ -194,7 +210,9 @@ std::optional<Value> executeMethod(
     const std::vector<Value>& args,
     std::map<std::string, Value>& staticFields,
     Heap& heap,
+    IntArrayHeap& arrays,
     uint32_t& nextObjectId,
+    uint32_t& nextArrayId,
     ExecutionTrace& trace,
     size_t& steps,
     size_t depth) {
@@ -256,6 +274,24 @@ std::optional<Value> executeMethod(
             case 0x2c: frame.push(frame.local(2)); ++pc; break;
             case 0x2d: frame.push(frame.local(3)); ++pc; break;
 
+            case 0x2e: {
+                Value indexValue = frame.pop();
+                Value arrayValue = frame.pop();
+                Value loaded = Value::named("0");
+                std::optional<uint32_t> id = arrayId(arrayValue);
+                std::optional<int> index = parseIntValue(indexValue);
+                if (id.has_value() && index.has_value()) {
+                    auto arrayIt = arrays.find(*id);
+                    if (arrayIt != arrays.end() && *index >= 0 &&
+                        static_cast<size_t>(*index) < arrayIt->second.values.size()) {
+                        loaded = arrayIt->second.values[static_cast<size_t>(*index)];
+                    }
+                }
+                frame.push(loaded);
+                ++pc;
+                break;
+            }
+
             case 0x3b: store(0, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
@@ -266,6 +302,25 @@ std::optional<Value> executeMethod(
             case 0x4c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x4d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x4e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
+
+            case 0x4f: {
+                uint32_t writePc = static_cast<uint32_t>(pc);
+                Value value = frame.pop();
+                Value indexValue = frame.pop();
+                Value arrayValue = frame.pop();
+                std::optional<uint32_t> id = arrayId(arrayValue);
+                std::optional<int> index = parseIntValue(indexValue);
+                if (id.has_value() && index.has_value()) {
+                    auto arrayIt = arrays.find(*id);
+                    if (arrayIt != arrays.end() && *index >= 0 &&
+                        static_cast<size_t>(*index) < arrayIt->second.values.size()) {
+                        arrayIt->second.values[static_cast<size_t>(*index)] = value;
+                    }
+                }
+                trace.arrayWrites.push_back(ArrayWrite{label, writePc, arrayValue, indexValue, value});
+                ++pc;
+                break;
+            }
 
             case 0x59: {
                 Value value = frame.pop();
@@ -431,7 +486,7 @@ std::optional<Value> executeMethod(
                     const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, callArgs, staticFields, heap, nextObjectId, trace, steps, depth + 1);
+                            classes, *targetClass, *targetMethod, callArgs, staticFields, heap, arrays, nextObjectId, nextArrayId, trace, steps, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -467,7 +522,7 @@ std::optional<Value> executeMethod(
                 const MethodInfo* targetMethod = targetClass == nullptr ? nullptr : findMethod(*targetClass, ref);
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     std::optional<Value> result = executeMethod(
-                        classes, *targetClass, *targetMethod, callArgs, staticFields, heap, nextObjectId, trace, steps, depth + 1);
+                        classes, *targetClass, *targetMethod, callArgs, staticFields, heap, arrays, nextObjectId, nextArrayId, trace, steps, depth + 1);
                     if (result.has_value()) {
                         frame.push(*result);
                     }
@@ -488,6 +543,39 @@ std::optional<Value> executeMethod(
                 trace.objectAllocs.push_back(ObjectAlloc{label, allocPc, ref, className});
                 frame.push(ref);
                 pc += 3;
+                break;
+            }
+
+            case 0xbc:
+            {
+                uint32_t allocPc = static_cast<uint32_t>(pc);
+                uint8_t atype = codeU1(method.code, pc + 1);
+                Value countValue = frame.pop();
+                std::optional<int> count = parseIntValue(countValue);
+                if (atype == 10 && count.has_value() && *count >= 0) {
+                    uint32_t id = nextArrayId++;
+                    arrays[id] = IntArray{std::vector<Value>(static_cast<size_t>(*count), Value::named("0"))};
+                    Value ref = arrayRef(id);
+                    trace.arrayAllocs.push_back(ArrayAlloc{label, allocPc, ref, static_cast<size_t>(*count)});
+                    frame.push(ref);
+                } else {
+                    frame.push(Value::named("<array>"));
+                }
+                pc += 2;
+                break;
+            }
+
+            case 0xbe:
+            {
+                Value arrayValue = frame.pop();
+                std::optional<uint32_t> id = arrayId(arrayValue);
+                auto arrayIt = id.has_value() ? arrays.find(*id) : arrays.end();
+                if (id.has_value() && arrayIt != arrays.end()) {
+                    frame.push(Value::named(std::to_string(arrayIt->second.values.size())));
+                } else {
+                    frame.push(Value::named("<arraylength:" + arrayValue.text + ">"));
+                }
+                ++pc;
                 break;
             }
 
@@ -512,9 +600,11 @@ ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const 
     ExecutionTrace trace;
     std::map<std::string, Value> staticFields;
     Heap heap;
+    IntArrayHeap arrays;
     uint32_t nextObjectId = 1;
+    uint32_t nextArrayId = 1;
     size_t steps = 0;
-    (void)executeMethod(classes, cls, method, {}, staticFields, heap, nextObjectId, trace, steps, 0);
+    (void)executeMethod(classes, cls, method, {}, staticFields, heap, arrays, nextObjectId, nextArrayId, trace, steps, 0);
     return trace;
 }
 

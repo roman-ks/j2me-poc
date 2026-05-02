@@ -44,6 +44,21 @@ struct FieldWrite {
     Value value;
 };
 
+struct ArrayAlloc {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value ref;
+    size_t length = 0;
+};
+
+struct ArrayWrite {
+    std::string methodLabel;
+    uint32_t pc = 0;
+    Value ref;
+    Value index;
+    Value value;
+};
+
 struct ExecutionTrace {
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
@@ -51,6 +66,8 @@ struct ExecutionTrace {
     std::vector<StaticWrite> staticWrites;
     std::vector<ObjectAlloc> objectAllocs;
     std::vector<FieldWrite> fieldWrites;
+    std::vector<ArrayAlloc> arrayAllocs;
+    std::vector<ArrayWrite> arrayWrites;
     bool stepLimitHit = false;
 };
 
