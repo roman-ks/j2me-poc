@@ -80,6 +80,42 @@ public final class String {
         return new String(chars);
     }
 
+    public int indexOf(String value) {
+        return indexOf(value, 0);
+    }
+
+    public int indexOf(String value, int fromIndex) {
+        if (value == null) {
+            return -1;
+        }
+
+        char[] source = toCharArray();
+        char[] target = value.toCharArray();
+        int sourceLength = source.length;
+        int targetLength = target.length;
+
+        if (fromIndex < 0) {
+            fromIndex = 0;
+        }
+        if (targetLength == 0) {
+            return fromIndex <= sourceLength ? fromIndex : sourceLength;
+        }
+
+        int limit = sourceLength - targetLength;
+        int i = fromIndex;
+        while (i <= limit) {
+            int j = 0;
+            while (j < targetLength && source[i + j] == target[j]) {
+                j++;
+            }
+            if (j == targetLength) {
+                return i;
+            }
+            i++;
+        }
+        return -1;
+    }
+
     public native int length();
 
     public native void getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin);

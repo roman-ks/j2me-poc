@@ -389,6 +389,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "boot String indexOf",
+            "dev/roman/hello/StringIndexOf",
+            {"dev/roman/hello/StringIndexOf"},
+            {"3", "16", "-1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "boot Integer.toString",
             "dev/roman/hello/IntegerToString",
             {"dev/roman/hello/IntegerToString"},
