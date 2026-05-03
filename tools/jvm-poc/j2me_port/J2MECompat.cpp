@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <array>
-#include <filesystem>
 #include <core/configs.h>
 #include <core/log.h>
 #include <cstdio>
@@ -39,8 +38,8 @@ bool isReadableRegularFile(const std::string& path) {
         return false;
     }
 
-    std::error_code ec;
-    return std::filesystem::is_regular_file(path, ec);
+    std::ifstream in(path, std::ios::binary);
+    return static_cast<bool>(in);
 }
 
 std::string resolveAssetPath(const std::string& rawPath) {
