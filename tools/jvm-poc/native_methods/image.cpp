@@ -23,8 +23,30 @@ NativeCallResult handleImage(
 
     if (ref.name == "createImage" && ref.descriptor == "(Ljava/lang/String;)Ljavax/microedition/lcdui/Image;") {
         std::string path = stringArg(ctx, args, 0);
+        auto cached = ctx.resourceImages.find(path);
+        if (cached != ctx.resourceImages.end()) {
+            auto imageIt = ctx.images.find(cached->second);
+            if (imageIt != ctx.images.end()) {
+                Value imageRef = Value::named("image#" + std::to_string(cached->second));
+                ctx.trace.imageLoads.push_back(ImageLoad{
+                    methodLabel,
+                    pc,
+                    imageRef,
+                    path,
+                    imageIt->second.width,
+                    imageIt->second.height,
+                });
+                return handledValue(imageRef);
+            }
+            ctx.resourceImages.erase(cached);
+        }
+
         port::Image image = port::Image::createImage(path);
         Value imageRef = storeImage(ctx, image);
+        std::optional<uint32_t> imageIdValue = imageId(imageRef);
+        if (imageIdValue.has_value()) {
+            ctx.resourceImages[path] = *imageIdValue;
+        }
         ctx.trace.imageLoads.push_back(ImageLoad{
             methodLabel,
             pc,

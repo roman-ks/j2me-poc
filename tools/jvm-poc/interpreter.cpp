@@ -182,6 +182,7 @@ using Heap = std::map<uint32_t, HeapObject>;
 using ArrayHeap = std::map<uint32_t, std::vector<Value>>;
 using StringHeap = std::map<uint32_t, std::string>;
 using ImageHeap = std::map<uint32_t, port::Image>;
+using ResourceImageCache = std::map<std::string, uint32_t>;
 
 struct RuntimeFrame {
     std::string label;
@@ -209,6 +210,7 @@ struct Runtime {
     ArrayHeap arrays;
     StringHeap strings;
     ImageHeap images;
+    ResourceImageCache resourceImages;
     std::map<std::string, uint32_t> internedStrings;
     uint32_t nextObjectId = 1;
     uint32_t nextArrayId = 1;
@@ -817,6 +819,7 @@ std::optional<Value> resumeCurrentMethod(
             rt.strings,
             rt.arrays,
             rt.images,
+            rt.resourceImages,
             rt.nextImageId,
             rt.displayRef,
             rt.currentDisplayable,

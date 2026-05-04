@@ -26,6 +26,7 @@ struct NativeCallContext {
     std::map<uint32_t, std::string>& strings;
     std::map<uint32_t, std::vector<Value>>& arrays;
     std::map<uint32_t, port::Image>& images;
+    std::map<std::string, uint32_t>& resourceImages;
     uint32_t& nextImageId;
     Value& displayRef;
     Value& currentDisplayable;

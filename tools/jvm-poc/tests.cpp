@@ -401,6 +401,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "image cache",
+            "dev/roman/hello/ImageCache",
+            {"dev/roman/hello/ImageCache"},
+            {"1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "boot Integer.toString",
             "dev/roman/hello/IntegerToString",
             {"dev/roman/hello/IntegerToString"},
