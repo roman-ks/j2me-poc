@@ -174,6 +174,7 @@ void printSuspiciousFrame(const jvmpoc::ExecutionTrace& trace, int blankFrames) 
             std::cout << "    " << task << "\n";
         }
     }
+    printTraceTimings(trace, 1);
     printMeaningfulUnknownCalls(trace);
 }
 
@@ -223,6 +224,34 @@ void printStateTransition(const jvmpoc::ExecutionTrace& trace) {
     std::cout << "state transition: " << trackedStateKey(trace) << "\n";
 }
 
+void printTraceTimings(const jvmpoc::ExecutionTrace& trace, uint64_t minMillis) {
+    bool printedHeader = false;
+    for (const jvmpoc::GcReport& report : trace.gcReports) {
+        if (report.durationMillis < minMillis) {
+            continue;
+        }
+        if (!printedHeader) {
+            std::cout << "  timings:\n";
+            printedHeader = true;
+        }
+        std::cout << "    gc " << report.when << " took=" << report.durationMillis << "ms\n";
+    }
+    for (const jvmpoc::ResourceRead& read : trace.resourceReads) {
+        if (read.durationMillis < minMillis) {
+            continue;
+        }
+        if (!printedHeader) {
+            std::cout << "  timings:\n";
+            printedHeader = true;
+        }
+        std::cout << "    read raw=" << read.path
+                  << " resolved=" << read.resolvedPath
+                  << " bytes=" << read.bytes
+                  << " ok=" << (read.ok ? "1" : "0")
+                  << " took=" << read.durationMillis << "ms\n";
+    }
+}
+
 void printStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) {
     std::cout << "stalled state: repeatedFrames=" << repeatedFrames
               << " " << trackedStateKey(trace) << "\n";
@@ -256,6 +285,7 @@ void printStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) 
             std::cout << "    " << task << "\n";
         }
     }
+    printTraceTimings(trace, 1);
     printMeaningfulUnknownCalls(trace);
 }
 
@@ -389,6 +419,7 @@ int main(int argc, char** argv) {
         int repeatedStateFrames = 0;
         if (!lastStateKey.empty()) {
             printStateTransition(firstRenderTrace);
+            printTraceTimings(firstRenderTrace, 1);
         }
 
         bool running = true;
@@ -418,6 +449,7 @@ int main(int argc, char** argv) {
             if (!stateKey.empty()) {
                 if (stateKey != lastStateKey) {
                     printStateTransition(renderTrace);
+                    printTraceTimings(renderTrace, 1);
                     lastStateKey = stateKey;
                     repeatedStateFrames = 0;
                 } else {

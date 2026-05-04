@@ -7,6 +7,7 @@
 #include "j2me_port/J2MECompat.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -618,6 +619,7 @@ void addRoot(
 }
 
 void collectGarbage(Runtime& rt, std::string when) {
+    const auto startedAt = std::chrono::steady_clock::now();
     GcReport report;
     report.when = std::move(when);
 
@@ -694,6 +696,8 @@ void collectGarbage(Runtime& rt, std::string when) {
         report.freedArrays.push_back(arrayRef(id));
     }
 
+    report.durationMillis = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt).count());
     rt.trace.gcReports.push_back(report);
 }
 
@@ -1490,9 +1494,29 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.graphicsColorRgb = 0x000000;
 }
 
+class ScopedResourceReadTrace final {
+public:
+    explicit ScopedResourceReadTrace(ExecutionTrace& trace) {
+        port::setResourceReadObserver([&trace](const port::ResourceReadEvent& event) {
+            trace.resourceReads.push_back(ResourceRead{
+                event.path,
+                event.resolvedPath,
+                event.ok,
+                event.bytes,
+                event.durationMillis,
+            });
+        });
+    }
+
+    ~ScopedResourceReadTrace() {
+        port::setResourceReadObserver({});
+    }
+};
+
 ExecutionTrace startSession(MidletSession& session) {
     Runtime& rt = session.runtime();
     resetRuntimeTrace(rt);
+    ScopedResourceReadTrace resourceReadTrace(rt.trace);
 
     const std::vector<ClassFile>& classes = session.classes();
     const ClassFile* midletClass = findClass(classes, session.className());
@@ -1566,6 +1590,7 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
 ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixels, int width, int height) {
     Runtime& rt = session.runtime();
     resetRuntimeTrace(rt);
+    ScopedResourceReadTrace resourceReadTrace(rt.trace);
     rt.graphicsFramebuffer = pixels;
     rt.graphicsWidth = width;
     rt.graphicsHeight = height;

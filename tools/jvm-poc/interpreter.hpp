@@ -83,6 +83,7 @@ struct ArrayWrite {
 
 struct GcReport {
     std::string when;
+    uint64_t durationMillis = 0;
     std::vector<std::string> roots;
     std::vector<Value> unreachableObjects;
     std::vector<Value> unreachableArrays;
@@ -90,6 +91,14 @@ struct GcReport {
     std::vector<Value> freedObjects;
     std::vector<Value> freedArrays;
     std::vector<Value> freedStrings;
+};
+
+struct ResourceRead {
+    std::string path;
+    std::string resolvedPath;
+    bool ok = false;
+    size_t bytes = 0;
+    uint64_t durationMillis = 0;
 };
 
 struct DisplaySetCurrent {
@@ -138,6 +147,7 @@ struct ExecutionTrace {
     std::vector<CanvasSizeQuery> canvasSizeQueries;
     std::vector<GraphicsOp> graphicsOps;
     std::vector<ImageLoad> imageLoads;
+    std::vector<ResourceRead> resourceReads;
     std::vector<std::string> stackSnapshot;
     std::vector<std::string> suspendedTasks;
     std::string currentDisplayableClass;

@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <set>
 #include <string>
 #if defined(__linux__)
@@ -22,6 +23,7 @@ esp_gallery::Fs* g_resourceFs = nullptr;
 std::string g_gameName = "default_game";
 std::string g_resourceRoot = FS_ROOT_PATH;
 std::set<std::string> g_warnedMissingResources;
+ResourceReadObserver g_resourceReadObserver;
 
 std::string withTrailingSlash(std::string path) {
     if (path.empty()) {
@@ -170,9 +172,20 @@ const std::string& resourceRoot() {
     return g_resourceRoot;
 }
 
+void setResourceReadObserver(ResourceReadObserver observer) {
+    g_resourceReadObserver = std::move(observer);
+}
+
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out) {
     const std::string resolved = resolveAssetPath(path);
+    const auto startedAt = std::chrono::steady_clock::now();
     const bool ok = readFileAll(resolved, out);
+    const size_t bytesRead = ok ? out.size() : 0;
+    const uint64_t durationMillis = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - startedAt).count());
+    if (g_resourceReadObserver) {
+        g_resourceReadObserver(ResourceReadEvent{path, resolved, ok, bytesRead, durationMillis});
+    }
     if (!ok) {
         const std::string key = path + " -> " + resolved;
         if (g_warnedMissingResources.insert(key).second) {

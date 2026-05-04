@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -221,10 +222,21 @@ public:
     static int read(const std::string& path, uint8_t* out, int maxLen);
 };
 
+struct ResourceReadEvent {
+    std::string path;
+    std::string resolvedPath;
+    bool ok = false;
+    size_t bytes = 0;
+    uint64_t durationMillis = 0;
+};
+
+using ResourceReadObserver = std::function<void(const ResourceReadEvent& event)>;
+
 void setResourceFs(esp_gallery::Fs* fs);
 esp_gallery::Fs* resourceFs();
 void setResourceRoot(const std::string& root);
 const std::string& resourceRoot();
+void setResourceReadObserver(ResourceReadObserver observer);
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out);
 
 } // namespace port
