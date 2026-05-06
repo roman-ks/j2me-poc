@@ -6,7 +6,6 @@
 #include "native_methods.hpp"
 #include "j2me_port/J2MECompat.hpp"
 
-#include <core/log.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -399,8 +398,6 @@ Value normalizeByteValue(const Value& value) {
     return Value::named(std::to_string(static_cast<int>(static_cast<int8_t>(*parsed))));
 }
 
-void collectGarbage(Runtime& rt, std::string when);
-
 void storeArrayElement(
     Runtime& rt,
     const std::string& label,
@@ -468,19 +465,6 @@ NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, co
         }
         return NativeCallResult{true, Value::named(std::to_string(count))};
     }
-
-    return NativeCallResult{};
-}
-
-NativeCallResult handleBuiltInStaticCall(Runtime& rt, const MethodRef& ref, const std::vector<Value>& args) {
-    (void)args;
-    (void)rt;
-    (void)ref;
-
-    // if (ref.className == "java/lang/System" && ref.name == "gc" && ref.descriptor == "()V") {
-    //     collectGarbage(rt, callName(ref));
-    //     return NativeCallResult{true, std::nullopt};
-    // }
 
     return NativeCallResult{};
 }
@@ -1303,16 +1287,9 @@ std::optional<Value> resumeCurrentMethod(
                         }
                     }
                 } else {
-                    NativeCallResult builtInResult = handleBuiltInStaticCall(rt, ref, callArgs);
-                    if (builtInResult.handled) {
-                        if (builtInResult.returnValue.has_value()) {
-                            frame.push(*builtInResult.returnValue);
-                        }
-                    } else {
-                        std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
-                        if (result.has_value()) {
-                            frame.push(*result);
-                        }
+                    std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
+                    if (result.has_value()) {
+                        frame.push(*result);
                     }
                 }
                 pc += 3;
@@ -1501,29 +1478,10 @@ std::optional<Value> executeMethod(
         return Value::named("<call-depth-limit>");
     }
 
-    const bool shouldLogMethodTiming =
-        cls.thisClass == "GameScreen" && method.name == "make_buf" && method.descriptor == "(II)V";
-    const auto startedAt = shouldLogMethodTiming ? std::optional(std::chrono::steady_clock::now()) : std::nullopt;
-
     RuntimeFrame runtimeFrame{methodLabel(cls, method), &cls, &method, 0, Frame(method.maxLocals)};
     initializeFrameArgs(runtimeFrame, args);
     rt.callStack.push_back(std::move(runtimeFrame));
-    std::optional<Value> result = resumeCurrentMethod(classes, rt, depth);
-
-    if (startedAt.has_value()) {
-        const uint64_t durationMicros = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - *startedAt).count());
-        const std::string widthArg = args.size() > 1 ? args[1].text : "<missing>";
-        const std::string heightArg = args.size() > 2 ? args[2].text : "<missing>";
-        LOGF_I(
-            "%s width=%s height=%s took=%lluus",
-            methodLabel(cls, method).c_str(),
-            widthArg.c_str(),
-            heightArg.c_str(),
-            static_cast<unsigned long long>(durationMicros));
-    }
-
-    return result;
+    return resumeCurrentMethod(classes, rt, depth);
 }
 
 void resetRuntimeTrace(Runtime& rt) {
