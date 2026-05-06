@@ -19,7 +19,7 @@ public class GcRoots {
     public static void main(String[] args) {
         Objects escaped = makeEscaping(8);
         makeGarbage();
-        NativeRuntime.gc();
+        System.gc();
         Objects reused = new Objects(11);
         NativeRuntime.printInt(reused.add(1));
         NativeRuntime.printInt(escaped.add(1));

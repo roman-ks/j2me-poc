@@ -46,6 +46,12 @@ NativeCallResult handleString(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeCallResult handleSystem(
+    NativeCallContext& ctx,
+    const std::string& methodLabel,
+    uint32_t pc,
+    const MethodRef& ref,
+    const std::vector<Value>& args);
 NativeCallResult handleThread(
     NativeCallContext& ctx,
     const std::string& methodLabel,

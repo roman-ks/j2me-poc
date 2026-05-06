@@ -2,12 +2,12 @@
 
 #include "bytecode.hpp"
 #include "jvm_host.hpp"
+#include "method_execution_delegate.hpp"
 #include "method_resolution.hpp"
 #include "native_methods.hpp"
 #include "j2me_port/J2MECompat.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -1481,7 +1481,9 @@ std::optional<Value> executeMethod(
     RuntimeFrame runtimeFrame{methodLabel(cls, method), &cls, &method, 0, Frame(method.maxLocals)};
     initializeFrameArgs(runtimeFrame, args);
     rt.callStack.push_back(std::move(runtimeFrame));
-    return resumeCurrentMethod(classes, rt, depth);
+    return delegateMethodExecution(cls, method, args, [&]() {
+        return resumeCurrentMethod(classes, rt, depth);
+    });
 }
 
 void resetRuntimeTrace(Runtime& rt) {

@@ -5,10 +5,10 @@ SDL_CFLAGS ?= $(shell sdl2-config --cflags 2>/dev/null)
 SDL_LIBS ?= $(shell sdl2-config --libs 2>/dev/null)
 BUILD_DIR := build
 
-COMMON_SRCS := class_file.cpp bytecode.cpp extracted_midlet.cpp frame.cpp interpreter.cpp jvm_midlet_app.cpp method_resolution.cpp \
+COMMON_SRCS := class_file.cpp bytecode.cpp extracted_midlet.cpp frame.cpp interpreter.cpp jvm_midlet_app.cpp method_execution_delegate.cpp method_resolution.cpp \
 	stb_image_decoder.cpp \
 	native_methods/helpers.cpp native_methods/native_runtime.cpp native_methods/display.cpp \
-	native_methods/midlet.cpp native_methods/canvas.cpp native_methods/image.cpp native_methods/graphics.cpp \
+	native_methods/midlet.cpp native_methods/canvas.cpp native_methods/image.cpp native_methods/graphics.cpp native_methods/system.cpp \
 	native_methods/string.cpp native_methods/thread.cpp native_methods/dispatch.cpp \
 	j2me_port/Canvas.cpp j2me_port/J2MECompat.cpp
 COMMON_OBJS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(COMMON_SRCS))

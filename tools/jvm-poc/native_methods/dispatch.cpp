@@ -24,6 +24,10 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "java/lang/System") {
+        return native_methods::handleSystem(ctx, methodLabel, pc, ref, args);
+    }
+
     if (ref.className == "java/lang/Thread") {
         return native_methods::handleThread(ctx, methodLabel, pc, ref, args);
     }
