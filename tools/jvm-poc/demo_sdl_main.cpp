@@ -229,9 +229,6 @@ void printStateTransition(const jvmpoc::ExecutionTrace& trace) {
 void printTraceTimings(const jvmpoc::ExecutionTrace& trace, uint64_t minMillis) {
     bool printedHeader = false;
     for (const jvmpoc::GcReport& report : trace.gcReports) {
-        if (report.durationMillis < minMillis) {
-            continue;
-        }
         if (!printedHeader) {
             std::cout << "  timings:\n";
             printedHeader = true;
