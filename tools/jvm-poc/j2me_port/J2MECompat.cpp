@@ -24,6 +24,7 @@ std::string g_gameName = "default_game";
 std::string g_resourceRoot = FS_ROOT_PATH;
 std::set<std::string> g_warnedMissingResources;
 ResourceReadObserver g_resourceReadObserver;
+ResourceReadHandler g_resourceReadHandler;
 
 std::string withTrailingSlash(std::string path) {
     if (path.empty()) {
@@ -40,8 +41,9 @@ bool isReadableRegularFile(const std::string& path) {
         return false;
     }
 
-    std::ifstream in(path, std::ios::binary);
-    return static_cast<bool>(in);
+    // std::ifstream in(path, std::ios::binary);
+    // return static_cast<bool>(in);
+    return true;
 }
 
 std::string resolveAssetPath(const std::string& rawPath) {
@@ -50,32 +52,7 @@ std::string resolveAssetPath(const std::string& rawPath) {
     }
 
     const std::string noSlash = (rawPath[0] == '/') ? rawPath.substr(1) : rawPath;
-    const std::string root = withTrailingSlash(g_resourceRoot);
-    const std::array<std::string, 6> candidates = {
-        root + "esp_gallery_data/" + g_gameName + "/" + noSlash,
-        root + "esp_gallery_data/" + noSlash,
-        root + g_gameName + "/" + noSlash,
-        root + noSlash,
-        noSlash,
-        rawPath
-    };
-
-    if (g_resourceFs == nullptr) {
-        for (const auto& candidate : candidates) {
-            if (isReadableRegularFile(candidate)) {
-                return candidate;
-            }
-        }
-        return noSlash;
-    }
-
-    for (const auto& candidate : candidates) {
-        if (g_resourceFs->exists(candidate.c_str())) {
-            return candidate;
-        }
-    }
-
-    return candidates[0];
+    return withTrailingSlash(g_resourceRoot) + noSlash;
 }
 
 bool readFileAll(const std::string& path, std::vector<uint8_t>& out) {
@@ -176,20 +153,37 @@ void setResourceReadObserver(ResourceReadObserver observer) {
     g_resourceReadObserver = std::move(observer);
 }
 
+void setResourceReadHandler(ResourceReadHandler handler) {
+    g_resourceReadHandler = std::move(handler);
+}
+
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out) {
     const std::string resolved = resolveAssetPath(path);
+    std::string actualResolved = resolved;
     const auto startedAt = std::chrono::steady_clock::now();
-    const bool ok = readFileAll(resolved, out);
+    ResourceReadHookResult hookResult;
+    if (g_resourceReadHandler) {
+        hookResult = g_resourceReadHandler(path, resolved, out);
+    }
+    bool ok = false;
+    if (hookResult.handled) {
+        ok = hookResult.ok;
+        if (!hookResult.resolvedPath.empty()) {
+            actualResolved = hookResult.resolvedPath;
+        }
+    } else {
+        ok = readFileAll(resolved, out);
+    }
     const size_t bytesRead = ok ? out.size() : 0;
     const uint64_t durationMillis = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - startedAt).count());
     if (g_resourceReadObserver) {
-        g_resourceReadObserver(ResourceReadEvent{path, resolved, ok, bytesRead, durationMillis});
+        g_resourceReadObserver(ResourceReadEvent{path, actualResolved, ok, bytesRead, durationMillis});
     }
     if (!ok) {
-        const std::string key = path + " -> " + resolved;
+        const std::string key = path + " -> " + actualResolved;
         if (g_warnedMissingResources.insert(key).second) {
-            LOGF_W("Failed to read resource: raw=%s resolved=%s", path.c_str(), resolved.c_str());
+            LOGF_W("Failed to read resource: raw=%s resolved=%s", path.c_str(), actualResolved.c_str());
         }
     }
     return ok;

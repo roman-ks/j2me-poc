@@ -94,6 +94,8 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
+void printTraceTimings(const jvmpoc::ExecutionTrace& trace, uint64_t minMillis);
+
 void printUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
     if (trace.unknownMethodCalls.empty()) {
         return;

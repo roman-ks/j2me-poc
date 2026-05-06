@@ -222,6 +222,12 @@ public:
     static int read(const std::string& path, uint8_t* out, int maxLen);
 };
 
+struct ResourceReadHookResult {
+    bool handled = false;
+    bool ok = false;
+    std::string resolvedPath;
+};
+
 struct ResourceReadEvent {
     std::string path;
     std::string resolvedPath;
@@ -231,12 +237,17 @@ struct ResourceReadEvent {
 };
 
 using ResourceReadObserver = std::function<void(const ResourceReadEvent& event)>;
+using ResourceReadHandler = std::function<ResourceReadHookResult(
+    const std::string& path,
+    const std::string& resolvedPath,
+    std::vector<uint8_t>& out)>;
 
 void setResourceFs(esp_gallery::Fs* fs);
 esp_gallery::Fs* resourceFs();
 void setResourceRoot(const std::string& root);
 const std::string& resourceRoot();
 void setResourceReadObserver(ResourceReadObserver observer);
+void setResourceReadHandler(ResourceReadHandler handler);
 bool readResourceAll(const std::string& path, std::vector<uint8_t>& out);
 
 } // namespace port
