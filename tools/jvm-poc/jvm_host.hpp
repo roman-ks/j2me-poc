@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace jvmpoc {
@@ -60,6 +62,10 @@ public:
     mutable DrawCallStats pushStats;       // 0x01-0x14: const push + ldc
     mutable DrawCallStats miscStats;       // pop/dup/return/getstatic/new/arraylength/default
     mutable uint32_t bytecodeSteps = 0;    // total bytecodes dispatched per frame
+
+    // Per-native-method profiling (only active when profileNatives == true)
+    bool profileNatives = false;
+    mutable std::unordered_map<std::string, DrawCallStats> nativeStats;
 
     virtual void handlePress(int keyCode) {
         inputEvents_.push_back(HostKeyEvent{HostKeyEventType::Press, keyCode});

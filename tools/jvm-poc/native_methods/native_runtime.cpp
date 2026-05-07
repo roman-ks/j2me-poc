@@ -11,7 +11,7 @@ NativeCallResult handleNativeRuntime(
     const MethodRef& ref,
     const std::vector<Value>& args) {
     if (ref.name == "printInt" && ref.descriptor == "(I)V") {
-        ctx.trace.runtimePrints.push_back(RuntimePrint{
+        if (ctx.trace.recording) ctx.trace.runtimePrints.push_back(RuntimePrint{
             methodLabel,
             pc,
             args.empty() ? Value::named("<missing-arg>") : args[0],
@@ -20,7 +20,7 @@ NativeCallResult handleNativeRuntime(
     }
 
     if (ref.name == "printLong" && ref.descriptor == "(J)V") {
-        ctx.trace.runtimePrints.push_back(RuntimePrint{
+        if (ctx.trace.recording) ctx.trace.runtimePrints.push_back(RuntimePrint{
             methodLabel,
             pc,
             args.empty() ? Value::named("<missing-arg>") : args[0],
@@ -30,15 +30,17 @@ NativeCallResult handleNativeRuntime(
 
     if (ref.name == "printString" && ref.descriptor == "(Ljava/lang/String;)V") {
         Value value = args.empty() ? Value::named("<missing-arg>") : args[0];
-        std::optional<uint32_t> id = stringObjectId(ctx, value);
-        auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
-        ctx.trace.runtimePrints.push_back(RuntimePrint{
-            methodLabel,
-            pc,
-            id.has_value() && strIt != ctx.strings.end()
-                ? Value::named(strIt->second)
-                : Value::named("<string:" + value.asText() + ">"),
-        });
+        if (ctx.trace.recording) {
+            std::optional<uint32_t> id = stringObjectId(ctx, value);
+            auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
+            ctx.trace.runtimePrints.push_back(RuntimePrint{
+                methodLabel,
+                pc,
+                id.has_value() && strIt != ctx.strings.end()
+                    ? Value::named(strIt->second)
+                    : Value::named("<string:" + value.asText() + ">"),
+            });
+        }
         return handledVoid();
     }
 

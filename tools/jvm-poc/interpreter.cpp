@@ -1369,6 +1369,7 @@ std::optional<Value> resumeCurrentMethod(
                         NativeCallContext nativeCtx = makeNativeContext();
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
+                        const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
                         try {
                             nativeResult = handleNativeStaticCall(
                                 nativeCtx, label, callPc, nativeRef, callArgs);
@@ -1377,6 +1378,7 @@ std::optional<Value> resumeCurrentMethod(
                             runtimeFrame.pc = pc;
                             throw;
                         }
+                        if (tN) rt.host->nativeStats[nativeRef.className + "." + nativeRef.name].record(nowUs() - tN);
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1493,6 +1495,7 @@ std::optional<Value> resumeCurrentMethod(
                         }
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
+                        const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
                         try {
                             nativeResult = handleNativeInstanceCall(
                                 nativeCtx, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
@@ -1501,6 +1504,7 @@ std::optional<Value> resumeCurrentMethod(
                             runtimeFrame.pc = pc;
                             throw;
                         }
+                        if (tN) rt.host->nativeStats[nativeRef.className + "." + nativeRef.name].record(nowUs() - tN);
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);

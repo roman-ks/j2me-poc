@@ -5,15 +5,23 @@
 #include "../j2me_port/Canvas.hpp"
 #include "../jvm_host.hpp"
 
+#ifdef ESP32_BUILD
+#include <esp_timer.h>
+#else
 #include <chrono>
+#endif
 
 namespace jvmpoc::native_methods {
 namespace {
 
 inline uint32_t nowUs() {
+#ifdef ESP32_BUILD
+    return static_cast<uint32_t>(esp_timer_get_time());
+#else
     return static_cast<uint32_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
 }
 
 std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
@@ -48,7 +56,7 @@ NativeCallResult handleGraphics(
 
     if (ref.name == "setColor" && ref.descriptor == "(I)V") {
         ctx.graphicsColorRgb = intArg(args, 1);
-        ctx.trace.graphicsOps.push_back(GraphicsOp{
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
             pc,
             "setColor(" + argText(args, 1) + ")",
@@ -58,7 +66,7 @@ NativeCallResult handleGraphics(
 
     if (ref.name == "setColor" && ref.descriptor == "(III)V") {
         ctx.graphicsColorRgb = (intArg(args, 1) << 16) | (intArg(args, 2) << 8) | intArg(args, 3);
-        ctx.trace.graphicsOps.push_back(GraphicsOp{
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
             pc,
             "setColor(" + argText(args, 1) + "," + argText(args, 2) + "," + argText(args, 3) + ")",
@@ -77,7 +85,7 @@ NativeCallResult handleGraphics(
             canvas->fillRect(x, y, width, height);
             if (ctx.host != nullptr) ctx.host->fillRectStats.record(nowUs() - t0);
         }
-        ctx.trace.graphicsOps.push_back(GraphicsOp{
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
             pc,
             "fillRect(" + argText(args, 1) + "," + argText(args, 2) + "," +
@@ -95,7 +103,7 @@ NativeCallResult handleGraphics(
         if (canvas.has_value()) {
             canvas->drawString(text, x, y, anchor);
         }
-        ctx.trace.graphicsOps.push_back(GraphicsOp{
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
             pc,
             "drawString(\"" + text + "\"," + argText(args, 2) + "," +
@@ -113,7 +121,7 @@ NativeCallResult handleGraphics(
             canvas->drawImage(imageIt->second, intArg(args, 2), intArg(args, 3), intArg(args, 4));
             if (ctx.host != nullptr) ctx.host->drawImageStats.record(nowUs() - t0);
         }
-        ctx.trace.graphicsOps.push_back(GraphicsOp{
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
             pc,
             "drawImage(" + argText(args, 1) + "," + argText(args, 2) + "," +

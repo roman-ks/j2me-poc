@@ -71,12 +71,12 @@ NativeCallResult handleString(
         return handledVoid();
     }
 
-    ctx.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{
-        methodLabel,
-        pc,
-        methodName(ref),
-        receiver,
-    });
+    if (ctx.trace.recording) ctx.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{
+            methodLabel,
+            pc,
+            methodName(ref),
+            receiver,
+        });
     return returnsValue(ref.descriptor)
         ? handledValue(Value::named("<unsupported-string-call:" + ref.name + ">"))
         : handledVoid();

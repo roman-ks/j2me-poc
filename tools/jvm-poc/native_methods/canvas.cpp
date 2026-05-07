@@ -21,7 +21,7 @@ NativeCallResult handleCanvas(
         const int value = ref.name == "getWidth"
             ? (ctx.host != nullptr ? ctx.host->screenWidth() : 240)
             : (ctx.host != nullptr ? ctx.host->screenHeight() : 320);
-        ctx.trace.canvasSizeQueries.push_back(CanvasSizeQuery{
+        if (ctx.trace.recording) ctx.trace.canvasSizeQueries.push_back(CanvasSizeQuery{
             methodLabel,
             pc,
             receiver,
