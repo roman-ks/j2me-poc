@@ -221,7 +221,7 @@ struct Runtime {
     std::vector<RuntimeFrame> callStack;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
-    std::optional<std::reference_wrapper<std::vector<uint16_t>>> graphicsFramebuffer;
+    uint16_t* graphicsFramebuffer = nullptr;
     int graphicsWidth = 0;
     int graphicsHeight = 0;
     int graphicsColorRgb = 0x000000;
@@ -1490,7 +1490,7 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.trace = ExecutionTrace{};
     rt.steps = 0;
     rt.callStack.clear();
-    rt.graphicsFramebuffer.reset();
+    rt.graphicsFramebuffer = nullptr;
     rt.graphicsWidth = 0;
     rt.graphicsHeight = 0;
     rt.graphicsColorRgb = 0x000000;
@@ -1589,7 +1589,7 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
     rt.repaintRequested = true;
 }
 
-ExecutionTrace renderSession(MidletSession& session, std::vector<uint16_t>& pixels, int width, int height) {
+ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width, int height) {
     Runtime& rt = session.runtime();
     resetRuntimeTrace(rt);
     ScopedResourceReadTrace resourceReadTrace(rt.trace);
@@ -1688,7 +1688,7 @@ ExecutionTrace startMidletSession(MidletSession& session) {
 
 ExecutionTrace renderMidletSession(
     MidletSession& session,
-    std::vector<uint16_t>& pixels,
+    uint16_t* pixels,
     int width,
     int height) {
     return renderSession(session, pixels, width, height);
@@ -1713,7 +1713,7 @@ ExecutionTrace renderMidletFrame(
     const std::vector<ClassFile>& classes,
     const std::string& className,
     const JvmHost* host,
-    std::vector<uint16_t>& pixels,
+    uint16_t* pixels,
     int width,
     int height) {
     std::shared_ptr<MidletSession> session = createMidletSession(classes, className, host);

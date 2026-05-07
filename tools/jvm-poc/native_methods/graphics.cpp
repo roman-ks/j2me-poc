@@ -14,15 +14,15 @@ std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& 
         if (imageIt == ctx.images.end()) {
             return std::nullopt;
         }
-        port::Canvas canvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels);
+        port::Canvas canvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
         canvas.setColor(ctx.graphicsColorRgb);
         return canvas;
     }
 
-    if (!ctx.graphicsFramebuffer.has_value() || ctx.graphicsWidth <= 0 || ctx.graphicsHeight <= 0) {
+    if (ctx.graphicsFramebuffer == nullptr || ctx.graphicsWidth <= 0 || ctx.graphicsHeight <= 0) {
         return std::nullopt;
     }
-    port::Canvas canvas(ctx.graphicsWidth, ctx.graphicsHeight, ctx.graphicsFramebuffer->get());
+    port::Canvas canvas(ctx.graphicsWidth, ctx.graphicsHeight, ctx.graphicsFramebuffer);
     canvas.setColor(ctx.graphicsColorRgb);
     return canvas;
 }

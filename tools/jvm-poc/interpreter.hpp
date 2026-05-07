@@ -162,7 +162,7 @@ std::shared_ptr<MidletSession> createMidletSession(
 ExecutionTrace startMidletSession(MidletSession& session);
 ExecutionTrace renderMidletSession(
     MidletSession& session,
-    std::vector<uint16_t>& pixels,
+    uint16_t* pixels,
     int width,
     int height);
 
@@ -175,7 +175,7 @@ ExecutionTrace renderMidletFrame(
     const std::vector<ClassFile>& classes,
     const std::string& className,
     const JvmHost* host,
-    std::vector<uint16_t>& pixels,
+    uint16_t* pixels,
     int width,
     int height);
 

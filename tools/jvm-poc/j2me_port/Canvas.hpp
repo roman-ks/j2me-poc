@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -12,7 +10,7 @@ class Image;
 class Canvas {
 public:
     Canvas(int width, int height);
-    Canvas(int width, int height, std::vector<uint16_t>& externalFramebuffer);
+    Canvas(int width, int height, uint16_t* externalFb);
 
     void setColor(int rgb);
     void setColor(uint8_t r, uint8_t g, uint8_t b);
@@ -30,8 +28,8 @@ public:
     int width() const { return m_width; }
     int height() const { return m_height; }
 
-    const std::vector<uint16_t>& framebuffer() const;
-    std::vector<uint16_t>& framebuffer();
+    const uint16_t* framebuffer() const;
+    uint16_t* framebuffer();
 
 private:
     bool isInsideClip(int x, int y) const;
@@ -41,11 +39,11 @@ private:
     int m_clipY = 0;
     int m_clipW = 0;
     int m_clipH = 0;
-    std::vector<uint16_t>& activeFramebuffer();
-    const std::vector<uint16_t>& activeFramebuffer() const;
+    uint16_t* activeFramebuffer();
+    const uint16_t* activeFramebuffer() const;
 
     uint16_t m_color = 0;
-    std::optional<std::reference_wrapper<std::vector<uint16_t>>> m_externalFramebuffer;
+    uint16_t* m_externalFb = nullptr;
     std::vector<uint16_t> m_framebuffer;
 };
 

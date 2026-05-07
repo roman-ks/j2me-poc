@@ -30,7 +30,7 @@ struct NativeCallContext {
     uint32_t& nextImageId;
     Value& displayRef;
     Value& currentDisplayable;
-    std::optional<std::reference_wrapper<std::vector<uint16_t>>> graphicsFramebuffer;
+    uint16_t* graphicsFramebuffer;
     int& graphicsWidth;
     int& graphicsHeight;
     int& graphicsColorRgb;

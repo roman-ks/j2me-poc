@@ -27,6 +27,11 @@ const ExecutionTrace& JvmMidletApp::start(const std::string& className) {
     return lastTrace_;
 }
 
+void JvmMidletApp::setExternalFramebuffer(uint16_t* ptr, size_t size) {
+    externalFb_ = ptr;
+    externalFbSize_ = size;
+}
+
 const ExecutionTrace& JvmMidletApp::render() {
     lastTrace_ = ExecutionTrace{};
     const int width = host_.screenWidth();
@@ -39,11 +44,17 @@ const ExecutionTrace& JvmMidletApp::render() {
     }
 
     const size_t expectedSize = static_cast<size_t>(width * height);
-    if (framebuffer_.size() != expectedSize) {
-        framebuffer_.assign(expectedSize, 0x39e7);
+    uint16_t* fb;
+    if (externalFb_ != nullptr && externalFbSize_ >= expectedSize) {
+        fb = externalFb_;
+    } else {
+        if (framebuffer_.size() != expectedSize) {
+            framebuffer_.assign(expectedSize, 0x39e7);
+        }
+        fb = framebuffer_.data();
     }
-    lastTrace_ = renderMidletSession(*session_, framebuffer_, width, height);
-    host_.present(framebuffer_.data(), width, height);
+    lastTrace_ = renderMidletSession(*session_, fb, width, height);
+    host_.present(fb, width, height);
     return lastTrace_;
 }
 

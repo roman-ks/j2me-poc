@@ -3,6 +3,7 @@
 #include "BitmapFont5x7.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <set>
 #include <string>
 #include <vector>
@@ -86,7 +87,7 @@ Canvas Image::getGraphics() {
     if (pixels.size() != expected) {
         pixels.resize(expected, 0u);
     }
-    return Canvas(w, h, pixels);
+    return Canvas(w, h, pixels.data());
 }
 
 Canvas::Canvas(int width, int height)
@@ -96,34 +97,32 @@ Canvas::Canvas(int width, int height)
       m_clipH(m_height),
       m_framebuffer(static_cast<size_t>(m_width * m_height), 0u) {}
 
-Canvas::Canvas(int width, int height, std::vector<uint16_t>& externalFramebuffer)
+Canvas::Canvas(int width, int height, uint16_t* externalFb)
     : m_width(std::max(0, width)),
       m_height(std::max(0, height)),
       m_clipW(m_width),
       m_clipH(m_height),
-      m_externalFramebuffer(externalFramebuffer) {
-    m_externalFramebuffer->get().resize(static_cast<size_t>(m_width * m_height), 0u);
-}
+      m_externalFb(externalFb) {}
 
-std::vector<uint16_t>& Canvas::activeFramebuffer() {
-    if (m_externalFramebuffer.has_value()) {
-        return m_externalFramebuffer->get();
+uint16_t* Canvas::activeFramebuffer() {
+    if (m_externalFb != nullptr) {
+        return m_externalFb;
     }
-    return m_framebuffer;
+    return m_framebuffer.data();
 }
 
-const std::vector<uint16_t>& Canvas::activeFramebuffer() const {
-    if (m_externalFramebuffer.has_value()) {
-        return m_externalFramebuffer->get();
+const uint16_t* Canvas::activeFramebuffer() const {
+    if (m_externalFb != nullptr) {
+        return m_externalFb;
     }
-    return m_framebuffer;
+    return m_framebuffer.data();
 }
 
-std::vector<uint16_t>& Canvas::framebuffer() {
+uint16_t* Canvas::framebuffer() {
     return activeFramebuffer();
 }
 
-const std::vector<uint16_t>& Canvas::framebuffer() const {
+const uint16_t* Canvas::framebuffer() const {
     return activeFramebuffer();
 }
 
@@ -160,8 +159,8 @@ void Canvas::setClip(int x, int y, int w, int h) {
 
 void Canvas::clear(int rgb) {
     setColor(rgb);
-    auto& fb = activeFramebuffer();
-    std::fill(fb.begin(), fb.end(), m_color);
+    uint16_t* fb = activeFramebuffer();
+    std::fill(fb, fb + static_cast<size_t>(m_width) * static_cast<size_t>(m_height), m_color);
 }
 
 void Canvas::drawPixel(int x, int y) {
@@ -169,7 +168,7 @@ void Canvas::drawPixel(int x, int y) {
         return;
     }
 
-    auto& fb = activeFramebuffer();
+    uint16_t* fb = activeFramebuffer();
     fb[static_cast<size_t>(y * m_width + x)] = m_color;
 }
 
@@ -211,11 +210,11 @@ void Canvas::fillRect(int x, int y, int w, int h) {
         return;
     }
 
-    auto& fb = activeFramebuffer();
+    uint16_t* fb = activeFramebuffer();
+    const int rowWidth = x1 - x0;
     for (int py = y0; py < y1; ++py) {
-        for (int px = x0; px < x1; ++px) {
-            fb[static_cast<size_t>(py * m_width + px)] = m_color;
-        }
+        uint16_t* rowStart = fb + py * m_width + x0;
+        std::fill(rowStart, rowStart + rowWidth, m_color);
     }
 }
 
@@ -264,19 +263,25 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
         return;
     }
 
-    auto& fb = activeFramebuffer();
+    uint16_t* fb = activeFramebuffer();
     for (int py = srcY0; py < srcY1; ++py) {
         const int dstY = drawY + py;
         const size_t srcRow = static_cast<size_t>(py * image.width);
         const size_t dstRow = static_cast<size_t>(dstY * m_width);
 
-        for (int px = srcX0; px < srcX1; ++px) {
-            if (image.hasAlphaMask && !alphaMaskBitIsSet(image.alphaMask, image.width, px, py)) {
-                continue;
-            }
+        if (!image.hasAlphaMask) {
+            std::memcpy(&fb[dstRow + static_cast<size_t>(drawX + srcX0)],
+                        &image.pixels[srcRow + static_cast<size_t>(srcX0)],
+                        static_cast<size_t>(srcX1 - srcX0) * sizeof(uint16_t));
+        } else {
+            for (int px = srcX0; px < srcX1; ++px) {
+                if (!alphaMaskBitIsSet(image.alphaMask, image.width, px, py)) {
+                    continue;
+                }
 
-            const int dstX = drawX + px;
-            fb[dstRow + static_cast<size_t>(dstX)] = image.pixels[srcRow + static_cast<size_t>(px)];
+                const int dstX = drawX + px;
+                fb[dstRow + static_cast<size_t>(dstX)] = image.pixels[srcRow + static_cast<size_t>(px)];
+            }
         }
     }
 }
@@ -308,7 +313,7 @@ void Canvas::drawString(const char* text, int x, int y, int anchor) {
         drawY -= textHeight;
     }
 
-    auto& fb = activeFramebuffer();
+    uint16_t* fb = activeFramebuffer();
     for (int charIndex = 0; charIndex < textLen; ++charIndex) {
         unsigned char ch = static_cast<unsigned char>(text[static_cast<size_t>(charIndex)]);
         if (ch < 32 || ch > 127) {
