@@ -132,6 +132,7 @@ struct ImageLoad {
 };
 
 struct ExecutionTrace {
+    bool recording = true;
     std::vector<LocalWrite> localWrites;
     std::vector<RuntimePrint> runtimePrints;
     std::vector<UnsupportedStringCall> unsupportedStringCalls;
@@ -160,6 +161,7 @@ std::shared_ptr<MidletSession> createMidletSession(
     const std::string& className,
     const JvmHost* host = nullptr);
 ExecutionTrace startMidletSession(MidletSession& session);
+void setTraceRecording(MidletSession& session, bool enabled);
 ExecutionTrace renderMidletSession(
     MidletSession& session,
     uint16_t* pixels,

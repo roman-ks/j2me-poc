@@ -5,13 +5,16 @@
 #include "method_execution_delegate.hpp"
 #include "method_resolution.hpp"
 #include "native_methods.hpp"
+#include "sram_allocator.hpp"
 #include "j2me_port/J2MECompat.hpp"
 
 #ifdef ESP32_BUILD
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -33,6 +36,16 @@ constexpr const char* kResourceStreamHandlePrefix = "resource-stream:";
 
 uint32_t branchTarget(size_t pc, int16_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
+}
+
+inline uint32_t nowUs() {
+#ifdef ESP32_BUILD
+    return static_cast<uint32_t>(esp_timer_get_time());
+#else
+    return static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
 }
 
 std::string compareText(const Value& lhs, const char* op, const Value& rhs) {
@@ -218,7 +231,7 @@ struct Runtime {
     uint32_t nextImageId = 1;
     std::vector<uint32_t> freeObjectIds;
     std::vector<uint32_t> freeArrayIds;
-    std::vector<RuntimeFrame> callStack;
+    std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> callStack;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
@@ -266,7 +279,7 @@ struct YieldThreadSleep {
 
 namespace {
 
-void captureStackSnapshot(ExecutionTrace& trace, const std::vector<RuntimeFrame>& callStack) {
+void captureStackSnapshot(ExecutionTrace& trace, const std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>>& callStack) {
     trace.stackSnapshot.clear();
     for (auto it = callStack.rbegin(); it != callStack.rend(); ++it) {
         trace.stackSnapshot.push_back(it->label + " pc=" + std::to_string(it->pc));
@@ -321,7 +334,7 @@ uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
 Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const std::string& className) {
     uint32_t id = allocateHeapObjectId(rt, className);
     Value ref = objectRef(id);
-    rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
+    if (rt.trace.recording) rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
     return ref;
 }
 
@@ -335,7 +348,7 @@ Value allocateArray(Runtime& rt, const std::string& label, uint32_t pc, size_t l
     }
     rt.arrays[id] = std::vector<Value>(length, Value::named("0"));
     Value ref = arrayRef(id);
-    rt.trace.arrayAllocs.push_back(ArrayAlloc{label, pc, ref, length});
+    if (rt.trace.recording) rt.trace.arrayAllocs.push_back(ArrayAlloc{label, pc, ref, length});
     return ref;
 }
 
@@ -417,7 +430,7 @@ void storeArrayElement(
             arrayIt->second[static_cast<size_t>(*index)] = value;
         }
     }
-    rt.trace.arrayWrites.push_back(ArrayWrite{label, pc, arrayValue, indexValue, value});
+    if (rt.trace.recording) rt.trace.arrayWrites.push_back(ArrayWrite{label, pc, arrayValue, indexValue, value});
 }
 
 NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, const std::vector<Value>& args) {
@@ -631,12 +644,12 @@ void collectGarbage(Runtime& rt, std::string when) {
         addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays);
     }
     for (const RuntimeFrame& runtimeFrame : rt.callStack) {
-        const std::vector<Value>& locals = runtimeFrame.frame.locals();
+        const Frame::ValueVec& locals = runtimeFrame.frame.locals();
         for (size_t i = 0; i < locals.size(); ++i) {
             addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
         }
 
-        const std::vector<Value>& stack = runtimeFrame.frame.stack();
+        const Frame::ValueVec& stack = runtimeFrame.frame.stack();
         for (size_t i = 0; i < stack.size(); ++i) {
             addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
@@ -646,11 +659,11 @@ void collectGarbage(Runtime& rt, std::string when) {
             if (!task.suspendedFrame.has_value()) {
                 continue;
             }
-            const std::vector<Value>& locals = task.suspendedFrame->frame.locals();
+            const Frame::ValueVec& locals = task.suspendedFrame->frame.locals();
             for (size_t i = 0; i < locals.size(); ++i) {
                 addRoot(report, task.suspendedFrame->label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
             }
-            const std::vector<Value>& stack = task.suspendedFrame->frame.stack();
+            const Frame::ValueVec& stack = task.suspendedFrame->frame.stack();
             for (size_t i = 0; i < stack.size(); ++i) {
                 addRoot(report, task.suspendedFrame->label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
             }
@@ -791,6 +804,7 @@ std::optional<Value> resumeCurrentMethod(
     };
 
     auto recordLocal = [&](uint16_t index, uint32_t writePc, const Value& value, const std::string& reason) {
+        if (!rt.trace.recording) return;
         rt.trace.localWrites.push_back(LocalWrite{label, writePc, index, localNameAt(method, index, writePc), value, reason});
     };
 
@@ -872,6 +886,7 @@ std::optional<Value> resumeCurrentMethod(
             captureStackSnapshot(rt.trace, rt.callStack);
             return finish(std::nullopt);
         }
+        if (rt.host != nullptr) ++rt.host->bytecodeSteps;
 
         uint8_t op = code[pc];
         switch (op) {
@@ -910,21 +925,21 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
-            case 0x1e: frame.push(frame.local(0)); ++pc; break;
-            case 0x1f: frame.push(frame.local(1)); ++pc; break;
-            case 0x20: frame.push(frame.local(2)); ++pc; break;
-            case 0x21: frame.push(frame.local(3)); ++pc; break;
-            case 0x1a: frame.push(frame.local(0)); ++pc; break;
-            case 0x1b: frame.push(frame.local(1)); ++pc; break;
-            case 0x1c: frame.push(frame.local(2)); ++pc; break;
-            case 0x1d: frame.push(frame.local(3)); ++pc; break;
-            case 0x16: frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; break;
-            case 0x15: frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; break;
-            case 0x19: frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; break;
-            case 0x2a: frame.push(frame.local(0)); ++pc; break;
-            case 0x2b: frame.push(frame.local(1)); ++pc; break;
-            case 0x2c: frame.push(frame.local(2)); ++pc; break;
-            case 0x2d: frame.push(frame.local(3)); ++pc; break;
+            case 0x1e: { const uint32_t t0 = nowUs(); frame.push(frame.local(0)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1f: { const uint32_t t0 = nowUs(); frame.push(frame.local(1)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x20: { const uint32_t t0 = nowUs(); frame.push(frame.local(2)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x21: { const uint32_t t0 = nowUs(); frame.push(frame.local(3)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1a: { const uint32_t t0 = nowUs(); frame.push(frame.local(0)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1b: { const uint32_t t0 = nowUs(); frame.push(frame.local(1)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1c: { const uint32_t t0 = nowUs(); frame.push(frame.local(2)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1d: { const uint32_t t0 = nowUs(); frame.push(frame.local(3)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x16: { const uint32_t t0 = nowUs(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x15: { const uint32_t t0 = nowUs(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x19: { const uint32_t t0 = nowUs(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2a: { const uint32_t t0 = nowUs(); frame.push(frame.local(0)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2b: { const uint32_t t0 = nowUs(); frame.push(frame.local(1)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2c: { const uint32_t t0 = nowUs(); frame.push(frame.local(2)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2d: { const uint32_t t0 = nowUs(); frame.push(frame.local(3)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
 
             case 0x2e:
             case 0x32:
@@ -932,7 +947,9 @@ std::optional<Value> resumeCurrentMethod(
             case 0x34: {
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
+                const uint32_t t0 = nowUs();
                 frame.push(loadArrayElement(rt, arrayValue, indexValue));
+                if (rt.host != nullptr) rt.host->arrayLoadStats.record(nowUs() - t0);
                 ++pc;
                 break;
             }
@@ -1050,7 +1067,7 @@ std::optional<Value> resumeCurrentMethod(
                 break;
 
             case 0x84: {
-                uint32_t iincPc = static_cast<uint32_t>(pc);
+                const uint32_t t0arith = nowUs();
                 uint16_t index = codeU1(code, pc + 1);
                 int delta = codeS1(code, pc + 2);
                 Value oldValue = frame.local(index);
@@ -1059,8 +1076,9 @@ std::optional<Value> resumeCurrentMethod(
                     ? Value::ofInt(*oldInt + delta)
                     : Value::named("(" + oldValue.asText() + " + " + std::to_string(delta) + ")");
                 frame.setLocal(index, newValue);
-                recordLocal(index, iincPc, newValue, "iinc");
+                recordLocal(index, static_cast<uint32_t>(pc), newValue, "iinc");
                 pc += 3;
+                if (rt.host) rt.host->arithStats.record(nowUs() - t0arith);
                 break;
             }
 
@@ -1074,6 +1092,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0x6d:
             case 0x70:
             case 0x71: {
+                const uint32_t t0arith2 = nowUs();
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
                 const char* opText = (op == 0x60 || op == 0x61) ? "+" :
@@ -1097,6 +1116,7 @@ std::optional<Value> resumeCurrentMethod(
                 } else {
                     frame.push(intBinaryOp(lhs, rhs, opText, op));
                 }
+                if (rt.host) rt.host->arithStats.record(nowUs() - t0arith2);
                 ++pc;
                 break;
             }
@@ -1143,21 +1163,21 @@ std::optional<Value> resumeCurrentMethod(
             case 0x9c:
             case 0x9d:
             case 0x9e: {
-                uint32_t branchPc = static_cast<uint32_t>(pc);
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
-                bool known = parsed.has_value();
-                bool taken = known && compareIntWithZero(*parsed, op);
-                rt.trace.branches.push_back(BranchTrace{
-                    label,
-                    branchPc,
-                    compareText(value, compareZeroOpText(op), Value::named("0")),
-                    known,
-                    taken,
-                    target,
-                });
+                bool taken = parsed.has_value() && compareIntWithZero(*parsed, op);
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        compareText(value, compareZeroOpText(op), Value::named("0")),
+                        parsed.has_value(),
+                        taken,
+                        target,
+                    });
+                }
                 pc = taken ? target : pc + 3;
                 break;
             }
@@ -1168,23 +1188,23 @@ std::optional<Value> resumeCurrentMethod(
             case 0xa2:
             case 0xa3:
             case 0xa4: {
-                uint32_t branchPc = static_cast<uint32_t>(pc);
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
                 std::optional<int> left = parseIntValue(lhs);
                 std::optional<int> right = parseIntValue(rhs);
-                bool known = left.has_value() && right.has_value();
-                bool taken = known && compareInts(*left, *right, op);
-                rt.trace.branches.push_back(BranchTrace{
-                    label,
-                    branchPc,
-                    compareText(lhs, compareOpText(op), rhs),
-                    known,
-                    taken,
-                    target,
-                });
+                bool taken = left.has_value() && right.has_value() && compareInts(*left, *right, op);
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        compareText(lhs, compareOpText(op), rhs),
+                        left.has_value() && right.has_value(),
+                        taken,
+                        target,
+                    });
+                }
                 pc = taken ? target : pc + 3;
                 break;
             }
@@ -1195,20 +1215,20 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xc6:
             case 0xc7: {
-                uint32_t branchPc = static_cast<uint32_t>(pc);
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
-                bool known = value.isNull();
-                bool taken = op == 0xc6 ? known : !known;
-                rt.trace.branches.push_back(BranchTrace{
-                    label,
-                    branchPc,
-                    value.asText() + (op == 0xc6 ? " == null" : " != null"),
-                    true,
-                    taken,
-                    target,
-                });
+                bool taken = op == 0xc6 ? value.isNull() : !value.isNull();
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        value.asText() + (op == 0xc6 ? " == null" : " != null"),
+                        true,
+                        taken,
+                        target,
+                    });
+                }
                 pc = taken ? target : pc + 3;
                 break;
             }
@@ -1230,7 +1250,7 @@ std::optional<Value> resumeCurrentMethod(
                 std::string key = ref.className + "." + ref.name;
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
-                rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
+                if (rt.trace.recording) rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
                 pc += 3;
                 break;
             }
@@ -1241,6 +1261,7 @@ std::optional<Value> resumeCurrentMethod(
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 Value value = Value::named("0");
+                const uint32_t t0 = nowUs();
                 if (id.has_value()) {
                     auto objectIt = rt.heap.find(*id);
                     if (objectIt != rt.heap.end()) {
@@ -1250,6 +1271,7 @@ std::optional<Value> resumeCurrentMethod(
                         }
                     }
                 }
+                if (rt.host != nullptr) rt.host->getfieldStats.record(nowUs() - t0);
                 frame.push(value);
                 pc += 3;
                 break;
@@ -1262,10 +1284,12 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = frame.pop();
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
+                const uint32_t t0b5 = nowUs();
                 if (id.has_value()) {
                     rt.heap[*id].fields[ref.name] = value;
                 }
-                rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
+                if (rt.host != nullptr) rt.host->putfieldStats.record(nowUs() - t0b5);
+                if (rt.trace.recording) rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
                 pc += 3;
                 break;
             }
@@ -1519,7 +1543,9 @@ std::optional<Value> executeMethod(
 }
 
 void resetRuntimeTrace(Runtime& rt) {
+    bool recording = rt.trace.recording;
     rt.trace = ExecutionTrace{};
+    rt.trace.recording = recording;
     rt.steps = 0;
     rt.callStack.clear();
     rt.graphicsFramebuffer = nullptr;
@@ -1716,6 +1742,10 @@ std::shared_ptr<MidletSession> createMidletSession(
 
 ExecutionTrace startMidletSession(MidletSession& session) {
     return startSession(session);
+}
+
+void setTraceRecording(MidletSession& session, bool enabled) {
+    session.runtime().trace.recording = enabled;
 }
 
 ExecutionTrace renderMidletSession(

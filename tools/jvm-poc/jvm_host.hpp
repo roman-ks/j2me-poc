@@ -5,6 +5,24 @@
 
 namespace jvmpoc {
 
+struct DrawCallStats {
+    uint32_t count = 0;
+    uint64_t totalUs = 0;
+    uint32_t minUs = 0xFFFFFFFFu;
+    uint32_t maxUs = 0;
+
+    void record(uint32_t us) {
+        ++count;
+        totalUs += us;
+        if (us < minUs) minUs = us;
+        if (us > maxUs) maxUs = us;
+    }
+    void reset() {
+        count = 0; totalUs = 0; minUs = 0xFFFFFFFFu; maxUs = 0;
+    }
+    uint32_t avgUs() const { return count > 0 ? static_cast<uint32_t>(totalUs / count) : 0; }
+};
+
 enum class HostKeyEventType {
     Press,
     Release,
@@ -24,6 +42,19 @@ public:
     virtual uint32_t millis() const = 0;
     virtual void sleepMillis(uint32_t /*ms*/) const {}
     virtual void present(const uint16_t* pixels, int width, int height) = 0;
+
+    // Per-frame draw stats accumulated by native graphics handlers.
+    // Mutable so they can be updated through a const JvmHost* in NativeCallContext.
+    mutable DrawCallStats drawImageStats;
+    mutable DrawCallStats fillRectStats;
+    // Per-frame interpreter op stats (set by dispatch loop via rt.host).
+    mutable DrawCallStats getfieldStats;   // 0xb4: heap object field reads
+    mutable DrawCallStats arrayLoadStats;  // 0x32/33/34: array element reads
+    mutable DrawCallStats putfieldStats;   // 0xb5: heap object field writes
+    mutable DrawCallStats localLoadStats;  // 0x1a-0x2d + 0x15/16/19: local var reads (frame.push/local)
+    mutable DrawCallStats arithStats;      // 0x60-0x84: arithmetic + iinc (pure stack ops)
+    mutable uint32_t bytecodeSteps = 0;    // total bytecodes dispatched per frame
+
     virtual void handlePress(int keyCode) {
         inputEvents_.push_back(HostKeyEvent{HostKeyEventType::Press, keyCode});
     }

@@ -32,6 +32,10 @@ void JvmMidletApp::setExternalFramebuffer(uint16_t* ptr, size_t size) {
     externalFbSize_ = size;
 }
 
+void JvmMidletApp::setTraceRecording(bool enabled) {
+    if (session_) jvmpoc::setTraceRecording(*session_, enabled);
+}
+
 const ExecutionTrace& JvmMidletApp::render() {
     lastTrace_ = ExecutionTrace{};
     const int width = host_.screenWidth();

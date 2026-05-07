@@ -3,9 +3,18 @@
 #include "helpers.hpp"
 
 #include "../j2me_port/Canvas.hpp"
+#include "../jvm_host.hpp"
+
+#include <chrono>
 
 namespace jvmpoc::native_methods {
 namespace {
+
+inline uint32_t nowUs() {
+    return static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
     std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
@@ -64,7 +73,9 @@ NativeCallResult handleGraphics(
         int height = intArg(args, 4);
         std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
         if (canvas.has_value()) {
+            const uint32_t t0 = nowUs();
             canvas->fillRect(x, y, width, height);
+            if (ctx.host != nullptr) ctx.host->fillRectStats.record(nowUs() - t0);
         }
         ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
@@ -98,7 +109,9 @@ NativeCallResult handleGraphics(
         auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
         std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
         if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
+            const uint32_t t0 = nowUs();
             canvas->drawImage(imageIt->second, intArg(args, 2), intArg(args, 3), intArg(args, 4));
+            if (ctx.host != nullptr) ctx.host->drawImageStats.record(nowUs() - t0);
         }
         ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,

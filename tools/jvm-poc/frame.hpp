@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sram_allocator.hpp"
 #include "value.hpp"
 
 #include <cstdint>
@@ -19,18 +20,20 @@ struct LocalWrite {
 
 class Frame {
 public:
+    using ValueVec = std::vector<Value, SramAllocator<Value>>;
+
     explicit Frame(size_t maxLocals);
 
     void setLocal(uint16_t index, Value value);
     Value local(uint16_t index) const;
     void push(Value value);
     Value pop();
-    const std::vector<Value>& locals() const { return locals_; }
-    const std::vector<Value>& stack() const { return stack_; }
+    const ValueVec& locals() const { return locals_; }
+    const ValueVec& stack() const { return stack_; }
 
 private:
-    std::vector<Value> locals_;
-    std::vector<Value> stack_;
+    ValueVec locals_;
+    ValueVec stack_;
 };
 
 } // namespace jvmpoc
