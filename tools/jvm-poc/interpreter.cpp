@@ -20,6 +20,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <unordered_map>
 #include <set>
 #include <string>
 #include <utility>
@@ -187,6 +188,18 @@ MethodRef methodRefForOwner(const ClassFile& owner, const MethodRef& ref) {
     return MethodRef{owner.thisClass, ref.name, ref.descriptor};
 }
 
+inline uint64_t callCacheKey(const ClassFile* cls, uint16_t cpIndex) {
+    return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(cls)) << 16) | cpIndex;
+}
+
+struct ResolvedCallEntry {
+    uint8_t argSlots;
+    bool isNative;
+    std::string runtimeClass; // static/special: stored ref.className; virtual: last runtime type
+    const ClassFile* targetClass;
+    const MethodInfo* method;
+};
+
 struct HeapObject {
     std::string className;
     std::map<std::string, Value> fields;
@@ -232,6 +245,9 @@ struct Runtime {
     std::vector<uint32_t> freeObjectIds;
     std::vector<uint32_t> freeArrayIds;
     std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> callStack;
+    std::unordered_map<uint64_t, ResolvedCallEntry,
+        std::hash<uint64_t>, std::equal_to<uint64_t>,
+        SramAllocator<std::pair<const uint64_t, ResolvedCallEntry>>> callCache;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
@@ -1313,25 +1329,49 @@ std::optional<Value> resumeCurrentMethod(
             }
 
             case 0xb8: {
-                const uint32_t t0inv=nowUs();
+                const uint32_t t0inv = nowUs();
                 uint32_t callPc = static_cast<uint32_t>(pc);
-                MethodRef ref = resolveMethodRef(cls, codeU2(code, pc + 1));
-                std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
-                std::vector<Value> callArgs(widths.size());
-                for (size_t i = widths.size(); i > 0; --i) {
+                const uint16_t cpIdx = codeU2(code, pc + 1);
+                const uint64_t ckey = callCacheKey(&cls, cpIdx);
+
+                const ClassFile* targetClass = nullptr;
+                const MethodInfo* targetMethod = nullptr;
+                size_t argSlots = 0;
+                bool isNativeCall = false;
+                MethodRef ref;
+                bool haveRef = false;
+
+                auto cit = rt.callCache.find(ckey);
+                if (cit != rt.callCache.end()) {
+                    argSlots = cit->second.argSlots;
+                    targetClass = cit->second.targetClass;
+                    targetMethod = cit->second.method;
+                    isNativeCall = cit->second.isNative;
+                } else {
+                    ref = resolveMethodRef(cls, cpIdx);
+                    haveRef = true;
+                    argSlots = argumentSlotWidths(ref.descriptor).size();
+                    targetMethod = findMethodInHierarchy(
+                        classes, ref.className, ref.name, ref.descriptor, &targetClass);
+                    if (targetClass != nullptr && targetMethod != nullptr) {
+                        isNativeCall = hasAccess(targetMethod->access, kAccNative);
+                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", targetClass, targetMethod};
+                    }
+                }
+
+                std::vector<Value> callArgs(argSlots);
+                for (size_t i = argSlots; i > 0; --i) {
                     callArgs[i - 1] = frame.pop();
                 }
 
-                const ClassFile* targetClass = nullptr;
-                const MethodInfo* targetMethod = findMethodInHierarchy(
-                    classes, ref.className, ref.name, ref.descriptor, &targetClass);
                 if (targetClass != nullptr && targetMethod != nullptr) {
-                    if (hasAccess(targetMethod->access, kAccNative)) {
+                    if (isNativeCall) {
                         NativeCallContext nativeCtx = makeNativeContext();
+                        MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
                         try {
                             nativeResult = handleNativeStaticCall(
-                                nativeCtx, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
+                                nativeCtx, label, callPc, nativeRef, callArgs);
                         } catch (const YieldThreadSleep&) {
                             pc += 3;
                             runtimeFrame.pc = pc;
@@ -1343,62 +1383,106 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         } else {
                             std::optional<Value> result = recordUnknownCall(
-                                rt, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
+                                rt, label, callPc, nativeRef, callArgs);
                             if (result.has_value()) {
                                 frame.push(*result);
                             }
                         }
                     } else {
                         runtimeFrame.pc = pc;
-                        const uint32_t tDisp0 = nowUs()-t0inv;
+                        const uint32_t tDisp0 = nowUs() - t0inv;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
                         pc += 3;
-                        if(rt.host) rt.host->invokeStats.record(tDisp0);
+                        if (rt.host) rt.host->invokeStats.record(tDisp0);
                         break;
                     }
                 } else {
+                    if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
                     std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
                     if (result.has_value()) {
                         frame.push(*result);
                     }
                 }
                 pc += 3;
-                if(rt.host) rt.host->invokeStats.record(nowUs()-t0inv);
+                if (rt.host) rt.host->invokeStats.record(nowUs() - t0inv);
                 break;
             }
 
             case 0xb6:
             case 0xb7:
             case 0xb9: {
-                const uint32_t t0inv=nowUs();
-                MethodRef ref = resolveMethodRef(cls, codeU2(code, pc + 1));
-                std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
-                std::vector<Value> callArgs(widths.size() + 1);
-                for (size_t i = widths.size(); i > 0; --i) {
+                const uint32_t t0inv = nowUs();
+                const uint16_t cpIdx = codeU2(code, pc + 1);
+                const bool isVirtualOp = (op == 0xb6 || op == 0xb9);
+                const uint64_t ckey = callCacheKey(&cls, cpIdx);
+
+                const ClassFile* targetClass = nullptr;
+                const MethodInfo* targetMethod = nullptr;
+                bool isNativeCall = false;
+                size_t argSlots = 0;
+                MethodRef ref;
+                bool haveRef = false;
+
+                // Phase 1: get argSlots (must happen before popping stack)
+                auto cit = rt.callCache.find(ckey);
+                if (cit != rt.callCache.end()) {
+                    argSlots = cit->second.argSlots;
+                } else {
+                    ref = resolveMethodRef(cls, cpIdx);
+                    haveRef = true;
+                    argSlots = argumentSlotWidths(ref.descriptor).size();
+                }
+
+                // Phase 2: pop args + this
+                std::vector<Value> callArgs(argSlots + 1);
+                for (size_t i = argSlots; i > 0; --i) {
                     callArgs[i] = frame.pop();
                 }
                 Value object = frame.pop();
                 callArgs[0] = object;
 
-                std::string lookupClassName = ref.className;
-                if (op == 0xb6 || op == 0xb9) {
+                // Phase 3: determine lookupClassName
+                std::string lookupClassName = haveRef ? ref.className : "";
+                if (isVirtualOp) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
                         auto objectIt = rt.heap.find(*id);
                         if (objectIt != rt.heap.end()) {
                             lookupClassName = objectIt->second.className;
+                        } else if (!haveRef) {
+                            lookupClassName = cit->second.runtimeClass;
                         }
+                    } else if (!haveRef) {
+                        lookupClassName = cit->second.runtimeClass;
+                    }
+                } else if (!haveRef) {
+                    // invokespecial on cache hit: use stored ref.className
+                    lookupClassName = cit->second.runtimeClass;
+                }
+
+                // Phase 4: resolve dispatch (cache hit when runtime class matches)
+                if (cit != rt.callCache.end() && cit->second.runtimeClass == lookupClassName) {
+                    targetClass = cit->second.targetClass;
+                    targetMethod = cit->second.method;
+                    isNativeCall = cit->second.isNative;
+                } else {
+                    const std::string& lookupName = haveRef ? ref.name : cit->second.method->name;
+                    const std::string& lookupDesc = haveRef ? ref.descriptor : cit->second.method->descriptor;
+                    targetMethod = findMethodInHierarchy(
+                        classes, lookupClassName, lookupName, lookupDesc, &targetClass);
+                    if (targetClass != nullptr && targetMethod != nullptr) {
+                        isNativeCall = hasAccess(targetMethod->access, kAccNative);
+                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall,
+                                              lookupClassName, targetClass, targetMethod};
                     }
                 }
-                const ClassFile* targetClass = nullptr;
-                const MethodInfo* targetMethod = findMethodInHierarchy(
-                    classes, lookupClassName, ref.name, ref.descriptor, &targetClass);
+
                 if (targetClass != nullptr && targetMethod != nullptr) {
-                    if (hasAccess(targetMethod->access, kAccNative)) {
+                    if (isNativeCall) {
                         NativeCallContext nativeCtx = makeNativeContext();
                         std::optional<uint32_t> nativeObjectId = objectId(object);
                         if (nativeObjectId.has_value()) {
@@ -1407,10 +1491,11 @@ std::optional<Value> resumeCurrentMethod(
                                 nativeCtx.receiverClassName = objectIt->second.className;
                             }
                         }
+                        MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
                         try {
                             nativeResult = handleNativeInstanceCall(
-                                nativeCtx, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
+                                nativeCtx, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
                         } catch (const YieldThreadSleep&) {
                             pc += op == 0xb9 ? 5 : 3;
                             runtimeFrame.pc = pc;
@@ -1422,38 +1507,40 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         } else {
                             std::optional<Value> result = recordUnknownCall(
-                                rt, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
+                                rt, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
                             if (result.has_value()) {
                                 frame.push(*result);
                             }
                         }
                     } else {
                         runtimeFrame.pc = pc;
-                        const uint32_t tDisp0 = nowUs()-t0inv;
+                        const uint32_t tDisp0 = nowUs() - t0inv;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
                         pc += op == 0xb9 ? 5 : 3;
-                        if(rt.host) rt.host->invokeStats.record(tDisp0);
+                        if (rt.host) rt.host->invokeStats.record(tDisp0);
                         break;
                     }
                 } else {
+                    if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
                     NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, callArgs);
                     if (builtInResult.handled) {
                         if (builtInResult.returnValue.has_value()) {
                             frame.push(*builtInResult.returnValue);
                         }
                     } else {
-                        std::optional<Value> result = recordUnknownCall(rt, label, static_cast<uint32_t>(pc), ref, callArgs);
+                        std::optional<Value> result = recordUnknownCall(
+                            rt, label, static_cast<uint32_t>(pc), ref, callArgs);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
                     }
                 }
                 pc += op == 0xb9 ? 5 : 3;
-                if(rt.host) rt.host->invokeStats.record(nowUs()-t0inv);
+                if (rt.host) rt.host->invokeStats.record(nowUs() - t0inv);
                 break;
             }
 
