@@ -53,6 +53,12 @@ public:
     mutable DrawCallStats putfieldStats;   // 0xb5: heap object field writes
     mutable DrawCallStats localLoadStats;  // 0x1a-0x2d + 0x15/16/19: local var reads (frame.push/local)
     mutable DrawCallStats arithStats;      // 0x60-0x84: arithmetic + iinc (pure stack ops)
+    mutable DrawCallStats storeStats;      // 0x36-0x4e: local variable writes
+    mutable DrawCallStats arrayStoreStats; // 0x4f-0x56: array element writes
+    mutable DrawCallStats branchStats;     // 0x99-0xa7, 0xc6-0xc7: branch instructions
+    mutable DrawCallStats invokeStats;     // 0xb6-0xb8: dispatch overhead only (excl. callee body)
+    mutable DrawCallStats pushStats;       // 0x01-0x14: const push + ldc
+    mutable DrawCallStats miscStats;       // pop/dup/return/getstatic/new/arraylength/default
     mutable uint32_t bytecodeSteps = 0;    // total bytecodes dispatched per frame
 
     virtual void handlePress(int keyCode) {
