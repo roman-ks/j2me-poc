@@ -37,7 +37,7 @@ NativeCallResult handleNativeRuntime(
             pc,
             id.has_value() && strIt != ctx.strings.end()
                 ? Value::named(strIt->second)
-                : Value::named("<string:" + value.text + ">"),
+                : Value::named("<string:" + value.asText() + ">"),
         });
         return handledVoid();
     }

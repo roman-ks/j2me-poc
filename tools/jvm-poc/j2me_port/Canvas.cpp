@@ -264,23 +264,49 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
     }
 
     uint16_t* fb = activeFramebuffer();
-    for (int py = srcY0; py < srcY1; ++py) {
-        const int dstY = drawY + py;
-        const size_t srcRow = static_cast<size_t>(py * image.width);
-        const size_t dstRow = static_cast<size_t>(dstY * m_width);
-
-        if (!image.hasAlphaMask) {
+    if (!image.hasAlphaMask) {
+        for (int py = srcY0; py < srcY1; ++py) {
+            const int dstY = drawY + py;
+            const size_t srcRow = static_cast<size_t>(py * image.width);
+            const size_t dstRow = static_cast<size_t>(dstY * m_width);
             std::memcpy(&fb[dstRow + static_cast<size_t>(drawX + srcX0)],
                         &image.pixels[srcRow + static_cast<size_t>(srcX0)],
                         static_cast<size_t>(srcX1 - srcX0) * sizeof(uint16_t));
-        } else {
+        }
+    } else {
+        // Copy pixel row and mask bytes to the stack once per row so the
+        // inner pixel loop only touches SRAM instead of PSRAM.
+        const int pixLen = srcX1 - srcX0;
+        const size_t rowBytes = (static_cast<size_t>(image.width) + 7u) >> 3u;
+        const size_t maskByteStart = static_cast<size_t>(srcX0) >> 3u;
+        const size_t maskByteEnd = (static_cast<size_t>(srcX1 - 1) >> 3u) + 1u;
+        const int maskLen = static_cast<int>(maskByteEnd - maskByteStart);
+
+        uint16_t pixBuf[pixLen];   // stack: max ~480 B for 240-px-wide row
+        uint8_t  maskBuf[maskLen]; // stack: max ~30 B
+
+        for (int py = srcY0; py < srcY1; ++py) {
+            const int dstY = drawY + py;
+            const size_t srcRow = static_cast<size_t>(py * image.width);
+            const size_t dstRow = static_cast<size_t>(dstY * m_width);
+            const size_t maskRowBase = static_cast<size_t>(py) * rowBytes;
+
+            // One PSRAM burst read per row instead of one read per pixel.
+            std::memcpy(pixBuf,
+                        &image.pixels[srcRow + static_cast<size_t>(srcX0)],
+                        static_cast<size_t>(pixLen) * sizeof(uint16_t));
+            std::memcpy(maskBuf,
+                        &image.alphaMask[maskRowBase + maskByteStart],
+                        static_cast<size_t>(maskLen));
+
             for (int px = srcX0; px < srcX1; ++px) {
-                if (!alphaMaskBitIsSet(image.alphaMask, image.width, px, py)) {
+                const size_t localByte = (static_cast<size_t>(px) >> 3u) - maskByteStart;
+                const uint8_t bit = static_cast<uint8_t>(0x80u >> (static_cast<unsigned>(px) & 7u));
+                if ((maskBuf[localByte] & bit) == 0) {
                     continue;
                 }
-
                 const int dstX = drawX + px;
-                fb[dstRow + static_cast<size_t>(dstX)] = image.pixels[srcRow + static_cast<size_t>(px)];
+                fb[dstRow + static_cast<size_t>(dstX)] = pixBuf[static_cast<size_t>(px - srcX0)];
             }
         }
     }

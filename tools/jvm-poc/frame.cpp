@@ -1,4 +1,5 @@
 #include "frame.hpp"
+#include "value.hpp"
 
 namespace jvmpoc {
 
@@ -11,7 +12,7 @@ void Frame::setLocal(uint16_t index, Value value) {
 }
 
 Value Frame::local(uint16_t index) const {
-    if (index < locals_.size() && !locals_[index].text.empty()) {
+    if (index < locals_.size() && locals_[index].isInitialized()) {
         return locals_[index];
     }
     return Value::named("local" + std::to_string(index));
@@ -30,31 +31,5 @@ Value Frame::pop() {
     return value;
 }
 
-std::optional<long long> parseLongValue(const Value& value) {
-    if (value.text.empty()) {
-        return std::nullopt;
-    }
-    size_t pos = 0;
-    if (value.text[0] == '-') {
-        pos = 1;
-    }
-    if (pos == value.text.size()) {
-        return std::nullopt;
-    }
-    for (; pos < value.text.size(); ++pos) {
-        if (value.text[pos] < '0' || value.text[pos] > '9') {
-            return std::nullopt;
-        }
-    }
-    return std::stoll(value.text);
-}
-
-std::optional<int> parseIntValue(const Value& value) {
-    std::optional<long long> parsed = parseLongValue(value);
-    if (!parsed.has_value() || *parsed < static_cast<long long>(INT32_MIN) || *parsed > static_cast<long long>(INT32_MAX)) {
-        return std::nullopt;
-    }
-    return static_cast<int>(*parsed);
-}
-
 } // namespace jvmpoc
+

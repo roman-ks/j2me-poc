@@ -111,7 +111,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
             std::cout << "    " << write.methodLabel << " pc=" << write.pc << " ["
                       << write.index << "] "
                       << (write.localName.empty() ? "local" + std::to_string(write.index) : write.localName)
-                      << " = " << write.value.text;
+                      << " = " << write.value.asText();
             if (!write.reason.empty() && write.reason != "store") {
                 std::cout << " (" << write.reason << ")";
             }
@@ -132,7 +132,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  static writes:\n";
         for (const jvmpoc::StaticWrite& write : trace.staticWrites) {
             std::cout << "    " << write.methodLabel << " pc=" << write.pc
-                      << " " << write.fieldName << " = " << write.value.text << "\n";
+                      << " " << write.fieldName << " = " << write.value.asText() << "\n";
         }
     }
 
@@ -140,7 +140,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  object allocs:\n";
         for (const jvmpoc::ObjectAlloc& alloc : trace.objectAllocs) {
             std::cout << "    " << alloc.methodLabel << " pc=" << alloc.pc
-                      << " " << alloc.ref.text << " = new " << alloc.className << "\n";
+                      << " " << alloc.ref.asText() << " = new " << alloc.className << "\n";
         }
     }
 
@@ -148,8 +148,8 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  field writes:\n";
         for (const jvmpoc::FieldWrite& write : trace.fieldWrites) {
             std::cout << "    " << write.methodLabel << " pc=" << write.pc
-                      << " " << write.ref.text << "." << write.fieldName
-                      << " = " << write.value.text << "\n";
+                      << " " << write.ref.asText() << "." << write.fieldName
+                      << " = " << write.value.asText() << "\n";
         }
     }
 
@@ -157,7 +157,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  array allocs:\n";
         for (const jvmpoc::ArrayAlloc& alloc : trace.arrayAllocs) {
             std::cout << "    " << alloc.methodLabel << " pc=" << alloc.pc
-                      << " " << alloc.ref.text << " = new int[" << alloc.length << "]\n";
+                      << " " << alloc.ref.asText() << " = new int[" << alloc.length << "]\n";
         }
     }
 
@@ -165,15 +165,15 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  array writes:\n";
         for (const jvmpoc::ArrayWrite& write : trace.arrayWrites) {
             std::cout << "    " << write.methodLabel << " pc=" << write.pc
-                      << " " << write.ref.text << "[" << write.index.text << "]"
-                      << " = " << write.value.text << "\n";
+                      << " " << write.ref.asText() << "[" << write.index.asText() << "]"
+                      << " = " << write.value.asText() << "\n";
         }
     }
 
     if (!trace.runtimePrints.empty()) {
         std::cout << "  stdout:\n";
         for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
-            std::cout << "    " << print.methodLabel << " pc=" << print.pc << ": " << print.value.text << "\n";
+            std::cout << "    " << print.methodLabel << " pc=" << print.pc << ": " << print.value.asText() << "\n";
         }
     }
 
@@ -181,8 +181,8 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  display:\n";
         for (const jvmpoc::DisplaySetCurrent& setCurrent : trace.displaySetCurrents) {
             std::cout << "    " << setCurrent.methodLabel << " pc=" << setCurrent.pc
-                      << " " << setCurrent.display.text << ".setCurrent("
-                      << setCurrent.displayable.text << ")\n";
+                      << " " << setCurrent.display.asText() << ".setCurrent("
+                      << setCurrent.displayable.asText() << ")\n";
         }
     }
 
@@ -190,7 +190,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  canvas queries:\n";
         for (const jvmpoc::CanvasSizeQuery& query : trace.canvasSizeQueries) {
             std::cout << "    " << query.methodLabel << " pc=" << query.pc
-                      << " " << query.canvas.text << "." << query.methodName
+                      << " " << query.canvas.asText() << "." << query.methodName
                       << " -> " << query.value << "\n";
         }
     }
@@ -207,7 +207,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  images:\n";
         for (const jvmpoc::ImageLoad& load : trace.imageLoads) {
             std::cout << "    " << load.methodLabel << " pc=" << load.pc
-                      << " " << load.image.text << " = " << load.source
+                      << " " << load.image.asText() << " = " << load.source
                       << " (" << load.width << "x" << load.height << ")\n";
         }
     }
@@ -216,7 +216,7 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
         std::cout << "  unsupported string calls:\n";
         for (const jvmpoc::UnsupportedStringCall& call : trace.unsupportedStringCalls) {
             std::cout << "    " << call.methodLabel << " pc=" << call.pc
-                      << " " << call.receiver.text << "." << call.methodName << "\n";
+                      << " " << call.receiver.asText() << "." << call.methodName << "\n";
         }
     }
 
@@ -249,42 +249,42 @@ void printTraceBody(const jvmpoc::ExecutionTrace& trace) {
             if (!report.unreachableObjects.empty()) {
                 std::cout << "      unreachable objects:";
                 for (const jvmpoc::Value& value : report.unreachableObjects) {
-                    std::cout << " " << value.text;
+                    std::cout << " " << value.asText();
                 }
                 std::cout << "\n";
             }
             if (!report.unreachableArrays.empty()) {
                 std::cout << "      unreachable arrays:";
                 for (const jvmpoc::Value& value : report.unreachableArrays) {
-                    std::cout << " " << value.text;
+                    std::cout << " " << value.asText();
                 }
                 std::cout << "\n";
             }
             if (!report.unreachableStrings.empty()) {
                 std::cout << "      unreachable strings:";
                 for (const jvmpoc::Value& value : report.unreachableStrings) {
-                    std::cout << " " << value.text;
+                    std::cout << " " << value.asText();
                 }
                 std::cout << "\n";
             }
             if (!report.freedObjects.empty()) {
                 std::cout << "      freed objects:";
                 for (const jvmpoc::Value& value : report.freedObjects) {
-                    std::cout << " " << value.text;
+                    std::cout << " " << value.asText();
                 }
                 std::cout << "\n";
             }
             if (!report.freedArrays.empty()) {
                 std::cout << "      freed arrays:";
                 for (const jvmpoc::Value& value : report.freedArrays) {
-                    std::cout << " " << value.text;
+                    std::cout << " " << value.asText();
                 }
                 std::cout << "\n";
             }
             if (!report.freedStrings.empty()) {
                 std::cout << "      freed strings:";
                 for (const jvmpoc::Value& value : report.freedStrings) {
-                    std::cout << " " << value.text;
+                    std::cout << " " << value.asText();
                 }
                 std::cout << "\n";
             }
@@ -323,7 +323,7 @@ void printMidletTrace(const std::vector<jvmpoc::ClassFile>& classes, const std::
 
 void printStdoutOnly(const jvmpoc::ExecutionTrace& trace) {
     for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
-        std::cout << print.value.text << "\n";
+        std::cout << print.value.asText() << "\n";
     }
 }
 

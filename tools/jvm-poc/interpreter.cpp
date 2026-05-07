@@ -32,7 +32,7 @@ uint32_t branchTarget(size_t pc, int16_t offset) {
 }
 
 std::string compareText(const Value& lhs, const char* op, const Value& rhs) {
-    return lhs.text + " " + op + " " + rhs.text;
+    return lhs.asText() + " " + op + " " + rhs.asText();
 }
 
 Value intBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t opcode) {
@@ -40,19 +40,17 @@ Value intBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t op
     std::optional<int> right = parseIntValue(rhs);
     if (left && right) {
         switch (opcode) {
-            case 0x60: return Value::named(std::to_string(*left + *right));
-            case 0x64: return Value::named(std::to_string(*left - *right));
-            case 0x68: return Value::named(std::to_string(*left * *right));
+            case 0x60: return Value::ofInt(*left + *right);
+            case 0x64: return Value::ofInt(*left - *right);
+            case 0x68: return Value::ofInt(*left * *right);
             case 0x6c:
-                if (*right == 0) {
-                    return Value::named("<divide-by-zero>");
-                }
-                return Value::named(std::to_string(*left / *right));
+                if (*right == 0) return Value::named("<divide-by-zero>");
+                return Value::ofInt(*left / *right);
             default:
                 break;
         }
     }
-    return Value::named("(" + lhs.text + " " + op + " " + rhs.text + ")");
+    return Value::named("(" + lhs.asText() + " " + op + " " + rhs.asText() + ")");
 }
 
 Value longBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t opcode) {
@@ -60,19 +58,17 @@ Value longBinaryOp(const Value& lhs, const Value& rhs, const char* op, uint8_t o
     std::optional<long long> right = parseLongValue(rhs);
     if (left && right) {
         switch (opcode) {
-            case 0x61: return Value::named(std::to_string(*left + *right));
-            case 0x65: return Value::named(std::to_string(*left - *right));
-            case 0x69: return Value::named(std::to_string(*left * *right));
+            case 0x61: return Value::ofLong(*left + *right);
+            case 0x65: return Value::ofLong(*left - *right);
+            case 0x69: return Value::ofLong(*left * *right);
             case 0x6d:
-                if (*right == 0) {
-                    return Value::named("<divide-by-zero>");
-                }
-                return Value::named(std::to_string(*left / *right));
+                if (*right == 0) return Value::named("<divide-by-zero>");
+                return Value::ofLong(*left / *right);
             default:
                 break;
         }
     }
-    return Value::named("(" + lhs.text + " " + op + " " + rhs.text + ")");
+    return Value::named("(" + lhs.asText() + " " + op + " " + rhs.asText() + ")");
 }
 
 bool compareInts(int lhs, int rhs, uint8_t op) {
@@ -299,10 +295,11 @@ Value arrayRef(uint32_t id) {
 }
 
 std::optional<std::string> parseTextHandle(const Value& value, const std::string& prefix) {
-    if (value.text.compare(0, prefix.size(), prefix) != 0) {
+    const std::string text = value.asText();
+    if (text.compare(0, prefix.size(), prefix) != 0) {
         return std::nullopt;
     }
-    return value.text.substr(prefix.size());
+    return text.substr(prefix.size());
 }
 
 uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
@@ -435,7 +432,7 @@ NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, co
 
     if (ref.className == "java/lang/Class" && ref.name == "getResourceAsStream" &&
         ref.descriptor == "(Ljava/lang/String;)Ljava/io/InputStream;") {
-        std::string path = args.size() > 1 ? runtimeString(rt, args[1]).value_or(args[1].text) : "";
+        std::string path = args.size() > 1 ? runtimeString(rt, args[1]).value_or(args[1].asText()) : "";
         return NativeCallResult{true, path.empty()
             ? std::optional<Value>(Value::named("0"))
             : std::optional<Value>(Value::named(std::string(kResourceStreamHandlePrefix) + path))};
@@ -487,17 +484,18 @@ std::optional<Value> recordUnknownCall(
         callName(ref),
         args,
         nooped,
-        result.has_value() ? result->text : "",
+        result.has_value() ? result->asText() : "",
     });
     return result;
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    if (value.text.compare(0, prefix.size(), prefix) != 0) {
+    const std::string text = value.asText();
+    if (text.compare(0, prefix.size(), prefix) != 0) {
         return std::nullopt;
     }
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(value.text.c_str() + prefix.size(), &end, 10);
+    unsigned long parsed = std::strtoul(text.c_str() + prefix.size(), &end, 10);
     if (end == nullptr || *end != '\0') {
         return std::nullopt;
     }
@@ -524,7 +522,7 @@ std::string debugValueText(const Runtime& rt, const Value& value) {
             return '"' + stringIt->second + '"';
         }
     }
-    return value.text;
+    return value.asText();
 }
 
 void captureDisplayableFields(ExecutionTrace& trace, const Runtime& rt, const HeapObject& object) {
@@ -614,7 +612,7 @@ void addRoot(
     if (!isReference(value)) {
         return;
     }
-    report.roots.push_back(name + "=" + value.text);
+    report.roots.push_back(name + "=" + value.asText());
     markValue(value, rt, markedObjects, markedArrays);
 }
 
@@ -850,22 +848,22 @@ std::optional<Value> resumeCurrentMethod(
 
         uint8_t op = method.code[pc];
         switch (op) {
-            case 0x01: frame.push(Value::named("0")); ++pc; break;
-            case 0x02: frame.push(Value::named("-1")); ++pc; break;
-            case 0x03: frame.push(Value::named("0")); ++pc; break;
-            case 0x04: frame.push(Value::named("1")); ++pc; break;
-            case 0x05: frame.push(Value::named("2")); ++pc; break;
-            case 0x06: frame.push(Value::named("3")); ++pc; break;
-            case 0x07: frame.push(Value::named("4")); ++pc; break;
-            case 0x08: frame.push(Value::named("5")); ++pc; break;
-            case 0x09: frame.push(Value::named("0")); ++pc; break;
-            case 0x0a: frame.push(Value::named("1")); ++pc; break;
-            case 0x10: frame.push(Value::named(std::to_string(codeS1(method.code, pc + 1)))); pc += 2; break;
-            case 0x11: frame.push(Value::named(std::to_string(codeS2(method.code, pc + 1)))); pc += 3; break;
+            case 0x01: frame.push(Value::ofInt(0)); ++pc; break;   // aconst_null
+            case 0x02: frame.push(Value::ofInt(-1)); ++pc; break;  // iconst_m1
+            case 0x03: frame.push(Value::ofInt(0)); ++pc; break;   // iconst_0
+            case 0x04: frame.push(Value::ofInt(1)); ++pc; break;   // iconst_1
+            case 0x05: frame.push(Value::ofInt(2)); ++pc; break;   // iconst_2
+            case 0x06: frame.push(Value::ofInt(3)); ++pc; break;   // iconst_3
+            case 0x07: frame.push(Value::ofInt(4)); ++pc; break;   // iconst_4
+            case 0x08: frame.push(Value::ofInt(5)); ++pc; break;   // iconst_5
+            case 0x09: frame.push(Value::ofLong(0)); ++pc; break;  // lconst_0
+            case 0x0a: frame.push(Value::ofLong(1)); ++pc; break;  // lconst_1
+            case 0x10: frame.push(Value::ofInt(codeS1(method.code, pc + 1))); pc += 2; break;  // bipush
+            case 0x11: frame.push(Value::ofInt(codeS2(method.code, pc + 1))); pc += 3; break;  // sipush
             case 0x12: {
                 uint16_t index = codeU1(method.code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
-                    ? Value::named(std::to_string(resolveIntegerConstant(cls, index)))
+                    ? Value::ofInt(resolveIntegerConstant(cls, index))
                     : internString(rt, resolveStringConstant(cls, index)));
                 pc += 2;
                 break;
@@ -873,14 +871,14 @@ std::optional<Value> resumeCurrentMethod(
             case 0x13: {
                 uint16_t index = codeU2(method.code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
-                    ? Value::named(std::to_string(resolveIntegerConstant(cls, index)))
+                    ? Value::ofInt(resolveIntegerConstant(cls, index))
                     : internString(rt, resolveStringConstant(cls, index)));
                 pc += 3;
                 break;
             }
             case 0x14: {
                 uint16_t index = codeU2(method.code, pc + 1);
-                frame.push(Value::named(std::to_string(resolveLongConstant(cls, index))));
+                frame.push(Value::ofLong(resolveLongConstant(cls, index)));
                 pc += 3;
                 break;
             }
@@ -1031,8 +1029,8 @@ std::optional<Value> resumeCurrentMethod(
                 Value oldValue = frame.local(index);
                 std::optional<int> oldInt = parseIntValue(oldValue);
                 Value newValue = oldInt
-                    ? Value::named(std::to_string(*oldInt + delta))
-                    : Value::named("(" + oldValue.text + " + " + std::to_string(delta) + ")");
+                    ? Value::ofInt(*oldInt + delta)
+                    : Value::named("(" + oldValue.asText() + " + " + std::to_string(delta) + ")");
                 frame.setLocal(index, newValue);
                 recordLocal(index, iincPc, newValue, "iinc");
                 pc += 3;
@@ -1058,15 +1056,15 @@ std::optional<Value> resumeCurrentMethod(
                 std::optional<int> left = parseIntValue(lhs);
                 std::optional<int> right = parseIntValue(rhs);
                 if (op == 0x70 && left.has_value() && right.has_value()) {
-                    frame.push(*right == 0 ? Value::named("<divide-by-zero>") : Value::named(std::to_string(*left % *right)));
+                    frame.push(*right == 0 ? Value::named("<divide-by-zero>") : Value::ofInt(*left % *right));
                 } else if (op == 0x71) {
                     std::optional<long long> leftLong = parseLongValue(lhs);
                     std::optional<long long> rightLong = parseLongValue(rhs);
                     frame.push(leftLong.has_value() && rightLong.has_value() && *rightLong != 0
-                        ? Value::named(std::to_string(*leftLong % *rightLong))
+                        ? Value::ofLong(*leftLong % *rightLong)
                         : leftLong.has_value() && rightLong.has_value() && *rightLong == 0
                             ? Value::named("<divide-by-zero>")
-                            : Value::named("(" + lhs.text + " % " + rhs.text + ")"));
+                            : Value::named("(" + lhs.asText() + " % " + rhs.asText() + ")"));
                 } else if (op == 0x61 || op == 0x65 || op == 0x69 || op == 0x6d) {
                     frame.push(longBinaryOp(lhs, rhs, opText, op));
                 } else {
@@ -1080,8 +1078,8 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
                 frame.push(parsed.has_value()
-                    ? Value::named(std::to_string(-*parsed))
-                    : Value::named("(-" + value.text + ")"));
+                    ? Value::ofInt(-*parsed)
+                    : Value::named("(-" + value.asText() + ")"));
                 ++pc;
                 break;
             }
@@ -1090,8 +1088,8 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = frame.pop();
                 std::optional<long long> parsed = parseLongValue(value);
                 frame.push(parsed.has_value()
-                    ? Value::named(std::to_string(-*parsed))
-                    : Value::named("(-" + value.text + ")"));
+                    ? Value::ofLong(-*parsed)
+                    : Value::named("(-" + value.asText() + ")"));
                 ++pc;
                 break;
             }
@@ -1106,8 +1104,8 @@ std::optional<Value> resumeCurrentMethod(
                 std::optional<long long> left = parseLongValue(lhs);
                 std::optional<long long> right = parseLongValue(rhs);
                 frame.push(left.has_value() && right.has_value()
-                    ? Value::named(*left < *right ? "-1" : *left > *right ? "1" : "0")
-                    : Value::named("<lcmp:" + lhs.text + "," + rhs.text + ">"));
+                    ? Value::ofInt(*left < *right ? -1 : *left > *right ? 1 : 0)
+                    : Value::named("<lcmp:" + lhs.asText() + "," + rhs.asText() + ">"));
                 ++pc;
                 break;
             }
@@ -1174,12 +1172,12 @@ std::optional<Value> resumeCurrentMethod(
                 int16_t offset = codeS2(method.code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
-                bool known = value.text == "0";
+                bool known = value.isNull();
                 bool taken = op == 0xc6 ? known : !known;
                 rt.trace.branches.push_back(BranchTrace{
                     label,
                     branchPc,
-                    value.text + (op == 0xc6 ? " == null" : " != null"),
+                    value.asText() + (op == 0xc6 ? " == null" : " != null"),
                     true,
                     taken,
                     target,
@@ -1444,7 +1442,7 @@ std::optional<Value> resumeCurrentMethod(
                 if (id.has_value() && arrayIt != rt.arrays.end()) {
                     frame.push(Value::named(std::to_string(arrayIt->second.size())));
                 } else {
-                    frame.push(Value::named("<arraylength:" + arrayValue.text + ">"));
+                    frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
                 }
                 ++pc;
                 break;

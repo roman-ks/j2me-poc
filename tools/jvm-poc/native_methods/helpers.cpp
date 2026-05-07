@@ -17,11 +17,12 @@ bool returnsValue(const std::string& descriptor) {
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    if (value.text.compare(0, prefix.size(), prefix) != 0) {
+    const std::string text = value.asText();
+    if (text.compare(0, prefix.size(), prefix) != 0) {
         return std::nullopt;
     }
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(value.text.c_str() + prefix.size(), &end, 10);
+    unsigned long parsed = std::strtoul(text.c_str() + prefix.size(), &end, 10);
     if (end == nullptr || *end != '\0') {
         return std::nullopt;
     }
@@ -77,7 +78,7 @@ int intArg(const std::vector<Value>& args, size_t index, int fallback) {
 }
 
 std::string argText(const std::vector<Value>& args, size_t index) {
-    return index < args.size() ? args[index].text : "<missing-arg>";
+    return index < args.size() ? args[index].asText() : "<missing-arg>";
 }
 
 std::string stringArg(const NativeCallContext& ctx, const std::vector<Value>& args, size_t index) {
@@ -86,7 +87,7 @@ std::string stringArg(const NativeCallContext& ctx, const std::vector<Value>& ar
     }
     std::optional<uint32_t> id = stringObjectId(ctx, args[index]);
     auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
-    return id.has_value() && strIt != ctx.strings.end() ? strIt->second : args[index].text;
+    return id.has_value() && strIt != ctx.strings.end() ? strIt->second : args[index].asText();
 }
 
 } // namespace jvmpoc::native_methods

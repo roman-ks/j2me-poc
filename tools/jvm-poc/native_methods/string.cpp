@@ -45,7 +45,7 @@ NativeCallResult handleString(
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         return handledValue(id.has_value() && strIt != ctx.strings.end()
             ? Value::named(std::to_string(strIt->second.size()))
-            : Value::named("<string-length:" + receiver.text + ">"));
+            : Value::named("<string-length:" + receiver.asText() + ">"));
     }
 
     if (ref.name == "getChars" && ref.descriptor == "(II[CI)V") {

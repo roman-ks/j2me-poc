@@ -72,7 +72,7 @@ const jvmpoc::MethodInfo* findMain(const jvmpoc::ClassFile& cls) {
 std::vector<std::string> stdoutValues(const jvmpoc::ExecutionTrace& trace) {
     std::vector<std::string> values;
     for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
-        values.push_back(print.value.text);
+        values.push_back(print.value.asText());
     }
     return values;
 }
@@ -88,7 +88,7 @@ std::vector<std::string> unknownCalls(const jvmpoc::ExecutionTrace& trace) {
 std::vector<std::string> displayCurrents(const jvmpoc::ExecutionTrace& trace) {
     std::vector<std::string> currents;
     for (const jvmpoc::DisplaySetCurrent& setCurrent : trace.displaySetCurrents) {
-        currents.push_back(setCurrent.display.text + ".setCurrent(" + setCurrent.displayable.text + ")");
+        currents.push_back(setCurrent.display.asText() + ".setCurrent(" + setCurrent.displayable.asText() + ")");
     }
     return currents;
 }
@@ -114,7 +114,7 @@ std::vector<std::string> appendAll(
 std::vector<std::string> valueTexts(const std::vector<jvmpoc::Value>& values) {
     std::vector<std::string> texts;
     for (const jvmpoc::Value& value : values) {
-        texts.push_back(value.text);
+        texts.push_back(value.asText());
     }
     return texts;
 }
