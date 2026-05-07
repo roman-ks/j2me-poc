@@ -7,6 +7,10 @@
 #include "native_methods.hpp"
 #include "j2me_port/J2MECompat.hpp"
 
+#ifdef ESP32_BUILD
+#include <esp_heap_caps.h>
+#endif
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
@@ -779,7 +783,7 @@ std::optional<Value> resumeCurrentMethod(
     const MethodInfo& method = *runtimeFrame.method;
     const std::string& label = runtimeFrame.label;
     Frame& frame = runtimeFrame.frame;
-    size_t& pc = runtimeFrame.pc;
+    size_t pc = runtimeFrame.pc;
 
     auto finish = [&](std::optional<Value> result) -> std::optional<Value> {
         rt.callStack.pop_back();
@@ -839,14 +843,37 @@ std::optional<Value> resumeCurrentMethod(
         };
     };
 
-    while (pc < method.code.size()) {
+    // Cache bytecode as a raw pointer so that all inner reads resolve to a single
+    // pointer dereference rather than going through the std::vector metadata.
+    // On ESP32, if the method code exceeds the PSRAM threshold (4 KB), copy it
+    // into internal SRAM so the CPU never has to fetch bytecodes from PSRAM.
+    const size_t codeSize = method.code.size();
+    const uint8_t* code = method.code.data();
+#ifdef ESP32_BUILD
+    uint8_t* sramCode = nullptr;
+    if (codeSize > 4096) {
+        sramCode = static_cast<uint8_t*>(
+            heap_caps_malloc(codeSize, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+        if (sramCode != nullptr) {
+            memcpy(sramCode, code, codeSize);
+            code = sramCode;
+        }
+    }
+    struct SramCodeGuard {
+        uint8_t* ptr;
+        ~SramCodeGuard() { if (ptr != nullptr) heap_caps_free(ptr); }
+    } sramCodeGuard{sramCode};
+#endif
+
+    while (pc < codeSize) {
         if (++rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
+            runtimeFrame.pc = pc;
             captureStackSnapshot(rt.trace, rt.callStack);
             return finish(std::nullopt);
         }
 
-        uint8_t op = method.code[pc];
+        uint8_t op = code[pc];
         switch (op) {
             case 0x01: frame.push(Value::ofInt(0)); ++pc; break;   // aconst_null
             case 0x02: frame.push(Value::ofInt(-1)); ++pc; break;  // iconst_m1
@@ -858,10 +885,10 @@ std::optional<Value> resumeCurrentMethod(
             case 0x08: frame.push(Value::ofInt(5)); ++pc; break;   // iconst_5
             case 0x09: frame.push(Value::ofLong(0)); ++pc; break;  // lconst_0
             case 0x0a: frame.push(Value::ofLong(1)); ++pc; break;  // lconst_1
-            case 0x10: frame.push(Value::ofInt(codeS1(method.code, pc + 1))); pc += 2; break;  // bipush
-            case 0x11: frame.push(Value::ofInt(codeS2(method.code, pc + 1))); pc += 3; break;  // sipush
+            case 0x10: frame.push(Value::ofInt(codeS1(code, pc + 1))); pc += 2; break;  // bipush
+            case 0x11: frame.push(Value::ofInt(codeS2(code, pc + 1))); pc += 3; break;  // sipush
             case 0x12: {
-                uint16_t index = codeU1(method.code, pc + 1);
+                uint16_t index = codeU1(code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
                     ? Value::ofInt(resolveIntegerConstant(cls, index))
                     : internString(rt, resolveStringConstant(cls, index)));
@@ -869,7 +896,7 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
             case 0x13: {
-                uint16_t index = codeU2(method.code, pc + 1);
+                uint16_t index = codeU2(code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
                     ? Value::ofInt(resolveIntegerConstant(cls, index))
                     : internString(rt, resolveStringConstant(cls, index)));
@@ -877,7 +904,7 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
             case 0x14: {
-                uint16_t index = codeU2(method.code, pc + 1);
+                uint16_t index = codeU2(code, pc + 1);
                 frame.push(Value::ofLong(resolveLongConstant(cls, index)));
                 pc += 3;
                 break;
@@ -891,9 +918,9 @@ std::optional<Value> resumeCurrentMethod(
             case 0x1b: frame.push(frame.local(1)); ++pc; break;
             case 0x1c: frame.push(frame.local(2)); ++pc; break;
             case 0x1d: frame.push(frame.local(3)); ++pc; break;
-            case 0x16: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
-            case 0x15: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
-            case 0x19: frame.push(frame.local(codeU1(method.code, pc + 1))); pc += 2; break;
+            case 0x16: frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; break;
+            case 0x15: frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; break;
+            case 0x19: frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; break;
             case 0x2a: frame.push(frame.local(0)); ++pc; break;
             case 0x2b: frame.push(frame.local(1)); ++pc; break;
             case 0x2c: frame.push(frame.local(2)); ++pc; break;
@@ -918,9 +945,9 @@ std::optional<Value> resumeCurrentMethod(
             case 0x3c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x3e: store(3, static_cast<uint32_t>(pc)); ++pc; break;
-            case 0x37: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
-            case 0x36: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
-            case 0x3a: store(codeU1(method.code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
+            case 0x37: store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
+            case 0x36: store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
+            case 0x3a: store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; break;
             case 0x4b: store(0, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x4c: store(1, static_cast<uint32_t>(pc)); ++pc; break;
             case 0x4d: store(2, static_cast<uint32_t>(pc)); ++pc; break;
@@ -1024,8 +1051,8 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0x84: {
                 uint32_t iincPc = static_cast<uint32_t>(pc);
-                uint16_t index = codeU1(method.code, pc + 1);
-                int delta = codeS1(method.code, pc + 2);
+                uint16_t index = codeU1(code, pc + 1);
+                int delta = codeS1(code, pc + 2);
                 Value oldValue = frame.local(index);
                 std::optional<int> oldInt = parseIntValue(oldValue);
                 Value newValue = oldInt
@@ -1117,7 +1144,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0x9d:
             case 0x9e: {
                 uint32_t branchPc = static_cast<uint32_t>(pc);
-                int16_t offset = codeS2(method.code, pc + 1);
+                int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
@@ -1142,7 +1169,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xa3:
             case 0xa4: {
                 uint32_t branchPc = static_cast<uint32_t>(pc);
-                int16_t offset = codeS2(method.code, pc + 1);
+                int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
@@ -1163,13 +1190,13 @@ std::optional<Value> resumeCurrentMethod(
             }
 
             case 0xa7:
-                pc = branchTarget(pc, codeS2(method.code, pc + 1));
+                pc = branchTarget(pc, codeS2(code, pc + 1));
                 break;
 
             case 0xc6:
             case 0xc7: {
                 uint32_t branchPc = static_cast<uint32_t>(pc);
-                int16_t offset = codeS2(method.code, pc + 1);
+                int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
                 bool known = value.isNull();
@@ -1188,7 +1215,7 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xb2:
             {
-                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
                 std::string key = ref.className + "." + ref.name;
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::named("0") : it->second);
@@ -1199,7 +1226,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb3:
             {
                 uint32_t writePc = static_cast<uint32_t>(pc);
-                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
                 std::string key = ref.className + "." + ref.name;
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
@@ -1210,7 +1237,7 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xb4:
             {
-                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 Value value = Value::named("0");
@@ -1231,7 +1258,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb5:
             {
                 uint32_t writePc = static_cast<uint32_t>(pc);
-                FieldRef ref = resolveFieldRef(cls, codeU2(method.code, pc + 1));
+                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
                 Value value = frame.pop();
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
@@ -1245,7 +1272,7 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xb8: {
                 uint32_t callPc = static_cast<uint32_t>(pc);
-                MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
+                MethodRef ref = resolveMethodRef(cls, codeU2(code, pc + 1));
                 std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
                 std::vector<Value> callArgs(widths.size());
                 for (size_t i = widths.size(); i > 0; --i) {
@@ -1264,6 +1291,7 @@ std::optional<Value> resumeCurrentMethod(
                                 nativeCtx, label, callPc, methodRefForOwner(*targetClass, ref), callArgs);
                         } catch (const YieldThreadSleep&) {
                             pc += 3;
+                            runtimeFrame.pc = pc;
                             throw;
                         }
                         if (nativeResult.handled) {
@@ -1278,6 +1306,7 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
+                        runtimeFrame.pc = pc;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                         if (result.has_value()) {
@@ -1297,7 +1326,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb6:
             case 0xb7:
             case 0xb9: {
-                MethodRef ref = resolveMethodRef(cls, codeU2(method.code, pc + 1));
+                MethodRef ref = resolveMethodRef(cls, codeU2(code, pc + 1));
                 std::vector<size_t> widths = argumentSlotWidths(ref.descriptor);
                 std::vector<Value> callArgs(widths.size() + 1);
                 for (size_t i = widths.size(); i > 0; --i) {
@@ -1335,6 +1364,7 @@ std::optional<Value> resumeCurrentMethod(
                                 nativeCtx, label, static_cast<uint32_t>(pc), methodRefForOwner(*targetClass, ref), callArgs);
                         } catch (const YieldThreadSleep&) {
                             pc += op == 0xb9 ? 5 : 3;
+                            runtimeFrame.pc = pc;
                             throw;
                         }
                         if (nativeResult.handled) {
@@ -1349,6 +1379,7 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
+                        runtimeFrame.pc = pc;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
                         if (result.has_value()) {
@@ -1375,7 +1406,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xbb:
             {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
-                std::string className = resolveClassRef(cls, codeU2(method.code, pc + 1));
+                std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
                 frame.push(allocateObject(rt, label, allocPc, className));
                 pc += 3;
                 break;
@@ -1384,7 +1415,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xbc:
             {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
-                uint8_t atype = codeU1(method.code, pc + 1);
+                uint8_t atype = codeU1(code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
                 if ((atype == 4 || atype == 5 || atype == 8 || atype == 10) && count.has_value() && *count >= 0) {
@@ -1413,7 +1444,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xc5:
             {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
-                uint8_t dimensions = codeU1(method.code, pc + 3);
+                uint8_t dimensions = codeU1(code, pc + 3);
                 std::vector<int> counts(dimensions, -1);
                 for (size_t i = dimensions; i > 0; --i) {
                     std::optional<int> count = parseIntValue(frame.pop());
@@ -1451,9 +1482,11 @@ std::optional<Value> resumeCurrentMethod(
             case 0xac:
             case 0xad:
             case 0xb0:
+                runtimeFrame.pc = pc;
                 return finish(frame.pop());
 
             case 0xb1:
+                runtimeFrame.pc = pc;
                 return finish(std::nullopt);
 
             default:
@@ -1462,6 +1495,7 @@ std::optional<Value> resumeCurrentMethod(
         }
     }
 
+    runtimeFrame.pc = pc;
     return finish(std::nullopt);
 }
 
