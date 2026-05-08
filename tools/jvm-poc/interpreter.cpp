@@ -204,7 +204,7 @@ struct ResolvedCallEntry {
 struct HeapObject {
     std::string className;
     const ClassFile* cls = nullptr; // cached class pointer for fast virtual dispatch (item K)
-    std::unordered_map<std::string, Value> fields;
+    std::vector<Value> fields;      // indexed by slot from fieldSlotCache (item D)
 };
 
 using Heap = std::unordered_map<uint32_t, HeapObject>;
@@ -264,6 +264,14 @@ struct Runtime {
     std::unordered_map<uint64_t, const std::string*,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, const std::string*>>> fieldNameCache;
+    // Cache (obj.cls*, cpIdx) → slot index for hot-path getfield/putfield (item D).
+    // Key = callCacheKey(obj.cls, cpIdx); SRAM-allocated so the lookup stays off PSRAM.
+    std::unordered_map<uint64_t, uint16_t,
+        std::hash<uint64_t>, std::equal_to<uint64_t>,
+        SramAllocator<std::pair<const uint64_t, uint16_t>>> fieldIndexCache;
+    // Build-time maps: cls* → {fieldName → slot} and cls* → total slot count.
+    std::unordered_map<const ClassFile*, std::unordered_map<std::string, uint16_t>> fieldSlotCache;
+    std::unordered_map<const ClassFile*, uint16_t> fieldSlotCount;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
@@ -301,6 +309,34 @@ inline const std::string& resolveFieldName(Runtime& rt, const ClassFile& cls, ui
     fallback = resolveFieldRef(cls, cpIdx).name;
     rt.fieldNameCache[fkey] = &fallback;
     return fallback;
+}
+
+// Assign stable slot indices to instance fields of cls (and its superclass chain).
+// Superclass fields get lower indices so the layout is consistent across subclasses.
+// Returns total slot count (= required size of HeapObject::fields for instances of cls).
+uint16_t buildFieldSlots(Runtime& rt, const std::vector<ClassFile>& classes, const ClassFile& cls) {
+    auto countIt = rt.fieldSlotCount.find(&cls);
+    if (countIt != rt.fieldSlotCount.end()) return countIt->second;
+
+    uint16_t nextSlot = 0;
+    if (!cls.superClass.empty()) {
+        const ClassFile* superCls = findClass(classes, cls.superClass);
+        if (superCls != nullptr) {
+            nextSlot = buildFieldSlots(rt, classes, *superCls);
+            // Inherit parent name→slot entries.
+            auto& mySlots = rt.fieldSlotCache[&cls];
+            const auto& superSlots = rt.fieldSlotCache[superCls];
+            mySlots.insert(superSlots.begin(), superSlots.end());
+        }
+    }
+
+    auto& mySlots = rt.fieldSlotCache[&cls];
+    for (const FieldInfo& f : cls.fields) {
+        if (f.access & 0x0008) continue; // static — not stored on heap object
+        if (mySlots.count(f.name) == 0) mySlots[f.name] = nextSlot++;
+    }
+    rt.fieldSlotCount[&cls] = nextSlot;
+    return nextSlot;
 }
 
 } // namespace
@@ -393,7 +429,13 @@ uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
 
 Value allocateObject(Runtime& rt, const std::vector<ClassFile>& classes, const std::string& label, uint32_t pc, const std::string& className) {
     uint32_t id = allocateHeapObjectId(rt, className);
-    rt.heap[id].cls = findClass(classes, className);
+    HeapObject& obj = rt.heap[id];
+    obj.cls = findClass(classes, className);
+    if (obj.cls != nullptr) {
+        // Pre-size fields vector to the stable slot count for this class.
+        const uint16_t slotCount = buildFieldSlots(rt, classes, *obj.cls);
+        obj.fields.resize(slotCount);
+    }
     Value ref = objectRef(id);
     if (rt.trace.recording) rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
     return ref;
@@ -627,12 +669,14 @@ void captureDisplayableFields(ExecutionTrace& trace, const Runtime& rt, const He
 
     trace.currentDisplayableFields.clear();
     for (const char* fieldName : kInterestingFields) {
-        auto fieldIt = object.fields.find(fieldName);
-        if (fieldIt == object.fields.end()) {
-            continue;
-        }
+        auto slotCacheIt = rt.fieldSlotCache.find(object.cls);
+        if (slotCacheIt == rt.fieldSlotCache.end()) continue;
+        auto nameIt = slotCacheIt->second.find(fieldName);
+        if (nameIt == slotCacheIt->second.end()) continue;
+        uint16_t slot = nameIt->second;
+        if (slot >= object.fields.size() || !object.fields[slot].isInitialized()) continue;
         trace.currentDisplayableFields.push_back(
-            std::string(fieldName) + "=" + debugValueText(rt, fieldIt->second));
+            std::string(fieldName) + "=" + debugValueText(rt, object.fields[slot]));
     }
 }
 
@@ -662,8 +706,8 @@ void markValue(
         if (objectIt == rt.heap.end()) {
             return;
         }
-        for (const auto& field : objectIt->second.fields) {
-            markValue(field.second, rt, markedObjects, markedArrays);
+        for (const Value& fieldVal : objectIt->second.fields) {
+            markValue(fieldVal, rt, markedObjects, markedArrays);
         }
         return;
     }
@@ -782,15 +826,17 @@ void collectGarbage(Runtime& rt, std::string when) {
 
 Value readFieldValue(Runtime& rt, const Value& object, const std::string& fieldName) {
     std::optional<uint32_t> id = objectId(object);
-    if (!id.has_value()) {
-        return Value::named("0");
-    }
+    if (!id.has_value()) return Value::named("0");
     auto objectIt = rt.heap.find(*id);
-    if (objectIt == rt.heap.end()) {
-        return Value::named("0");
-    }
-    auto fieldIt = objectIt->second.fields.find(fieldName);
-    return fieldIt == objectIt->second.fields.end() ? Value::named("0") : fieldIt->second;
+    if (objectIt == rt.heap.end()) return Value::named("0");
+    const HeapObject& obj = objectIt->second;
+    auto slotCacheIt = rt.fieldSlotCache.find(obj.cls);
+    if (slotCacheIt == rt.fieldSlotCache.end()) return Value::named("0");
+    auto nameIt = slotCacheIt->second.find(fieldName);
+    if (nameIt == slotCacheIt->second.end()) return Value::named("0");
+    uint16_t slot = nameIt->second;
+    if (slot >= obj.fields.size() || !obj.fields[slot].isInitialized()) return Value::named("0");
+    return obj.fields[slot];
 }
 
 std::optional<Value> executeMethod(
@@ -1371,7 +1417,6 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb4:
             {
                 const uint16_t cpIdx = codeU2(code, pc + 1);
-                const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 Value value = Value::named("0");
@@ -1379,9 +1424,32 @@ std::optional<Value> resumeCurrentMethod(
                 if (id.has_value()) {
                     auto objectIt = rt.heap.find(*id);
                     if (objectIt != rt.heap.end()) {
-                        auto fieldIt = objectIt->second.fields.find(fieldName);
-                        if (fieldIt != objectIt->second.fields.end()) {
-                            value = fieldIt->second;
+                        HeapObject& obj = objectIt->second;
+                        const uint64_t fidxKey = callCacheKey(obj.cls, cpIdx);
+                        auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                        if (fidxIt != rt.fieldIndexCache.end()) {
+                            // Hot path: integer-keyed SRAM lookup → direct vector index.
+                            const uint16_t slot = fidxIt->second;
+                            if (slot < obj.fields.size()) {
+                                const Value& sv = obj.fields[slot];
+                                if (sv.isInitialized()) value = sv;
+                            }
+                        } else {
+                            // Cold path: resolve field name, find slot, populate cache.
+                            const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
+                            if (obj.cls != nullptr) {
+                                buildFieldSlots(rt, classes, *obj.cls);
+                                const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                                auto nameIt = slotMap.find(fieldName);
+                                if (nameIt != slotMap.end()) {
+                                    const uint16_t slot = nameIt->second;
+                                    rt.fieldIndexCache[fidxKey] = slot;
+                                    if (slot < obj.fields.size()) {
+                                        const Value& sv = obj.fields[slot];
+                                        if (sv.isInitialized()) value = sv;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1395,16 +1463,38 @@ std::optional<Value> resumeCurrentMethod(
             {
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 const uint16_t cpIdx = codeU2(code, pc + 1);
-                const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
                 Value value = frame.pop();
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 const uint32_t t0b5 = statNow();
                 if (id.has_value()) {
-                    rt.heap[*id].fields[fieldName] = value;
+                    HeapObject& obj = rt.heap[*id];
+                    const uint64_t fidxKey = callCacheKey(obj.cls, cpIdx);
+                    auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                    if (fidxIt != rt.fieldIndexCache.end()) {
+                        // Hot path: integer-keyed SRAM lookup → direct vector index.
+                        const uint16_t slot = fidxIt->second;
+                        if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
+                        obj.fields[slot] = value;
+                    } else {
+                        // Cold path: resolve field name, find slot, populate cache.
+                        const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
+                        if (obj.cls != nullptr) {
+                            buildFieldSlots(rt, classes, *obj.cls);
+                            const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                            auto nameIt = slotMap.find(fieldName);
+                            if (nameIt != slotMap.end()) {
+                                const uint16_t slot = nameIt->second;
+                                rt.fieldIndexCache[fidxKey] = slot;
+                                if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
+                                obj.fields[slot] = value;
+                            }
+                        }
+                    }
                 }
                 if(t0b5) rt.host->putfieldStats.record(nowUs() - t0b5);
                 if (rt.trace.recording) {
+                    const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
                     FieldRef ref = resolveFieldRef(cls, cpIdx);
                     rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + fieldName, value});
                 }
