@@ -202,13 +202,13 @@ struct ResolvedCallEntry {
 
 struct HeapObject {
     std::string className;
-    std::map<std::string, Value> fields;
+    std::unordered_map<std::string, Value> fields;
 };
 
-using Heap = std::map<uint32_t, HeapObject>;
-using ArrayHeap = std::map<uint32_t, std::vector<Value>>;
-using StringHeap = std::map<uint32_t, std::string>;
-using ImageHeap = std::map<uint32_t, port::Image>;
+using Heap = std::unordered_map<uint32_t, HeapObject>;
+using ArrayHeap = std::unordered_map<uint32_t, std::vector<Value>>;
+using StringHeap = std::unordered_map<uint32_t, std::string>;
+using ImageHeap = std::unordered_map<uint32_t, port::Image>;
 using ResourceImageCache = std::map<std::string, uint32_t>;
 
 struct RuntimeFrame {
@@ -895,6 +895,12 @@ std::optional<Value> resumeCurrentMethod(
     } sramCodeGuard{sramCode};
 #endif
 
+    // Build the NativeCallContext once; it holds references/lambdas that stay
+    // valid for the lifetime of this executeMethod call. We reuse it for every
+    // native dispatch rather than constructing it (and its std::function members)
+    // anew for each bytecode instruction.
+    NativeCallContext sharedNativeCtx = makeNativeContext();
+
     while (pc < codeSize) {
         if (++rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
@@ -1366,13 +1372,13 @@ std::optional<Value> resumeCurrentMethod(
 
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     if (isNativeCall) {
-                        NativeCallContext nativeCtx = makeNativeContext();
+                        sharedNativeCtx.receiverClassName = {};
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
                         const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
                         try {
                             nativeResult = handleNativeStaticCall(
-                                nativeCtx, label, callPc, nativeRef, callArgs);
+                                sharedNativeCtx, label, callPc, nativeRef, callArgs);
                         } catch (const YieldThreadSleep&) {
                             pc += 3;
                             runtimeFrame.pc = pc;
@@ -1485,12 +1491,12 @@ std::optional<Value> resumeCurrentMethod(
 
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     if (isNativeCall) {
-                        NativeCallContext nativeCtx = makeNativeContext();
+                        sharedNativeCtx.receiverClassName = {};
                         std::optional<uint32_t> nativeObjectId = objectId(object);
                         if (nativeObjectId.has_value()) {
                             auto objectIt = rt.heap.find(*nativeObjectId);
                             if (objectIt != rt.heap.end()) {
-                                nativeCtx.receiverClassName = objectIt->second.className;
+                                sharedNativeCtx.receiverClassName = objectIt->second.className;
                             }
                         }
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
@@ -1498,7 +1504,7 @@ std::optional<Value> resumeCurrentMethod(
                         const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
                         try {
                             nativeResult = handleNativeInstanceCall(
-                                nativeCtx, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
+                                sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
                         } catch (const YieldThreadSleep&) {
                             pc += op == 0xb9 ? 5 : 3;
                             runtimeFrame.pc = pc;

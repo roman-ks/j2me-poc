@@ -17,12 +17,15 @@ bool returnsValue(const std::string& descriptor) {
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    const std::string text = value.asText();
-    if (text.compare(0, prefix.size(), prefix) != 0) {
+    // Access the string variant directly — avoids asText() which always heap-allocates
+    // a new std::string even when the variant already holds one.
+    const auto* s = std::get_if<std::string>(&value.data);
+    if (s == nullptr) return std::nullopt;
+    if (s->compare(0, prefix.size(), prefix) != 0) {
         return std::nullopt;
     }
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(text.c_str() + prefix.size(), &end, 10);
+    unsigned long parsed = std::strtoul(s->c_str() + prefix.size(), &end, 10);
     if (end == nullptr || *end != '\0') {
         return std::nullopt;
     }

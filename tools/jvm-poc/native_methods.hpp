@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,9 +24,9 @@ struct NativeCallContext {
     std::function<void(const Value&)> startRunnable;
     std::function<void(uint32_t)> sleepThread;
     std::function<void()> requestRepaint;
-    std::map<uint32_t, std::string>& strings;
-    std::map<uint32_t, std::vector<Value>>& arrays;
-    std::map<uint32_t, port::Image>& images;
+    std::unordered_map<uint32_t, std::string>& strings;
+    std::unordered_map<uint32_t, std::vector<Value>>& arrays;
+    std::unordered_map<uint32_t, port::Image>& images;
     std::map<std::string, uint32_t>& resourceImages;
     uint32_t& nextImageId;
     Value& displayRef;

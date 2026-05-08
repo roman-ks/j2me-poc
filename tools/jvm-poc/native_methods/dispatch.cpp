@@ -41,7 +41,9 @@ NativeCallResult handleNativeInstanceCall(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+    // Use a reference to avoid copying the Value (which holds a heap std::string for object refs).
+    static const Value kMissingReceiver = Value::named("<missing-receiver>");
+    const Value& receiver = args.empty() ? kMissingReceiver : args[0];
 
     if (ref.className == "javax/microedition/midlet/MIDlet") {
         return native_methods::handleMidlet(ctx, methodLabel, pc, ref, args);

@@ -52,7 +52,8 @@ NativeCallResult handleGraphics(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+    static const Value kMissingReceiver = Value::named("<missing-receiver>");
+    const Value& receiver = args.empty() ? kMissingReceiver : args[0];
 
     if (ref.name == "setColor" && ref.descriptor == "(I)V") {
         ctx.graphicsColorRgb = intArg(args, 1);
@@ -113,7 +114,7 @@ NativeCallResult handleGraphics(
     }
 
     if (ref.name == "drawImage" && ref.descriptor == "(Ljavax/microedition/lcdui/Image;III)V") {
-        std::optional<uint32_t> image = imageId(args.size() > 1 ? args[1] : Value::named(""));
+        std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
         auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
         std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
         if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
