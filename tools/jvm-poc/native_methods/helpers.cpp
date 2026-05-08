@@ -17,35 +17,25 @@ bool returnsValue(const std::string& descriptor) {
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    // Access the string variant directly — avoids asText() which always heap-allocates
-    // a new std::string even when the variant already holds one.
-    const auto* s = std::get_if<std::string>(&value.data);
-    if (s == nullptr) return std::nullopt;
-    if (s->compare(0, prefix.size(), prefix) != 0) {
-        return std::nullopt;
-    }
+    if (value.tag != Value::Tag::kStr) return std::nullopt;
+    const std::string& s = *value.str;
+    if (s.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(s->c_str() + prefix.size(), &end, 10);
-    if (end == nullptr || *end != '\0') {
-        return std::nullopt;
-    }
+    unsigned long parsed = std::strtoul(s.c_str() + prefix.size(), &end, 10);
+    if (end == nullptr || *end != '\0') return std::nullopt;
     return static_cast<uint32_t>(parsed);
 }
 
 std::optional<uint32_t> objectId(const Value& value) {
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        if ((*i & Value::kHandleTagMask) == Value::kHandleObjTag)
-            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
-        return std::nullopt;
-    }
-    return parseHandle(value, "obj#");
+    if (value.tag != Value::Tag::kInt) return std::nullopt;
+    if ((value.i32 & Value::kHandleTagMask) == Value::kHandleObjTag)
+        return static_cast<uint32_t>(value.i32 & Value::kHandleIdMask);
+    return std::nullopt;
 }
 
 std::optional<uint32_t> stringObjectId(const NativeCallContext& ctx, const Value& value) {
     std::optional<uint32_t> id = objectId(value);
-    if (!id.has_value()) {
-        return std::nullopt;
-    }
+    if (!id.has_value()) return std::nullopt;
     return ctx.strings.find(*id) != ctx.strings.end() ? id : std::nullopt;
 }
 
@@ -54,30 +44,24 @@ bool isStringObject(const NativeCallContext& ctx, const Value& value) {
 }
 
 std::optional<uint32_t> arrayId(const Value& value) {
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        if ((*i & Value::kHandleTagMask) == Value::kHandleArrTag)
-            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
-        return std::nullopt;
-    }
-    return parseHandle(value, "arr#");
+    if (value.tag != Value::Tag::kInt) return std::nullopt;
+    if ((value.i32 & Value::kHandleTagMask) == Value::kHandleArrTag)
+        return static_cast<uint32_t>(value.i32 & Value::kHandleIdMask);
+    return std::nullopt;
 }
 
 std::optional<uint32_t> imageId(const Value& value) {
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        if ((*i & Value::kHandleTagMask) == Value::kHandleImgTag)
-            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
-        return std::nullopt;
-    }
-    return parseHandle(value, "image#");
+    if (value.tag != Value::Tag::kInt) return std::nullopt;
+    if ((value.i32 & Value::kHandleTagMask) == Value::kHandleImgTag)
+        return static_cast<uint32_t>(value.i32 & Value::kHandleIdMask);
+    return std::nullopt;
 }
 
 std::optional<uint32_t> imageGraphicsId(const Value& value) {
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        if ((*i & Value::kHandleTagMask) == Value::kHandleGfxTag)
-            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
-        return std::nullopt;
-    }
-    return parseHandle(value, "graphics:image#");
+    if (value.tag != Value::Tag::kInt) return std::nullopt;
+    if ((value.i32 & Value::kHandleTagMask) == Value::kHandleGfxTag)
+        return static_cast<uint32_t>(value.i32 & Value::kHandleIdMask);
+    return std::nullopt;
 }
 
 std::string methodName(const MethodRef& ref) {

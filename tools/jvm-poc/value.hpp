@@ -4,64 +4,81 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <variant>
 
 namespace jvmpoc {
 
 // Value represents a JVM operand-stack / local-variable slot.
 //
-// Variant arms:
-//   std::monostate — uninitialized; only in freshly-allocated Frame locals
-//   int32_t        — boolean, byte, char, short, int, and null-ref (== 0)
-//   int64_t        — long
-//   std::string    — object/array/image/class handles ("obj#N", "arr#N", …)
-//                    and interpreter debug strings
+// H3: flat tagged union — replaces std::variant to reduce sizeof(Value).
+// On ESP32 (32-bit, 4-byte int64_t alignment): sizeof(Value) = 12 bytes
+// vs ~16 bytes for std::variant<monostate,int32_t,int64_t,string>.
 //
-// float and double are not used by the target MIDlets yet.
-// To add them: append `float` / `double` to the variant and add ofFloat/ofDouble
-// factories below — no other code needs touching.
+// Tag arms:
+//   kNone   — uninitialized; only in freshly-allocated Frame locals
+//   kInt    — boolean, byte, char, short, int, null-ref (== 0), and tagged handles (H1)
+//   kLong   — long
+//   kStr    — debug/sentinel strings ("class:Foo", "<divide-by-zero>", …)
+//             held as heap-allocated std::string* (owned, deleted in destructor)
+//
+// H1 tagged-int handle encoding (tag kInt, high byte = handle type):
+//   0x01xxxxxx = object ref   (obj#N)
+//   0x02xxxxxx = array ref    (arr#N)
+//   0x03xxxxxx = image ref    (image#N)
+//   0x04xxxxxx = gfx ref      (graphics:image#N)
 struct Value {
-    using Data = std::variant<std::monostate, int32_t, int64_t, std::string>;
-    Data data;
+    enum class Tag : int32_t { kNone = 0, kInt = 1, kLong = 2, kStr = 3 };
 
-    // Default: uninitialized slot (detected by Frame::local())
-    Value() = default;
+    Tag tag = Tag::kNone;
+    union {
+        int32_t  i32;
+        int64_t  i64;
+        std::string* str;  // owned; deleted in destructor (kStr arm only)
+    };
 
-// H1: tagged-int handle encoding.
-// Object/array/image handles are stored as int32_t with the ID in bits 0-23
-// and a type tag in bits 24-31.  Plain JVM integers have tag 0x00 (values < 16M
-// are safe for the target MIDlets; colours top out at 0x00FFFFFF).
-// Tags 0x01-0x04 are reserved; all others are plain integers.
-static constexpr int32_t kHandleObjTag = 0x01 << 24;  // object ref  (obj#N)
-static constexpr int32_t kHandleArrTag = 0x02 << 24;  // array ref   (arr#N)
-static constexpr int32_t kHandleImgTag = 0x03 << 24;  // image ref   (image#N)
-static constexpr int32_t kHandleGfxTag = 0x04 << 24;  // gfx ref     (graphics:image#N)
-static constexpr int32_t kHandleTagMask = static_cast<int32_t>(0xFF000000);
-static constexpr int32_t kHandleIdMask  = 0x00FFFFFF;
+    // Default: uninitialized slot
+    Value() : tag(Tag::kNone), i32(0) {}
 
-// Explicit numeric factories — use these in hot paths to avoid any string work
-    static Value ofInt(int32_t v)  { Value r; r.data = v; return r; }
-    static Value ofLong(int64_t v) { Value r; r.data = v; return r; }
+    // Copy and move — required because kStr arm owns a heap string.
+    Value(const Value& o) : tag(Tag::kNone), i32(0) { *this = o; }
+    Value(Value&& o) noexcept : tag(Tag::kNone), i32(0) { *this = std::move(o); }
+    ~Value() { if (tag == Tag::kStr) delete str; }
 
-    // Smart factory: recognises plain decimal integer strings and stores them
-    // as int32/int64 directly; everything else (handles, debug strings) becomes
-    // a std::string variant. All existing Value::named("42") call-sites continue
-    // to work correctly with zero string heap allocation.
+    Value& operator=(const Value& o) {
+        if (this == &o) return *this;
+        if (tag == Tag::kStr) { delete str; str = nullptr; }
+        tag = o.tag;
+        if (o.tag == Tag::kStr) str = new std::string(*o.str);
+        else                    i64 = o.i64;  // copy both 32- and 64-bit arms
+        return *this;
+    }
+    Value& operator=(Value&& o) noexcept {
+        if (this == &o) return *this;
+        if (tag == Tag::kStr) { delete str; str = nullptr; }
+        tag = o.tag;
+        i64 = o.i64;  // transfers pointer for kStr (o must be cleared)
+        o.tag = Tag::kNone;
+        o.i32 = 0;
+        return *this;
+    }
+
+    // H1: tagged-int handle encoding constants.
+    static constexpr int32_t kHandleObjTag = 0x01 << 24;
+    static constexpr int32_t kHandleArrTag = 0x02 << 24;
+    static constexpr int32_t kHandleImgTag = 0x03 << 24;
+    static constexpr int32_t kHandleGfxTag = 0x04 << 24;
+    static constexpr int32_t kHandleTagMask = static_cast<int32_t>(0xFF000000);
+    static constexpr int32_t kHandleIdMask  = 0x00FFFFFF;
+
+    // Factories
+    static Value ofInt(int32_t v)  { Value r; r.tag = Tag::kInt;  r.i32 = v; return r; }
+    static Value ofLong(int64_t v) { Value r; r.tag = Tag::kLong; r.i64 = v; return r; }
     static Value named(std::string s);
 
-    // String representation for debug output and handle prefix checks
     std::string asText() const;
 
-    // True when this slot has been written (not default-constructed)
-    bool isInitialized() const {
-        return !std::holds_alternative<std::monostate>(data);
-    }
+    bool isInitialized() const { return tag != Tag::kNone; }
 
-    // True for integer zero or null reference
-    bool isNull() const {
-        const auto* i = std::get_if<int32_t>(&data);
-        return i != nullptr && *i == 0;
-    }
+    bool isNull() const { return tag == Tag::kInt && i32 == 0; }
 };
 
 std::optional<long long> parseLongValue(const Value& value);

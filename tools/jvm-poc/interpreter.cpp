@@ -610,38 +610,34 @@ std::optional<Value> recordUnknownCall(
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    // Legacy string handle decoder — only used for class: / resource-stream: prefixes
-    // and any debug paths that still produce string Values.
-    const auto* s = std::get_if<std::string>(&value.data);
-    if (s == nullptr) return std::nullopt;
-    if (s->compare(0, prefix.size(), prefix) != 0) return std::nullopt;
+    // Legacy string handle decoder — only used for class: / resource-stream: prefixes.
+    if (value.tag != Value::Tag::kStr) return std::nullopt;
+    const std::string& s = *value.str;
+    if (s.compare(0, prefix.size(), prefix) != 0) return std::nullopt;
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(s->c_str() + prefix.size(), &end, 10);
+    unsigned long parsed = std::strtoul(s.c_str() + prefix.size(), &end, 10);
     if (end == nullptr || *end != '\0') return std::nullopt;
     return static_cast<uint32_t>(parsed);
 }
 
 std::optional<uint32_t> objectId(const Value& value) {
-    const auto* i = std::get_if<int32_t>(&value.data);
-    if (i == nullptr) return std::nullopt;
-    if ((*i & Value::kHandleTagMask) == Value::kHandleObjTag)
-        return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+    if (value.tag != Value::Tag::kInt) return std::nullopt;
+    if ((value.i32 & Value::kHandleTagMask) == Value::kHandleObjTag)
+        return static_cast<uint32_t>(value.i32 & Value::kHandleIdMask);
     return std::nullopt;
 }
 
 std::optional<uint32_t> arrayId(const Value& value) {
-    const auto* i = std::get_if<int32_t>(&value.data);
-    if (i == nullptr) return std::nullopt;
-    if ((*i & Value::kHandleTagMask) == Value::kHandleArrTag)
-        return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+    if (value.tag != Value::Tag::kInt) return std::nullopt;
+    if ((value.i32 & Value::kHandleTagMask) == Value::kHandleArrTag)
+        return static_cast<uint32_t>(value.i32 & Value::kHandleIdMask);
     return std::nullopt;
 }
 
 bool isReference(const Value& value) {
-    const auto* i = std::get_if<int32_t>(&value.data);
-    if (i == nullptr) return false;
-    const int32_t tag = *i & Value::kHandleTagMask;
-    return tag == Value::kHandleObjTag || tag == Value::kHandleArrTag;
+    if (value.tag != Value::Tag::kInt) return false;
+    const int32_t t = value.i32 & Value::kHandleTagMask;
+    return t == Value::kHandleObjTag || t == Value::kHandleArrTag;
 }
 
 std::string debugValueText(const Runtime& rt, const Value& value) {
