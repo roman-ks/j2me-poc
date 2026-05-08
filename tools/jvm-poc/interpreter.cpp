@@ -423,7 +423,7 @@ uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
     } else {
         id = rt.nextObjectId++;
     }
-    rt.heap[id] = HeapObject{className, {}};
+    rt.heap[id] = HeapObject{className, nullptr, {}};
     return id;
 }
 
@@ -449,7 +449,7 @@ Value allocateArray(Runtime& rt, const std::string& label, uint32_t pc, size_t l
     } else {
         id = rt.nextArrayId++;
     }
-    rt.arrays[id] = std::vector<Value>(length, Value::named("0"));
+    rt.arrays[id] = std::vector<Value>(length, Value::ofInt(0));
     Value ref = arrayRef(id);
     if (rt.trace.recording) rt.trace.arrayAllocs.push_back(ArrayAlloc{label, pc, ref, length});
     return ref;
@@ -494,7 +494,7 @@ std::optional<std::string> runtimeString(const Runtime& rt, const Value& value) 
 }
 
 Value loadArrayElement(Runtime& rt, const Value& arrayValue, const Value& indexValue) {
-    Value loaded = Value::named("0");
+    Value loaded = Value::ofInt(0);
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
     if (id.has_value() && index.has_value()) {
@@ -512,7 +512,7 @@ Value normalizeByteValue(const Value& value) {
     if (!parsed.has_value()) {
         return value;
     }
-    return Value::named(std::to_string(static_cast<int>(static_cast<int8_t>(*parsed))));
+    return Value::ofInt(static_cast<int>(static_cast<int8_t>(*parsed)));
 }
 
 void storeArrayElement(
@@ -610,47 +610,38 @@ std::optional<Value> recordUnknownCall(
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    // Access the string variant directly — avoids asText() which heap-allocates a new
-    // std::string on every call, even when the variant already holds one.
+    // Legacy string handle decoder — only used for class: / resource-stream: prefixes
+    // and any debug paths that still produce string Values.
     const auto* s = std::get_if<std::string>(&value.data);
     if (s == nullptr) return std::nullopt;
-    if (s->compare(0, prefix.size(), prefix) != 0) {
-        return std::nullopt;
-    }
+    if (s->compare(0, prefix.size(), prefix) != 0) return std::nullopt;
     char* end = nullptr;
     unsigned long parsed = std::strtoul(s->c_str() + prefix.size(), &end, 10);
-    if (end == nullptr || *end != '\0') {
-        return std::nullopt;
-    }
+    if (end == nullptr || *end != '\0') return std::nullopt;
     return static_cast<uint32_t>(parsed);
 }
 
 std::optional<uint32_t> objectId(const Value& value) {
-    // Hot path: tagged int32 (H1 encoding).
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        if ((*i & Value::kHandleTagMask) == Value::kHandleObjTag)
-            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
-        return std::nullopt;
-    }
-    // Legacy fallback: string "obj#N" (handles stored before H1).
-    return parseHandle(value, "obj#");
+    const auto* i = std::get_if<int32_t>(&value.data);
+    if (i == nullptr) return std::nullopt;
+    if ((*i & Value::kHandleTagMask) == Value::kHandleObjTag)
+        return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+    return std::nullopt;
 }
 
 std::optional<uint32_t> arrayId(const Value& value) {
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        if ((*i & Value::kHandleTagMask) == Value::kHandleArrTag)
-            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
-        return std::nullopt;
-    }
-    return parseHandle(value, "arr#");
+    const auto* i = std::get_if<int32_t>(&value.data);
+    if (i == nullptr) return std::nullopt;
+    if ((*i & Value::kHandleTagMask) == Value::kHandleArrTag)
+        return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+    return std::nullopt;
 }
 
 bool isReference(const Value& value) {
-    if (const auto* i = std::get_if<int32_t>(&value.data)) {
-        const int32_t tag = *i & Value::kHandleTagMask;
-        return tag == Value::kHandleObjTag || tag == Value::kHandleArrTag;
-    }
-    return objectId(value).has_value() || arrayId(value).has_value();
+    const auto* i = std::get_if<int32_t>(&value.data);
+    if (i == nullptr) return false;
+    const int32_t tag = *i & Value::kHandleTagMask;
+    return tag == Value::kHandleObjTag || tag == Value::kHandleArrTag;
 }
 
 std::string debugValueText(const Runtime& rt, const Value& value) {
@@ -842,16 +833,16 @@ void collectGarbage(Runtime& rt, std::string when) {
 
 Value readFieldValue(Runtime& rt, const Value& object, const std::string& fieldName) {
     std::optional<uint32_t> id = objectId(object);
-    if (!id.has_value()) return Value::named("0");
+    if (!id.has_value()) return Value::ofInt(0);
     auto objectIt = rt.heap.find(*id);
-    if (objectIt == rt.heap.end()) return Value::named("0");
+    if (objectIt == rt.heap.end()) return Value::ofInt(0);
     const HeapObject& obj = objectIt->second;
     auto slotCacheIt = rt.fieldSlotCache.find(obj.cls);
-    if (slotCacheIt == rt.fieldSlotCache.end()) return Value::named("0");
+    if (slotCacheIt == rt.fieldSlotCache.end()) return Value::ofInt(0);
     auto nameIt = slotCacheIt->second.find(fieldName);
-    if (nameIt == slotCacheIt->second.end()) return Value::named("0");
+    if (nameIt == slotCacheIt->second.end()) return Value::ofInt(0);
     uint16_t slot = nameIt->second;
-    if (slot >= obj.fields.size() || !obj.fields[slot].isInitialized()) return Value::named("0");
+    if (slot >= obj.fields.size() || !obj.fields[slot].isInitialized()) return Value::ofInt(0);
     return obj.fields[slot];
 }
 
@@ -1405,7 +1396,7 @@ std::optional<Value> resumeCurrentMethod(
                         return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
                     }();
                 auto it = rt.staticFields.find(key);
-                frame.push(it == rt.staticFields.end() ? Value::named("0") : it->second);
+                frame.push(it == rt.staticFields.end() ? Value::ofInt(0) : it->second);
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
@@ -1435,7 +1426,7 @@ std::optional<Value> resumeCurrentMethod(
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
-                Value value = Value::named("0");
+                Value value = Value::ofInt(0);
                 const uint32_t t0 = statNow();
                 if (id.has_value()) {
                     auto objectIt = rt.heap.find(*id);
@@ -1823,7 +1814,7 @@ std::optional<Value> resumeCurrentMethod(
                 std::optional<uint32_t> id = arrayId(arrayValue);
                 auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
                 if (id.has_value() && arrayIt != rt.arrays.end()) {
-                    frame.push(Value::named(std::to_string(arrayIt->second.size())));
+                    frame.push(Value::ofInt(static_cast<int32_t>(arrayIt->second.size())));
                 } else {
                     frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
                 }
