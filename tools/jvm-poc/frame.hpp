@@ -22,7 +22,7 @@ class Frame {
 public:
     using ValueVec = std::vector<Value, SramAllocator<Value>>;
 
-    explicit Frame(size_t maxLocals);
+    explicit Frame(size_t maxLocals, size_t maxStack = 0);
 
     void setLocal(uint16_t index, Value value);
     Value local(uint16_t index) const;

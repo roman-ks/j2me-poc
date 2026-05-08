@@ -3,7 +3,9 @@
 
 namespace jvmpoc {
 
-Frame::Frame(size_t maxLocals) : locals_(maxLocals) {}
+Frame::Frame(size_t maxLocals, size_t maxStack) : locals_(maxLocals) {
+    stack_.reserve(maxStack);
+}
 
 void Frame::setLocal(uint16_t index, Value value) {
     if (index < locals_.size()) {

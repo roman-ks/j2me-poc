@@ -196,12 +196,14 @@ struct ResolvedCallEntry {
     uint8_t argSlots;
     bool isNative;
     std::string runtimeClass; // static/special: stored ref.className; virtual: last runtime type
+    const ClassFile* runtimeClassPtr = nullptr; // hot compare: pointer equality instead of string compare
     const ClassFile* targetClass;
     const MethodInfo* method;
 };
 
 struct HeapObject {
     std::string className;
+    const ClassFile* cls = nullptr; // cached class pointer for fast virtual dispatch (item K)
     std::unordered_map<std::string, Value> fields;
 };
 
@@ -352,8 +354,9 @@ uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
     return id;
 }
 
-Value allocateObject(Runtime& rt, const std::string& label, uint32_t pc, const std::string& className) {
+Value allocateObject(Runtime& rt, const std::vector<ClassFile>& classes, const std::string& label, uint32_t pc, const std::string& className) {
     uint32_t id = allocateHeapObjectId(rt, className);
+    rt.heap[id].cls = findClass(classes, className);
     Value ref = objectRef(id);
     if (rt.trace.recording) rt.trace.objectAllocs.push_back(ObjectAlloc{label, pc, ref, className});
     return ref;
@@ -528,12 +531,15 @@ std::optional<Value> recordUnknownCall(
 }
 
 std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefix) {
-    const std::string text = value.asText();
-    if (text.compare(0, prefix.size(), prefix) != 0) {
+    // Access the string variant directly — avoids asText() which heap-allocates a new
+    // std::string on every call, even when the variant already holds one.
+    const auto* s = std::get_if<std::string>(&value.data);
+    if (s == nullptr) return std::nullopt;
+    if (s->compare(0, prefix.size(), prefix) != 0) {
         return std::nullopt;
     }
     char* end = nullptr;
-    unsigned long parsed = std::strtoul(text.c_str() + prefix.size(), &end, 10);
+    unsigned long parsed = std::strtoul(s->c_str() + prefix.size(), &end, 10);
     if (end == nullptr || *end != '\0') {
         return std::nullopt;
     }
@@ -1377,7 +1383,7 @@ std::optional<Value> resumeCurrentMethod(
                         classes, ref.className, ref.name, ref.descriptor, &targetClass);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         isNativeCall = hasAccess(targetMethod->access, kAccNative);
-                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", targetClass, targetMethod};
+                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod};
                     }
                 }
 
@@ -1469,27 +1475,38 @@ std::optional<Value> resumeCurrentMethod(
                 rt.callArgsBuf[0] = frame.pop(); // 'this'
                 const Value& object = rt.callArgsBuf[0]; // ref into callArgsBuf (no copy)
 
-                // Phase 3: determine lookupClassName
+                // Phase 3: determine lookupClassName + lookupClassPtr for cache hit check
                 std::string lookupClassName = haveRef ? ref.className : "";
+                const ClassFile* lookupClassPtr = nullptr;
+                bool lookupClassFromCache = false;
                 if (isVirtualOp) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
                         auto objectIt = rt.heap.find(*id);
                         if (objectIt != rt.heap.end()) {
                             lookupClassName = objectIt->second.className;
+                            lookupClassPtr = objectIt->second.cls;
                         } else if (!haveRef) {
                             lookupClassName = cit->second.runtimeClass;
+                            lookupClassFromCache = true;
                         }
                     } else if (!haveRef) {
                         lookupClassName = cit->second.runtimeClass;
+                        lookupClassFromCache = true;
                     }
                 } else if (!haveRef) {
                     // invokespecial on cache hit: use stored ref.className
                     lookupClassName = cit->second.runtimeClass;
+                    lookupClassFromCache = true;
                 }
 
-                // Phase 4: resolve dispatch (cache hit when runtime class matches)
-                if (cit != rt.callCache.end() && cit->second.runtimeClass == lookupClassName) {
+                // Phase 4: resolve dispatch (cache hit when runtime class matches).
+                // Use pointer comparison when both sides are set (faster than string compare).
+                const bool cacheClassMatch = cit != rt.callCache.end() && (
+                    lookupClassFromCache ||
+                    (lookupClassPtr && cit->second.runtimeClassPtr == lookupClassPtr) ||
+                    (!lookupClassPtr && cit->second.runtimeClass == lookupClassName));
+                if (cacheClassMatch) {
                     targetClass = cit->second.targetClass;
                     targetMethod = cit->second.method;
                     isNativeCall = cit->second.isNative;
@@ -1501,7 +1518,8 @@ std::optional<Value> resumeCurrentMethod(
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         isNativeCall = hasAccess(targetMethod->access, kAccNative);
                         rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall,
-                                              lookupClassName, targetClass, targetMethod};
+                                              lookupClassName, findClass(classes, lookupClassName),
+                                              targetClass, targetMethod};
                     }
                 }
 
@@ -1577,7 +1595,7 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow();
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
-                frame.push(allocateObject(rt, label, allocPc, className));
+                frame.push(allocateObject(rt, classes, label, allocPc, className));
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
@@ -1687,7 +1705,7 @@ std::optional<Value> executeMethod(
 
     // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
     std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
-    RuntimeFrame runtimeFrame{std::move(label), &cls, &method, 0, Frame(method.maxLocals)};
+    RuntimeFrame runtimeFrame{std::move(label), &cls, &method, 0, Frame(method.maxLocals, method.maxStack)};
     // Pass args to delegateMethodExecution BEFORE consuming them in the lambda so
     // the timing delegate can read args[1]/args[2] for make_buf logging.
     return delegateMethodExecution(cls, method, args, [&]() {
@@ -1741,7 +1759,7 @@ ExecutionTrace startSession(MidletSession& session) {
         return rt.trace;
     }
 
-    session.midletRef() = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
+    session.midletRef() = allocateObject(rt, classes, "<midlet>", 0, midletClass->thisClass);
     const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
     if (init != nullptr) {
         std::vector<Value> initArgs = {session.midletRef()};
