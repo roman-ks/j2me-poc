@@ -282,8 +282,8 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
         const size_t maskByteEnd = (static_cast<size_t>(srcX1 - 1) >> 3u) + 1u;
         const int maskLen = static_cast<int>(maskByteEnd - maskByteStart);
 
-        uint16_t pixBuf[pixLen];   // stack: max ~480 B for 240-px-wide row
-        uint8_t  maskBuf[maskLen]; // stack: max ~30 B
+        uint16_t pixBuf[240];   // fixed: max canvas width = 240 (no VLA)
+        uint8_t  maskBuf[30];   // fixed: ceil(240/8) = 30 (no VLA)
 
         for (int py = srcY0; py < srcY1; ++py) {
             const int dstY = drawY + py;

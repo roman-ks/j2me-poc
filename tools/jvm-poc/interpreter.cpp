@@ -2045,11 +2045,11 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     }
 
     if (paintOwner != nullptr && paint != nullptr) {
-        std::vector<Value> paintArgs = {rt.currentDisplayable, Value::named("graphics#1")};
+        std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
         (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
-        (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::named("graphics#1")});
+        (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)});
     }
     rt.repaintRequested = false;
 

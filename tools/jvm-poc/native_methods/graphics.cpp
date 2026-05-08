@@ -27,13 +27,16 @@ inline uint32_t nowUs() {
 std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
     std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
     if (targetImage.has_value()) {
-        auto imageIt = ctx.images.find(*targetImage);
-        if (imageIt == ctx.images.end()) {
-            return std::nullopt;
+        if (*targetImage != 0) {
+            auto imageIt = ctx.images.find(*targetImage);
+            if (imageIt == ctx.images.end()) {
+                return std::nullopt;
+            }
+            port::Canvas canvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
+            canvas.setColor(ctx.graphicsColorRgb);
+            return canvas;
         }
-        port::Canvas canvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
-        canvas.setColor(ctx.graphicsColorRgb);
-        return canvas;
+        // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — fall through
     }
 
     if (ctx.graphicsFramebuffer == nullptr || ctx.graphicsWidth <= 0 || ctx.graphicsHeight <= 0) {
@@ -52,11 +55,38 @@ NativeCallResult handleGraphics(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    // Timer at handleGraphics entry: combined with tSetup this gives the
-    // branch-scan cost (setColor/fillRect/drawString checks before drawImage).
     const uint32_t tHG = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
     static const Value kMissingReceiver = Value::named("<missing-receiver>");
     const Value& receiver = args.empty() ? kMissingReceiver : args[0];
+
+    if (ref.name == "drawImage" && ref.descriptor == "(Ljavax/microedition/lcdui/Image;III)V") {
+        if (tHG) ctx.host->drawImageScanStats.record(nowUs() - tHG);
+        // Sub-phase timer: measures everything INSIDE this branch before the actual blit
+        // (imageId, images.find, graphicsCanvas, intArg calls).
+        // "routing" overhead = native_total - drawImageStats_total - drawImageSetupStats_total.
+        const uint32_t tSetup = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
+        std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
+        auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
+        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
+        const int diX = intArg(args, 2);
+        const int diY = intArg(args, 3);
+        const int diAnchor = intArg(args, 4);
+        if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
+            const uint32_t t0 = nowUs();
+            if (tSetup) ctx.host->drawImageSetupStats.record(t0 - tSetup);
+            canvas->drawImage(imageIt->second, diX, diY, diAnchor);
+            if (ctx.host != nullptr) ctx.host->drawImageStats.record(nowUs() - t0);
+        } else if (tSetup) {
+            ctx.host->drawImageSetupStats.record(nowUs() - tSetup);
+        }
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
+            methodLabel,
+            pc,
+            "drawImage(" + argText(args, 1) + "," + argText(args, 2) + "," +
+                argText(args, 3) + "," + argText(args, 4) + ")",
+        });
+        return handledVoid();
+    }
 
     if (ref.name == "setColor" && ref.descriptor == "(I)V") {
         ctx.graphicsColorRgb = intArg(args, 1);
@@ -111,35 +141,6 @@ NativeCallResult handleGraphics(
             methodLabel,
             pc,
             "drawString(\"" + text + "\"," + argText(args, 2) + "," +
-                argText(args, 3) + "," + argText(args, 4) + ")",
-        });
-        return handledVoid();
-    }
-
-    if (ref.name == "drawImage" && ref.descriptor == "(Ljavax/microedition/lcdui/Image;III)V") {
-        if (tHG) ctx.host->drawImageScanStats.record(nowUs() - tHG);
-        // Sub-phase timer: measures everything INSIDE this branch before the actual blit
-        // (imageId, images.find, graphicsCanvas, intArg calls).
-        // "routing" overhead = native_total - drawImageStats_total - drawImageSetupStats_total.
-        const uint32_t tSetup = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
-        std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
-        auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
-        const int diX = intArg(args, 2);
-        const int diY = intArg(args, 3);
-        const int diAnchor = intArg(args, 4);
-        if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
-            const uint32_t t0 = nowUs();
-            if (tSetup) ctx.host->drawImageSetupStats.record(t0 - tSetup);
-            canvas->drawImage(imageIt->second, diX, diY, diAnchor);
-            if (ctx.host != nullptr) ctx.host->drawImageStats.record(nowUs() - t0);
-        } else if (tSetup) {
-            ctx.host->drawImageSetupStats.record(nowUs() - tSetup);
-        }
-        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
-            methodLabel,
-            pc,
-            "drawImage(" + argText(args, 1) + "," + argText(args, 2) + "," +
                 argText(args, 3) + "," + argText(args, 4) + ")",
         });
         return handledVoid();
