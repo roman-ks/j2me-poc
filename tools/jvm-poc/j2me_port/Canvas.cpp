@@ -23,21 +23,6 @@ uint16_t rgbToRgb565(uint8_t r, uint8_t g, uint8_t b) {
                                  (static_cast<uint16_t>(b) >> 3u));
 }
 
-bool alphaMaskBitIsSet(const std::vector<uint8_t>& mask, int width, int x, int y) {
-    if (mask.empty() || width <= 0 || x < 0 || y < 0 || x >= width) {
-        return false;
-    }
-
-    const size_t rowBytes = (static_cast<size_t>(width) + 7u) >> 3u;
-    const size_t byteIndex = static_cast<size_t>(y) * rowBytes + (static_cast<size_t>(x) >> 3u);
-    if (byteIndex >= mask.size()) {
-        return false;
-    }
-
-    const uint8_t bit = static_cast<uint8_t>(0x80u >> (static_cast<unsigned>(x) & 7u));
-    return (mask[byteIndex] & bit) != 0;
-}
-
 } // namespace
 
 Image Image::createImage(const std::string& path) {
@@ -62,8 +47,48 @@ Image Image::createImage(const std::string& path) {
         return image;
     }
 
+    image.buildAlphaRle();
     image.sourcePath = path;
     return image;
+}
+
+void Image::buildAlphaRle() {
+    if (!hasAlphaMask || alphaMask.empty() || width <= 0 || height <= 0) {
+        return;
+    }
+
+    const size_t rowBytes = (static_cast<size_t>(width) + 7u) >> 3u;
+    alphaRowStart.reserve(static_cast<size_t>(height + 1));
+
+    for (int y = 0; y < height; ++y) {
+        alphaRowStart.push_back(static_cast<uint16_t>(alphaRuns.size()));
+        const size_t rowBase = static_cast<size_t>(y) * rowBytes;
+        int runStart = -1;
+        for (int x = 0; x < width; ++x) {
+            const bool opaque =
+                (alphaMask[rowBase + (static_cast<size_t>(x) >> 3u)] &
+                 (0x80u >> (static_cast<unsigned>(x) & 7u))) != 0;
+            if (opaque) {
+                if (runStart < 0) runStart = x;
+            } else {
+                if (runStart >= 0) {
+                    alphaRuns.push_back({static_cast<uint16_t>(runStart),
+                                        static_cast<uint16_t>(x - runStart)});
+                    runStart = -1;
+                }
+            }
+        }
+        if (runStart >= 0) {
+            alphaRuns.push_back({static_cast<uint16_t>(runStart),
+                                  static_cast<uint16_t>(width - runStart)});
+        }
+    }
+    alphaRowStart.push_back(static_cast<uint16_t>(alphaRuns.size())); // sentinel
+
+    // Release the raw bitmask — RLE is now the alpha representation.
+    alphaMask.clear();
+    alphaMask.shrink_to_fit();
+    hasAlphaMask = false;
 }
 
 void Image::setDecoder(Decoder decoder) {
@@ -264,7 +289,8 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
     }
 
     uint16_t* fb = activeFramebuffer();
-    if (!image.hasAlphaMask) {
+    if (image.alphaRowStart.empty()) {
+        // No transparency: bulk row copies (PSRAM→SRAM burst).
         for (int py = srcY0; py < srcY1; ++py) {
             const int dstY = drawY + py;
             const size_t srcRow = static_cast<size_t>(py * image.width);
@@ -274,39 +300,27 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
                         static_cast<size_t>(srcX1 - srcX0) * sizeof(uint16_t));
         }
     } else {
-        // Copy pixel row and mask bytes to the stack once per row so the
-        // inner pixel loop only touches SRAM instead of PSRAM.
-        const int pixLen = srcX1 - srcX0;
-        const size_t rowBytes = (static_cast<size_t>(image.width) + 7u) >> 3u;
-        const size_t maskByteStart = static_cast<size_t>(srcX0) >> 3u;
-        const size_t maskByteEnd = (static_cast<size_t>(srcX1 - 1) >> 3u) + 1u;
-        const int maskLen = static_cast<int>(maskByteEnd - maskByteStart);
-
-        uint16_t pixBuf[240];   // fixed: max canvas width = 240 (no VLA)
-        uint8_t  maskBuf[30];   // fixed: ceil(240/8) = 30 (no VLA)
-
+        // RLE alpha: iterate opaque runs per row, memcpy each run directly
+        // from image pixels (PSRAM) to framebuffer (SRAM).
         for (int py = srcY0; py < srcY1; ++py) {
             const int dstY = drawY + py;
             const size_t srcRow = static_cast<size_t>(py * image.width);
             const size_t dstRow = static_cast<size_t>(dstY * m_width);
-            const size_t maskRowBase = static_cast<size_t>(py) * rowBytes;
-
-            // One PSRAM burst read per row instead of one read per pixel.
-            std::memcpy(pixBuf,
-                        &image.pixels[srcRow + static_cast<size_t>(srcX0)],
-                        static_cast<size_t>(pixLen) * sizeof(uint16_t));
-            std::memcpy(maskBuf,
-                        &image.alphaMask[maskRowBase + maskByteStart],
-                        static_cast<size_t>(maskLen));
-
-            for (int px = srcX0; px < srcX1; ++px) {
-                const size_t localByte = (static_cast<size_t>(px) >> 3u) - maskByteStart;
-                const uint8_t bit = static_cast<uint8_t>(0x80u >> (static_cast<unsigned>(px) & 7u));
-                if ((maskBuf[localByte] & bit) == 0) {
+            const size_t runBase = image.alphaRowStart[static_cast<size_t>(py)];
+            const size_t runEnd  = image.alphaRowStart[static_cast<size_t>(py) + 1];
+            for (size_t ri = runBase; ri < runEnd; ++ri) {
+                const AlphaRun& run = image.alphaRuns[ri];
+                // Clip run to visible column range [srcX0, srcX1).
+                const int rStart = std::max(static_cast<int>(run.start), srcX0);
+                const int rEnd   = std::min(static_cast<int>(run.start) + static_cast<int>(run.length), srcX1);
+                if (rStart >= rEnd) {
+                    // Runs are in ascending order; once past srcX1 we're done.
+                    if (static_cast<int>(run.start) >= srcX1) break;
                     continue;
                 }
-                const int dstX = drawX + px;
-                fb[dstRow + static_cast<size_t>(dstX)] = pixBuf[static_cast<size_t>(px - srcX0)];
+                std::memcpy(&fb[dstRow + static_cast<size_t>(drawX + rStart)],
+                            &image.pixels[srcRow + static_cast<size_t>(rStart)],
+                            static_cast<size_t>(rEnd - rStart) * sizeof(uint16_t));
             }
         }
     }

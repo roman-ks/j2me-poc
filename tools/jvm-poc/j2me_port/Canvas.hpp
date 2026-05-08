@@ -47,6 +47,12 @@ private:
     std::vector<uint16_t> m_framebuffer;
 };
 
+// One contiguous run of opaque pixels within a single image row.
+struct AlphaRun {
+    uint16_t start;   // x position of first opaque pixel
+    uint16_t length;  // number of consecutive opaque pixels
+};
+
 class Image {
 public:
     using Decoder = bool (*)(const std::vector<uint8_t>& encoded, Image& out);
@@ -54,12 +60,22 @@ public:
     int width = 0;
     int height = 0;
     std::vector<uint16_t> pixels;
+    // Raw 1-bpp bitmask written by decoders; cleared after buildAlphaRle().
     std::vector<uint8_t> alphaMask;
     bool hasAlphaMask = false;
+    // RLE alpha: flat array of opaque runs across all rows.
+    // Row y covers alphaRuns[alphaRowStart[y] .. alphaRowStart[y+1]).
+    // alphaRowStart.size() == height + 1 (sentinel at end).
+    // Empty when image has no transparency.
+    std::vector<AlphaRun> alphaRuns;
+    std::vector<uint16_t> alphaRowStart;
     std::string sourcePath;
 
     int getWidth() const { return width; }
     int getHeight() const { return height; }
+
+    // Convert alphaMask bitmask to RLE, then free the bitmask.
+    void buildAlphaRle();
 
     static Image createImage(const std::string& path);
     static Image createImage(int width, int height);
