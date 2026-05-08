@@ -114,13 +114,23 @@ NativeCallResult handleGraphics(
     }
 
     if (ref.name == "drawImage" && ref.descriptor == "(Ljavax/microedition/lcdui/Image;III)V") {
+        // Sub-phase timer: measures everything INSIDE this branch before the actual blit
+        // (imageId, images.find, graphicsCanvas, intArg calls).
+        // "routing" overhead = native_total - drawImageStats_total - drawImageSetupStats_total.
+        const uint32_t tSetup = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
         std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
         auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
         std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
+        const int diX = intArg(args, 2);
+        const int diY = intArg(args, 3);
+        const int diAnchor = intArg(args, 4);
         if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
             const uint32_t t0 = nowUs();
-            canvas->drawImage(imageIt->second, intArg(args, 2), intArg(args, 3), intArg(args, 4));
+            if (tSetup) ctx.host->drawImageSetupStats.record(t0 - tSetup);
+            canvas->drawImage(imageIt->second, diX, diY, diAnchor);
             if (ctx.host != nullptr) ctx.host->drawImageStats.record(nowUs() - t0);
+        } else if (tSetup) {
+            ctx.host->drawImageSetupStats.record(nowUs() - tSetup);
         }
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,

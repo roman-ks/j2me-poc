@@ -48,6 +48,7 @@ public:
     // Per-frame draw stats accumulated by native graphics handlers.
     // Mutable so they can be updated through a const JvmHost* in NativeCallContext.
     mutable DrawCallStats drawImageStats;
+    mutable DrawCallStats drawImageSetupStats; // setup inside drawImage branch: imageId+find+canvas+intArgs
     mutable DrawCallStats fillRectStats;
     // Per-frame interpreter op stats (set by dispatch loop via rt.host).
     mutable DrawCallStats getfieldStats;   // 0xb4: heap object field reads
