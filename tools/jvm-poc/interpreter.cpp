@@ -1502,6 +1502,8 @@ std::optional<Value> resumeCurrentMethod(
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
                         const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+                        sharedNativeCtx.tProfT0 = tN;
+                        sharedNativeCtx.tProfTEntry = 0;
                         try {
                             nativeResult = handleNativeInstanceCall(
                                 sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, callArgs);

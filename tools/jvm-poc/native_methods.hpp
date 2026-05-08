@@ -38,6 +38,12 @@ struct NativeCallContext {
     std::string receiverClassName;
     std::function<void(std::string)> collectGarbage;
     std::function<Value(const std::string&)> internString;
+    // Sub-profiling: set tProfT0 = tN just before calling handleNativeInstanceCall,
+    // then tProfTEntry is set inside the function body on entry.
+    // disp_call = tProfTEntry - tProfT0  (function-call overhead)
+    // disp_fn   = nowUs()@handleGraphics_call - tProfTEntry  (className checks in dispatch.cpp)
+    uint32_t tProfT0 = 0;
+    uint32_t tProfTEntry = 0;
 };
 
 struct NativeCallResult {

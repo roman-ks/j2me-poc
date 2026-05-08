@@ -52,6 +52,9 @@ NativeCallResult handleGraphics(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
+    // Timer at handleGraphics entry: combined with tSetup this gives the
+    // branch-scan cost (setColor/fillRect/drawString checks before drawImage).
+    const uint32_t tHG = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
     static const Value kMissingReceiver = Value::named("<missing-receiver>");
     const Value& receiver = args.empty() ? kMissingReceiver : args[0];
 
@@ -114,6 +117,7 @@ NativeCallResult handleGraphics(
     }
 
     if (ref.name == "drawImage" && ref.descriptor == "(Ljavax/microedition/lcdui/Image;III)V") {
+        if (tHG) ctx.host->drawImageScanStats.record(nowUs() - tHG);
         // Sub-phase timer: measures everything INSIDE this branch before the actual blit
         // (imageId, images.find, graphicsCanvas, intArg calls).
         // "routing" overhead = native_total - drawImageStats_total - drawImageSetupStats_total.

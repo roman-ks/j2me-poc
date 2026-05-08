@@ -49,6 +49,9 @@ public:
     // Mutable so they can be updated through a const JvmHost* in NativeCallContext.
     mutable DrawCallStats drawImageStats;
     mutable DrawCallStats drawImageSetupStats; // setup inside drawImage branch: imageId+find+canvas+intArgs
+    mutable DrawCallStats drawImageScanStats;  // handleGraphics entry to drawImage branch (branch scanning)
+    mutable DrawCallStats drawImageDispCallStats; // tN to entering handleNativeInstanceCall body
+    mutable DrawCallStats drawImageDispFnStats;   // handleNativeInstanceCall body to calling handleGraphics
     mutable DrawCallStats fillRectStats;
     // Per-frame interpreter op stats (set by dispatch loop via rt.host).
     mutable DrawCallStats getfieldStats;   // 0xb4: heap object field reads
