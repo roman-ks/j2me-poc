@@ -245,6 +245,11 @@ struct Runtime {
     std::vector<uint32_t> freeObjectIds;
     std::vector<uint32_t> freeArrayIds;
     std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> callStack;
+    // Reusable arg buffer — avoids one SRAM malloc per method call. Safe because
+    // initializeFrameArgs moves elements out of callArgsBuf before the interpreter
+    // loop runs (which is the only code that could re-use callArgsBuf recursively).
+    // Uses default allocator: on ESP32, allocations <=4KB go to SRAM by default.
+    std::vector<Value> callArgsBuf;
     std::unordered_map<uint64_t, ResolvedCallEntry,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, ResolvedCallEntry>>> callCache;
@@ -749,7 +754,7 @@ std::optional<Value> executeMethod(
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
     const MethodInfo& method,
-    const std::vector<Value>& args,
+    std::vector<Value>& args,
     Runtime& rt,
     size_t depth);
 
@@ -771,10 +776,11 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         rt.session->tasks().push_back(ThreadTask{owner, run, runnable, std::nullopt, 0, false});
         return;
     }
-    (void)executeMethod(classes, *owner, *run, {runnable}, rt, 0);
+    std::vector<Value> runArgs = {runnable};
+    (void)executeMethod(classes, *owner, *run, runArgs, rt, 0);
 }
 
-void initializeFrameArgs(RuntimeFrame& runtimeFrame, const std::vector<Value>& args) {
+void initializeFrameArgs(RuntimeFrame& runtimeFrame, std::vector<Value>& args) {
     Frame& frame = runtimeFrame.frame;
     const MethodInfo& method = *runtimeFrame.method;
     if (args.empty()) {
@@ -788,12 +794,12 @@ void initializeFrameArgs(RuntimeFrame& runtimeFrame, const std::vector<Value>& a
     size_t localIndex = hasAccess(method.access, 0x0008) ? 0 : 1;
     size_t argIndex = 0;
     if (!hasAccess(method.access, 0x0008) && !args.empty() && method.maxLocals > 0) {
-        frame.setLocal(0, args[0]);
+        frame.setLocal(0, std::move(args[0]));
         argIndex = 1;
     }
     std::vector<size_t> widths = argumentSlotWidths(method.descriptor);
     for (size_t i = 0; i < widths.size() && argIndex < args.size() && localIndex < method.maxLocals; ++i) {
-        frame.setLocal(static_cast<uint16_t>(localIndex), args[argIndex]);
+        frame.setLocal(static_cast<uint16_t>(localIndex), std::move(args[argIndex]));
         localIndex += widths[i];
         ++argIndex;
     }
@@ -901,6 +907,16 @@ std::optional<Value> resumeCurrentMethod(
     // anew for each bytecode instruction.
     NativeCallContext sharedNativeCtx = makeNativeContext();
 
+    // When no host is attached (or host has no stats to collect) skip all
+    // per-bytecode nowUs() calls: each costs ~6µs and there are ~13 000/frame.
+    const bool kCollectStats = (rt.host != nullptr && rt.host->collectBytecodeStats);
+    // Zero-cost wrapper: returns nowUs() only when stats are active, 0 otherwise.
+    // "if (kCollectStats)" is a compile-time-predictable branch; the nowUs() call
+    // is completely absent from the hot path when kCollectStats==false.
+    auto statNow = [&]() -> uint32_t {
+        return kCollectStats ? nowUs() : 0u;
+    };
+
     while (pc < codeSize) {
         if (++rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
@@ -912,62 +928,62 @@ std::optional<Value> resumeCurrentMethod(
 
         uint8_t op = code[pc];
         switch (op) {
-            case 0x01: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(0)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // aconst_null
-            case 0x02: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(-1)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }  // iconst_m1
-            case 0x03: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(0)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_0
-            case 0x04: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(1)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_1
-            case 0x05: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(2)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_2
-            case 0x06: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(3)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_3
-            case 0x07: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(4)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_4
-            case 0x08: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(5)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_5
-            case 0x09: { const uint32_t t0=nowUs(); frame.push(Value::ofLong(0)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }  // lconst_0
-            case 0x0a: { const uint32_t t0=nowUs(); frame.push(Value::ofLong(1)); ++pc; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }  // lconst_1
-            case 0x10: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(codeS1(code, pc + 1))); pc += 2; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }  // bipush
-            case 0x11: { const uint32_t t0=nowUs(); frame.push(Value::ofInt(codeS2(code, pc + 1))); pc += 3; if(rt.host) rt.host->pushStats.record(nowUs()-t0); break; }  // sipush
+            case 0x01: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // aconst_null
+            case 0x02: { const uint32_t t0=statNow(); frame.push(Value::ofInt(-1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // iconst_m1
+            case 0x03: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_0
+            case 0x04: { const uint32_t t0=statNow(); frame.push(Value::ofInt(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_1
+            case 0x05: { const uint32_t t0=statNow(); frame.push(Value::ofInt(2)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_2
+            case 0x06: { const uint32_t t0=statNow(); frame.push(Value::ofInt(3)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_3
+            case 0x07: { const uint32_t t0=statNow(); frame.push(Value::ofInt(4)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_4
+            case 0x08: { const uint32_t t0=statNow(); frame.push(Value::ofInt(5)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_5
+            case 0x09: { const uint32_t t0=statNow(); frame.push(Value::ofLong(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // lconst_0
+            case 0x0a: { const uint32_t t0=statNow(); frame.push(Value::ofLong(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // lconst_1
+            case 0x10: { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS1(code, pc + 1))); pc += 2; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // bipush
+            case 0x11: { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS2(code, pc + 1))); pc += 3; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // sipush
             case 0x12: {
-                const uint32_t t0=nowUs();
+                const uint32_t t0=statNow();
                 uint16_t index = codeU1(code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
                     ? Value::ofInt(resolveIntegerConstant(cls, index))
                     : internString(rt, resolveStringConstant(cls, index)));
                 pc += 2;
-                if(rt.host) rt.host->pushStats.record(nowUs()-t0);
+                if(t0) rt.host->pushStats.record(nowUs()-t0);
                 break;
             }
             case 0x13: {
-                const uint32_t t0=nowUs();
+                const uint32_t t0=statNow();
                 uint16_t index = codeU2(code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
                     ? Value::ofInt(resolveIntegerConstant(cls, index))
                     : internString(rt, resolveStringConstant(cls, index)));
                 pc += 3;
-                if(rt.host) rt.host->pushStats.record(nowUs()-t0);
+                if(t0) rt.host->pushStats.record(nowUs()-t0);
                 break;
             }
             case 0x14: {
-                const uint32_t t0=nowUs();
+                const uint32_t t0=statNow();
                 uint16_t index = codeU2(code, pc + 1);
                 frame.push(Value::ofLong(resolveLongConstant(cls, index)));
                 pc += 3;
-                if(rt.host) rt.host->pushStats.record(nowUs()-t0);
+                if(t0) rt.host->pushStats.record(nowUs()-t0);
                 break;
             }
 
-            case 0x1e: { const uint32_t t0 = nowUs(); frame.push(frame.local(0)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x1f: { const uint32_t t0 = nowUs(); frame.push(frame.local(1)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x20: { const uint32_t t0 = nowUs(); frame.push(frame.local(2)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x21: { const uint32_t t0 = nowUs(); frame.push(frame.local(3)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x1a: { const uint32_t t0 = nowUs(); frame.push(frame.local(0)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x1b: { const uint32_t t0 = nowUs(); frame.push(frame.local(1)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x1c: { const uint32_t t0 = nowUs(); frame.push(frame.local(2)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x1d: { const uint32_t t0 = nowUs(); frame.push(frame.local(3)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x16: { const uint32_t t0 = nowUs(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x15: { const uint32_t t0 = nowUs(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x19: { const uint32_t t0 = nowUs(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x2a: { const uint32_t t0 = nowUs(); frame.push(frame.local(0)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x2b: { const uint32_t t0 = nowUs(); frame.push(frame.local(1)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x2c: { const uint32_t t0 = nowUs(); frame.push(frame.local(2)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
-            case 0x2d: { const uint32_t t0 = nowUs(); frame.push(frame.local(3)); ++pc; if (rt.host) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1e: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1f: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x20: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x21: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1a: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1b: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1c: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x1d: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x16: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x15: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x19: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2a: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2b: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2c: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2d: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
 
             case 0x2e:
             case 0x32:
@@ -975,41 +991,41 @@ std::optional<Value> resumeCurrentMethod(
             case 0x34: {
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
-                const uint32_t t0 = nowUs();
+                const uint32_t t0 = statNow();
                 frame.push(loadArrayElement(rt, arrayValue, indexValue));
-                if (rt.host != nullptr) rt.host->arrayLoadStats.record(nowUs() - t0);
+                if(t0) rt.host->arrayLoadStats.record(nowUs() - t0);
                 ++pc;
                 break;
             }
 
-            case 0x3f: { const uint32_t t0=nowUs(); store(0, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x40: { const uint32_t t0=nowUs(); store(1, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x41: { const uint32_t t0=nowUs(); store(2, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x42: { const uint32_t t0=nowUs(); store(3, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x3b: { const uint32_t t0=nowUs(); store(0, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x3c: { const uint32_t t0=nowUs(); store(1, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x3d: { const uint32_t t0=nowUs(); store(2, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x3e: { const uint32_t t0=nowUs(); store(3, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x37: { const uint32_t t0=nowUs(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x36: { const uint32_t t0=nowUs(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x3a: { const uint32_t t0=nowUs(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x4b: { const uint32_t t0=nowUs(); store(0, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x4c: { const uint32_t t0=nowUs(); store(1, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x4d: { const uint32_t t0=nowUs(); store(2, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
-            case 0x4e: { const uint32_t t0=nowUs(); store(3, static_cast<uint32_t>(pc)); ++pc; if(rt.host) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x3f: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x40: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x41: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x42: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x3b: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x3c: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x3d: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x3e: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x37: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x36: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x3a: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x4b: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x4c: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x4d: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x4e: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
 
             case 0x4f:
             case 0x53:
             case 0x54:
             case 0x55: {
-                const uint32_t t0=nowUs();
+                const uint32_t t0=statNow();
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 Value value = frame.pop();
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
                 storeArrayElement(rt, label, writePc, arrayValue, indexValue, value, op == 0x54);
                 ++pc;
-                if(rt.host) rt.host->arrayStoreStats.record(nowUs()-t0);
+                if(t0) rt.host->arrayStoreStats.record(nowUs()-t0);
                 break;
             }
 
@@ -1092,11 +1108,11 @@ std::optional<Value> resumeCurrentMethod(
             }
 
             case 0x57: {
-                const uint32_t t0m=nowUs(); (void)frame.pop(); ++pc; if(rt.host) rt.host->miscStats.record(nowUs()-t0m); break;
+                const uint32_t t0m=statNow(); (void)frame.pop(); ++pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); break;
             }
 
             case 0x84: {
-                const uint32_t t0arith = nowUs();
+                const uint32_t t0arith = statNow();
                 uint16_t index = codeU1(code, pc + 1);
                 int delta = codeS1(code, pc + 2);
                 Value oldValue = frame.local(index);
@@ -1107,7 +1123,7 @@ std::optional<Value> resumeCurrentMethod(
                 frame.setLocal(index, newValue);
                 recordLocal(index, static_cast<uint32_t>(pc), newValue, "iinc");
                 pc += 3;
-                if (rt.host) rt.host->arithStats.record(nowUs() - t0arith);
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
                 break;
             }
 
@@ -1121,7 +1137,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0x6d:
             case 0x70:
             case 0x71: {
-                const uint32_t t0arith2 = nowUs();
+                const uint32_t t0arith2 = statNow();
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
                 const char* opText = (op == 0x60 || op == 0x61) ? "+" :
@@ -1145,7 +1161,7 @@ std::optional<Value> resumeCurrentMethod(
                 } else {
                     frame.push(intBinaryOp(lhs, rhs, opText, op));
                 }
-                if (rt.host) rt.host->arithStats.record(nowUs() - t0arith2);
+                if(t0arith2) rt.host->arithStats.record(nowUs() - t0arith2);
                 ++pc;
                 break;
             }
@@ -1192,7 +1208,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0x9c:
             case 0x9d:
             case 0x9e: {
-                const uint32_t t0b=nowUs();
+                const uint32_t t0b=statNow();
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
@@ -1209,7 +1225,7 @@ std::optional<Value> resumeCurrentMethod(
                     });
                 }
                 pc = taken ? target : pc + 3;
-                if(rt.host) rt.host->branchStats.record(nowUs()-t0b);
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
                 break;
             }
 
@@ -1219,7 +1235,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0xa2:
             case 0xa3:
             case 0xa4: {
-                const uint32_t t0b=nowUs();
+                const uint32_t t0b=statNow();
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value rhs = frame.pop();
@@ -1238,20 +1254,20 @@ std::optional<Value> resumeCurrentMethod(
                     });
                 }
                 pc = taken ? target : pc + 3;
-                if(rt.host) rt.host->branchStats.record(nowUs()-t0b);
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
                 break;
             }
 
             case 0xa7: {
-                const uint32_t t0b=nowUs();
+                const uint32_t t0b=statNow();
                 pc = branchTarget(pc, codeS2(code, pc + 1));
-                if(rt.host) rt.host->branchStats.record(nowUs()-t0b);
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
                 break;
             }
 
             case 0xc6:
             case 0xc7: {
-                const uint32_t t0b=nowUs();
+                const uint32_t t0b=statNow();
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value value = frame.pop();
@@ -1267,19 +1283,19 @@ std::optional<Value> resumeCurrentMethod(
                     });
                 }
                 pc = taken ? target : pc + 3;
-                if(rt.host) rt.host->branchStats.record(nowUs()-t0b);
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
                 break;
             }
 
             case 0xb2:
             {
-                const uint32_t t0m=nowUs();
+                const uint32_t t0m=statNow();
                 FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
                 std::string key = ref.className + "." + ref.name;
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::named("0") : it->second);
                 pc += 3;
-                if(rt.host) rt.host->miscStats.record(nowUs()-t0m);
+                if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
             }
 
@@ -1301,7 +1317,7 @@ std::optional<Value> resumeCurrentMethod(
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 Value value = Value::named("0");
-                const uint32_t t0 = nowUs();
+                const uint32_t t0 = statNow();
                 if (id.has_value()) {
                     auto objectIt = rt.heap.find(*id);
                     if (objectIt != rt.heap.end()) {
@@ -1311,7 +1327,7 @@ std::optional<Value> resumeCurrentMethod(
                         }
                     }
                 }
-                if (rt.host != nullptr) rt.host->getfieldStats.record(nowUs() - t0);
+                if(t0) rt.host->getfieldStats.record(nowUs() - t0);
                 frame.push(value);
                 pc += 3;
                 break;
@@ -1324,18 +1340,18 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = frame.pop();
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
-                const uint32_t t0b5 = nowUs();
+                const uint32_t t0b5 = statNow();
                 if (id.has_value()) {
                     rt.heap[*id].fields[ref.name] = value;
                 }
-                if (rt.host != nullptr) rt.host->putfieldStats.record(nowUs() - t0b5);
+                if(t0b5) rt.host->putfieldStats.record(nowUs() - t0b5);
                 if (rt.trace.recording) rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
                 pc += 3;
                 break;
             }
 
             case 0xb8: {
-                const uint32_t t0inv = nowUs();
+                const uint32_t t0inv = statNow();
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 const uint64_t ckey = callCacheKey(&cls, cpIdx);
@@ -1365,9 +1381,9 @@ std::optional<Value> resumeCurrentMethod(
                     }
                 }
 
-                std::vector<Value> callArgs(argSlots);
+                rt.callArgsBuf.resize(argSlots);
                 for (size_t i = argSlots; i > 0; --i) {
-                    callArgs[i - 1] = frame.pop();
+                    rt.callArgsBuf[i - 1] = frame.pop();
                 }
 
                 if (targetClass != nullptr && targetMethod != nullptr) {
@@ -1378,7 +1394,7 @@ std::optional<Value> resumeCurrentMethod(
                         const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
                         try {
                             nativeResult = handleNativeStaticCall(
-                                sharedNativeCtx, label, callPc, nativeRef, callArgs);
+                                sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             pc += 3;
                             runtimeFrame.pc = pc;
@@ -1391,7 +1407,7 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         } else {
                             std::optional<Value> result = recordUnknownCall(
-                                rt, label, callPc, nativeRef, callArgs);
+                                rt, label, callPc, nativeRef, rt.callArgsBuf);
                             if (result.has_value()) {
                                 frame.push(*result);
                             }
@@ -1400,30 +1416,30 @@ std::optional<Value> resumeCurrentMethod(
                         runtimeFrame.pc = pc;
                         const uint32_t tDisp0 = nowUs() - t0inv;
                         std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
+                            classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
                         pc += 3;
-                        if (rt.host) rt.host->invokeStats.record(tDisp0);
+                        if(t0inv) rt.host->invokeStats.record(tDisp0);
                         break;
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
-                    std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, callArgs);
+                    std::optional<Value> result = recordUnknownCall(rt, label, callPc, ref, rt.callArgsBuf);
                     if (result.has_value()) {
                         frame.push(*result);
                     }
                 }
                 pc += 3;
-                if (rt.host) rt.host->invokeStats.record(nowUs() - t0inv);
+                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
                 break;
             }
 
             case 0xb6:
             case 0xb7:
             case 0xb9: {
-                const uint32_t t0inv = nowUs();
+                const uint32_t t0inv = statNow();
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 const bool isVirtualOp = (op == 0xb6 || op == 0xb9);
                 const uint64_t ckey = callCacheKey(&cls, cpIdx);
@@ -1446,12 +1462,12 @@ std::optional<Value> resumeCurrentMethod(
                 }
 
                 // Phase 2: pop args + this
-                std::vector<Value> callArgs(argSlots + 1);
+                rt.callArgsBuf.resize(argSlots + 1);
                 for (size_t i = argSlots; i > 0; --i) {
-                    callArgs[i] = frame.pop();
+                    rt.callArgsBuf[i] = frame.pop();
                 }
-                Value object = frame.pop();
-                callArgs[0] = object;
+                rt.callArgsBuf[0] = frame.pop(); // 'this'
+                const Value& object = rt.callArgsBuf[0]; // ref into callArgsBuf (no copy)
 
                 // Phase 3: determine lookupClassName
                 std::string lookupClassName = haveRef ? ref.className : "";
@@ -1506,7 +1522,7 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.tProfTEntry = 0;
                         try {
                             nativeResult = handleNativeInstanceCall(
-                                sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
+                                sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             pc += op == 0xb9 ? 5 : 3;
                             runtimeFrame.pc = pc;
@@ -1519,7 +1535,7 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         } else {
                             std::optional<Value> result = recordUnknownCall(
-                                rt, label, static_cast<uint32_t>(pc), nativeRef, callArgs);
+                                rt, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                             if (result.has_value()) {
                                 frame.push(*result);
                             }
@@ -1528,42 +1544,42 @@ std::optional<Value> resumeCurrentMethod(
                         runtimeFrame.pc = pc;
                         const uint32_t tDisp0 = nowUs() - t0inv;
                         std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, callArgs, rt, depth + 1);
+                            classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
                         pc += op == 0xb9 ? 5 : 3;
-                        if (rt.host) rt.host->invokeStats.record(tDisp0);
+                        if(t0inv) rt.host->invokeStats.record(tDisp0);
                         break;
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
-                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, callArgs);
+                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, rt.callArgsBuf);
                     if (builtInResult.handled) {
                         if (builtInResult.returnValue.has_value()) {
                             frame.push(*builtInResult.returnValue);
                         }
                     } else {
                         std::optional<Value> result = recordUnknownCall(
-                            rt, label, static_cast<uint32_t>(pc), ref, callArgs);
+                            rt, label, static_cast<uint32_t>(pc), ref, rt.callArgsBuf);
                         if (result.has_value()) {
                             frame.push(*result);
                         }
                     }
                 }
                 pc += op == 0xb9 ? 5 : 3;
-                if (rt.host) rt.host->invokeStats.record(nowUs() - t0inv);
+                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
                 break;
             }
 
             case 0xbb:
             {
-                const uint32_t t0m=nowUs();
+                const uint32_t t0m=statNow();
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
                 frame.push(allocateObject(rt, label, allocPc, className));
                 pc += 3;
-                if(rt.host) rt.host->miscStats.record(nowUs()-t0m);
+                if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
             }
 
@@ -1622,7 +1638,7 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xbe:
             {
-                const uint32_t t0m=nowUs();
+                const uint32_t t0m=statNow();
                 Value arrayValue = frame.pop();
                 std::optional<uint32_t> id = arrayId(arrayValue);
                 auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
@@ -1632,23 +1648,23 @@ std::optional<Value> resumeCurrentMethod(
                     frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
                 }
                 ++pc;
-                if(rt.host) rt.host->miscStats.record(nowUs()-t0m);
+                if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
             }
 
             case 0xac:
             case 0xad:
             case 0xb0: {
-                const uint32_t t0m=nowUs(); Value v=frame.pop(); runtimeFrame.pc=pc; if(rt.host) rt.host->miscStats.record(nowUs()-t0m); return finish(v);
+                const uint32_t t0m=statNow(); Value v=frame.pop(); runtimeFrame.pc=pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); return finish(v);
             }
             case 0xb1: {
-                const uint32_t t0m=nowUs(); runtimeFrame.pc=pc; if(rt.host) rt.host->miscStats.record(nowUs()-t0m); return finish(std::nullopt);
+                const uint32_t t0m=statNow(); runtimeFrame.pc=pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); return finish(std::nullopt);
             }
 
             default: {
-                const uint32_t t0m=nowUs();
+                const uint32_t t0m=statNow();
                 pc += instructionLength(op);
-                if(rt.host) rt.host->miscStats.record(nowUs()-t0m);
+                if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
             }
         }
@@ -1662,17 +1678,21 @@ std::optional<Value> executeMethod(
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
     const MethodInfo& method,
-    const std::vector<Value>& args,
+    std::vector<Value>& args,
     Runtime& rt,
     size_t depth) {
     if (depth > kMaxCallDepth) {
         return Value::named("<call-depth-limit>");
     }
 
-    RuntimeFrame runtimeFrame{methodLabel(cls, method), &cls, &method, 0, Frame(method.maxLocals)};
-    initializeFrameArgs(runtimeFrame, args);
-    rt.callStack.push_back(std::move(runtimeFrame));
+    // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
+    std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
+    RuntimeFrame runtimeFrame{std::move(label), &cls, &method, 0, Frame(method.maxLocals)};
+    // Pass args to delegateMethodExecution BEFORE consuming them in the lambda so
+    // the timing delegate can read args[1]/args[2] for make_buf logging.
     return delegateMethodExecution(cls, method, args, [&]() {
+        initializeFrameArgs(runtimeFrame, args); // moves strings from args into frame locals
+        rt.callStack.push_back(std::move(runtimeFrame));
         return resumeCurrentMethod(classes, rt, depth);
     });
 }
@@ -1724,7 +1744,8 @@ ExecutionTrace startSession(MidletSession& session) {
     session.midletRef() = allocateObject(rt, "<midlet>", 0, midletClass->thisClass);
     const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
     if (init != nullptr) {
-        (void)executeMethod(classes, *midletClass, *init, {session.midletRef()}, rt, 0);
+        std::vector<Value> initArgs = {session.midletRef()};
+        (void)executeMethod(classes, *midletClass, *init, initArgs, rt, 0);
     } else {
         MethodRef ref{midletClass->thisClass, "<init>", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
@@ -1733,7 +1754,8 @@ ExecutionTrace startSession(MidletSession& session) {
     const ClassFile* startOwner = nullptr;
     const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
     if (startOwner != nullptr && startApp != nullptr) {
-        (void)executeMethod(classes, *startOwner, *startApp, {session.midletRef()}, rt, 0);
+        std::vector<Value> startArgs = {session.midletRef()};
+        (void)executeMethod(classes, *startOwner, *startApp, startArgs, rt, 0);
     } else {
         MethodRef ref{midletClass->thisClass, "startApp", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
@@ -1772,11 +1794,12 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         return;
     }
 
+    std::vector<Value> keyArgs = {rt.currentDisplayable, Value::named(std::to_string(event.keyCode))};
     (void)executeMethod(
         classes,
         *owner,
         *handler,
-        {rt.currentDisplayable, Value::named(std::to_string(event.keyCode))},
+        keyArgs,
         rt,
         0);
     rt.repaintRequested = true;
@@ -1813,7 +1836,8 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 task.suspendedFrame.reset();
                 (void)resumeCurrentMethod(session.classes(), rt, 0);
             } else if (task.cls != nullptr && task.method != nullptr) {
-                (void)executeMethod(session.classes(), *task.cls, *task.method, {task.receiver}, rt, 0);
+                std::vector<Value> taskArgs = {task.receiver};
+                (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
             }
             task.finished = true;
         } catch (const YieldThreadSleep& request) {
@@ -1854,7 +1878,8 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     }
 
     if (paintOwner != nullptr && paint != nullptr) {
-        (void)executeMethod(classes, *paintOwner, *paint, {rt.currentDisplayable, Value::named("graphics#1")}, rt, 0);
+        std::vector<Value> paintArgs = {rt.currentDisplayable, Value::named("graphics#1")};
+        (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::named("graphics#1")});
@@ -1894,7 +1919,8 @@ ExecutionTrace renderMidletSession(
 ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const ClassFile& cls, const MethodInfo& method) {
     Runtime rt;
     rt.callStack.reserve(kMaxCallDepth + 1);
-    (void)executeMethod(classes, cls, method, {}, rt, 0);
+    std::vector<Value> emptyArgs;
+    (void)executeMethod(classes, cls, method, emptyArgs, rt, 0);
     return rt.trace;
 }
 

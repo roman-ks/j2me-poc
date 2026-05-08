@@ -67,6 +67,10 @@ public:
     mutable DrawCallStats miscStats;       // pop/dup/return/getstatic/new/arraylength/default
     mutable uint32_t bytecodeSteps = 0;    // total bytecodes dispatched per frame
 
+    // Master switch for per-bytecode timing stats. When false, statNow() returns 0
+    // and all stat records are skipped — zero esp_timer_get_time() overhead.
+    bool collectBytecodeStats = false;
+
     // Per-native-method profiling (only active when profileNatives == true)
     bool profileNatives = false;
     mutable std::unordered_map<std::string, DrawCallStats> nativeStats;

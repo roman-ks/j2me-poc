@@ -26,7 +26,7 @@ Value Frame::pop() {
     if (stack_.empty()) {
         return Value::named("<stack-underflow>");
     }
-    Value value = stack_.back();
+    Value value = std::move(stack_.back()); // move out to avoid string copy
     stack_.pop_back();
     return value;
 }
