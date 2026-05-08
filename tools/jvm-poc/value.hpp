@@ -27,7 +27,19 @@ struct Value {
     // Default: uninitialized slot (detected by Frame::local())
     Value() = default;
 
-    // Explicit numeric factories — use these in hot paths to avoid any string work
+// H1: tagged-int handle encoding.
+// Object/array/image handles are stored as int32_t with the ID in bits 0-23
+// and a type tag in bits 24-31.  Plain JVM integers have tag 0x00 (values < 16M
+// are safe for the target MIDlets; colours top out at 0x00FFFFFF).
+// Tags 0x01-0x04 are reserved; all others are plain integers.
+static constexpr int32_t kHandleObjTag = 0x01 << 24;  // object ref  (obj#N)
+static constexpr int32_t kHandleArrTag = 0x02 << 24;  // array ref   (arr#N)
+static constexpr int32_t kHandleImgTag = 0x03 << 24;  // image ref   (image#N)
+static constexpr int32_t kHandleGfxTag = 0x04 << 24;  // gfx ref     (graphics:image#N)
+static constexpr int32_t kHandleTagMask = static_cast<int32_t>(0xFF000000);
+static constexpr int32_t kHandleIdMask  = 0x00FFFFFF;
+
+// Explicit numeric factories — use these in hot paths to avoid any string work
     static Value ofInt(int32_t v)  { Value r; r.data = v; return r; }
     static Value ofLong(int64_t v) { Value r; r.data = v; return r; }
 

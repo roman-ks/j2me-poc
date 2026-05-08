@@ -35,7 +35,16 @@ Value Value::named(std::string s) {
 // ---------- Value::asText ------------------------------------------------
 
 std::string Value::asText() const {
-    if (const auto* i = std::get_if<int32_t>(&data)) return std::to_string(*i);
+    if (const auto* i = std::get_if<int32_t>(&data)) {
+        const int32_t v = *i;
+        const int32_t tag = v & kHandleTagMask;
+        const int32_t id  = v & kHandleIdMask;
+        if      (tag == kHandleObjTag) return "obj#"             + std::to_string(id);
+        else if (tag == kHandleArrTag) return "arr#"             + std::to_string(id);
+        else if (tag == kHandleImgTag) return "image#"           + std::to_string(id);
+        else if (tag == kHandleGfxTag) return "graphics:image#"  + std::to_string(id);
+        return std::to_string(v);
+    }
     if (const auto* l = std::get_if<int64_t>(&data)) return std::to_string(*l);
     if (const auto* s = std::get_if<std::string>(&data)) return *s;
     return {};  // monostate / uninitialized

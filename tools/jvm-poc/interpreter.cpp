@@ -400,11 +400,11 @@ void captureSuspendedTasks(ExecutionTrace& trace, const MidletSession& session) 
 }
 
 Value objectRef(uint32_t id) {
-    return Value::named("obj#" + std::to_string(id));
+    return Value::ofInt(Value::kHandleObjTag | static_cast<int32_t>(id & 0xFFFFFF));
 }
 
 Value arrayRef(uint32_t id) {
-    return Value::named("arr#" + std::to_string(id));
+    return Value::ofInt(Value::kHandleArrTag | static_cast<int32_t>(id & 0xFFFFFF));
 }
 
 std::optional<std::string> parseTextHandle(const Value& value, const std::string& prefix) {
@@ -626,14 +626,30 @@ std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefi
 }
 
 std::optional<uint32_t> objectId(const Value& value) {
+    // Hot path: tagged int32 (H1 encoding).
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        if ((*i & Value::kHandleTagMask) == Value::kHandleObjTag)
+            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+        return std::nullopt;
+    }
+    // Legacy fallback: string "obj#N" (handles stored before H1).
     return parseHandle(value, "obj#");
 }
 
 std::optional<uint32_t> arrayId(const Value& value) {
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        if ((*i & Value::kHandleTagMask) == Value::kHandleArrTag)
+            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+        return std::nullopt;
+    }
     return parseHandle(value, "arr#");
 }
 
 bool isReference(const Value& value) {
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        const int32_t tag = *i & Value::kHandleTagMask;
+        return tag == Value::kHandleObjTag || tag == Value::kHandleArrTag;
+    }
     return objectId(value).has_value() || arrayId(value).has_value();
 }
 

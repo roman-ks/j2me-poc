@@ -33,6 +33,11 @@ std::optional<uint32_t> parseHandle(const Value& value, const std::string& prefi
 }
 
 std::optional<uint32_t> objectId(const Value& value) {
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        if ((*i & Value::kHandleTagMask) == Value::kHandleObjTag)
+            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+        return std::nullopt;
+    }
     return parseHandle(value, "obj#");
 }
 
@@ -49,14 +54,29 @@ bool isStringObject(const NativeCallContext& ctx, const Value& value) {
 }
 
 std::optional<uint32_t> arrayId(const Value& value) {
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        if ((*i & Value::kHandleTagMask) == Value::kHandleArrTag)
+            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+        return std::nullopt;
+    }
     return parseHandle(value, "arr#");
 }
 
 std::optional<uint32_t> imageId(const Value& value) {
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        if ((*i & Value::kHandleTagMask) == Value::kHandleImgTag)
+            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+        return std::nullopt;
+    }
     return parseHandle(value, "image#");
 }
 
 std::optional<uint32_t> imageGraphicsId(const Value& value) {
+    if (const auto* i = std::get_if<int32_t>(&value.data)) {
+        if ((*i & Value::kHandleTagMask) == Value::kHandleGfxTag)
+            return static_cast<uint32_t>(*i & Value::kHandleIdMask);
+        return std::nullopt;
+    }
     return parseHandle(value, "graphics:image#");
 }
 

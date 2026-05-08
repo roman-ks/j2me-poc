@@ -8,7 +8,7 @@ namespace {
 Value storeImage(NativeCallContext& ctx, port::Image image) {
     uint32_t id = ctx.nextImageId++;
     ctx.images[id] = std::move(image);
-    return Value::named("image#" + std::to_string(id));
+    return Value::ofInt(Value::kHandleImgTag | static_cast<int32_t>(id & 0xFFFFFF));
 }
 
 } // namespace
@@ -27,7 +27,7 @@ NativeCallResult handleImage(
         if (cached != ctx.resourceImages.end()) {
             auto imageIt = ctx.images.find(cached->second);
             if (imageIt != ctx.images.end()) {
-                Value imageRef = Value::named("image#" + std::to_string(cached->second));
+                Value imageRef = Value::ofInt(Value::kHandleImgTag | static_cast<int32_t>(cached->second & 0xFFFFFF));
                 ctx.trace.imageLoads.push_back(ImageLoad{
                     methodLabel,
                     pc,
@@ -88,7 +88,7 @@ NativeCallResult handleImage(
 
     if (ref.name == "getGraphics" && ref.descriptor == "()Ljavax/microedition/lcdui/Graphics;") {
         return id.has_value()
-            ? handledValue(Value::named("graphics:image#" + std::to_string(*id)))
+            ? handledValue(Value::ofInt(Value::kHandleGfxTag | static_cast<int32_t>(*id & 0xFFFFFF)))
             : handledValue(Value::named("graphics:<missing-image>"));
     }
 
