@@ -25,9 +25,9 @@ public:
     explicit Frame(size_t maxLocals, size_t maxStack = 0);
 
     void setLocal(uint16_t index, Value value);
-    Value local(uint16_t index) const;
+    const Value& local(uint16_t index) const; // returns ref into locals_ — no copy on push sites
     void push(Value value);
-    Value pop();
+    Value pop(); // uses std::move from stack_.back() — no copy
     const ValueVec& locals() const { return locals_; }
     const ValueVec& stack() const { return stack_; }
 

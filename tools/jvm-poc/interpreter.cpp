@@ -234,13 +234,17 @@ struct Runtime {
     const JvmHost* host = nullptr;
     MidletSession* session = nullptr;
     ThreadTask* currentTask = nullptr;
-    std::map<std::string, Value> staticFields;
+    std::unordered_map<std::string, Value> staticFields;
     Heap heap;
     ArrayHeap arrays;
     StringHeap strings;
     ImageHeap images;
     ResourceImageCache resourceImages;
     std::map<std::string, uint32_t> internedStrings;
+    // Cache (cls*, cpIdx) → "ClassName.fieldName" key for staticFields lookups.
+    std::unordered_map<uint64_t, std::string,
+        std::hash<uint64_t>, std::equal_to<uint64_t>,
+        SramAllocator<std::pair<const uint64_t, std::string>>> staticKeyCache;
     uint32_t nextObjectId = 1;
     uint32_t nextArrayId = 1;
     uint32_t nextImageId = 1;
@@ -255,6 +259,11 @@ struct Runtime {
     std::unordered_map<uint64_t, ResolvedCallEntry,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, ResolvedCallEntry>>> callCache;
+    // Cache (cls*, cpIdx) → pointer into cls.cp UTF8 entry for field name.
+    // ClassFile objects are stable for the session so the pointer is safe.
+    std::unordered_map<uint64_t, const std::string*,
+        std::hash<uint64_t>, std::equal_to<uint64_t>,
+        SramAllocator<std::pair<const uint64_t, const std::string*>>> fieldNameCache;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
@@ -265,6 +274,34 @@ struct Runtime {
     size_t steps = 0;
     bool repaintRequested = true;
 };
+
+// Resolve field name from CP without copying strings. Returns pointer into cls.cp (stable).
+// Falls back to resolveFieldRef().name (copies once) if CP layout is unexpected.
+inline const std::string& resolveFieldName(Runtime& rt, const ClassFile& cls, uint16_t cpIdx) {
+    const uint64_t fkey = callCacheKey(&cls, cpIdx);
+    auto fcit = rt.fieldNameCache.find(fkey);
+    if (fcit != rt.fieldNameCache.end()) {
+        return *fcit->second;
+    }
+    // Cache miss: navigate CP directly to avoid 3 string copies from resolveFieldRef.
+    const auto& cp = cls.cp;
+    if (cpIdx > 0 && cpIdx < cp.size() && cp[cpIdx].tag == CpFieldref) {
+        const uint16_t natIdx = cp[cpIdx].b;
+        if (natIdx > 0 && natIdx < cp.size() && cp[natIdx].tag == CpNameAndType) {
+            const uint16_t nameIdx = cp[natIdx].a;
+            if (nameIdx > 0 && nameIdx < cp.size() && cp[nameIdx].tag == CpUtf8) {
+                const std::string* ptr = &cp[nameIdx].utf8;
+                rt.fieldNameCache[fkey] = ptr;
+                return *ptr;
+            }
+        }
+    }
+    // Fallback (should not happen in valid bytecode): resolve the slow way.
+    static thread_local std::string fallback;
+    fallback = resolveFieldRef(cls, cpIdx).name;
+    rt.fieldNameCache[fkey] = &fallback;
+    return fallback;
+}
 
 } // namespace
 
@@ -1296,8 +1333,15 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb2:
             {
                 const uint32_t t0m=statNow();
-                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
-                std::string key = ref.className + "." + ref.name;
+                const uint16_t cpIdx = codeU2(code, pc + 1);
+                const uint64_t skey = callCacheKey(&cls, cpIdx);
+                auto skit = rt.staticKeyCache.find(skey);
+                const std::string& key = (skit != rt.staticKeyCache.end())
+                    ? skit->second
+                    : [&]() -> const std::string& {
+                        FieldRef ref = resolveFieldRef(cls, cpIdx);
+                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
+                    }();
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::named("0") : it->second);
                 pc += 3;
@@ -1308,8 +1352,15 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb3:
             {
                 uint32_t writePc = static_cast<uint32_t>(pc);
-                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
-                std::string key = ref.className + "." + ref.name;
+                const uint16_t cpIdx = codeU2(code, pc + 1);
+                const uint64_t skey = callCacheKey(&cls, cpIdx);
+                auto skit = rt.staticKeyCache.find(skey);
+                const std::string& key = (skit != rt.staticKeyCache.end())
+                    ? skit->second
+                    : [&]() -> const std::string& {
+                        FieldRef ref = resolveFieldRef(cls, cpIdx);
+                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
+                    }();
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
                 if (rt.trace.recording) rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
@@ -1319,7 +1370,8 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xb4:
             {
-                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
+                const uint16_t cpIdx = codeU2(code, pc + 1);
+                const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 Value value = Value::named("0");
@@ -1327,7 +1379,7 @@ std::optional<Value> resumeCurrentMethod(
                 if (id.has_value()) {
                     auto objectIt = rt.heap.find(*id);
                     if (objectIt != rt.heap.end()) {
-                        auto fieldIt = objectIt->second.fields.find(ref.name);
+                        auto fieldIt = objectIt->second.fields.find(fieldName);
                         if (fieldIt != objectIt->second.fields.end()) {
                             value = fieldIt->second;
                         }
@@ -1342,16 +1394,20 @@ std::optional<Value> resumeCurrentMethod(
             case 0xb5:
             {
                 uint32_t writePc = static_cast<uint32_t>(pc);
-                FieldRef ref = resolveFieldRef(cls, codeU2(code, pc + 1));
+                const uint16_t cpIdx = codeU2(code, pc + 1);
+                const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
                 Value value = frame.pop();
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
                 const uint32_t t0b5 = statNow();
                 if (id.has_value()) {
-                    rt.heap[*id].fields[ref.name] = value;
+                    rt.heap[*id].fields[fieldName] = value;
                 }
                 if(t0b5) rt.host->putfieldStats.record(nowUs() - t0b5);
-                if (rt.trace.recording) rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + ref.name, value});
+                if (rt.trace.recording) {
+                    FieldRef ref = resolveFieldRef(cls, cpIdx);
+                    rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + fieldName, value});
+                }
                 pc += 3;
                 break;
             }
