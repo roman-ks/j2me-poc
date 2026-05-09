@@ -998,6 +998,15 @@ std::optional<Value> resumeCurrentMethod(
     // native dispatch rather than constructing it (and its std::function members)
     // anew for each bytecode instruction.
     NativeCallContext sharedNativeCtx = makeNativeContext();
+    // Build the cached main-framebuffer Canvas once here rather than
+    // constructing a new one on every Graphics native call.
+    if (sharedNativeCtx.graphicsFramebuffer != nullptr &&
+        sharedNativeCtx.graphicsWidth > 0 && sharedNativeCtx.graphicsHeight > 0) {
+        sharedNativeCtx.mainFbCanvas.emplace(
+            sharedNativeCtx.graphicsWidth,
+            sharedNativeCtx.graphicsHeight,
+            sharedNativeCtx.graphicsFramebuffer);
+    }
 
     // When no host is attached (or host has no stats to collect) skip all
     // per-bytecode nowUs() calls: each costs ~6µs and there are ~13 000/frame.

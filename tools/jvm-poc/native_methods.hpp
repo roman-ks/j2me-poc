@@ -44,6 +44,9 @@ struct NativeCallContext {
     // disp_fn   = nowUs()@handleGraphics_call - tProfTEntry  (className checks in dispatch.cpp)
     uint32_t tProfT0 = 0;
     uint32_t tProfTEntry = 0;
+    // Cached main-framebuffer Canvas — built once per executeMethod call,
+    // reused by graphicsCanvas() for all ID=0 graphics targets.
+    std::optional<port::Canvas> mainFbCanvas = std::nullopt;
 };
 
 struct NativeCallResult {

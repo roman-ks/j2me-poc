@@ -290,14 +290,22 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
 
     uint16_t* fb = activeFramebuffer();
     if (image.alphaRowStart.empty()) {
-        // No transparency: bulk row copies (PSRAM→SRAM burst).
-        for (int py = srcY0; py < srcY1; ++py) {
-            const int dstY = drawY + py;
-            const size_t srcRow = static_cast<size_t>(py * image.width);
-            const size_t dstRow = static_cast<size_t>(dstY * m_width);
-            std::memcpy(&fb[dstRow + static_cast<size_t>(drawX + srcX0)],
-                        &image.pixels[srcRow + static_cast<size_t>(srcX0)],
-                        static_cast<size_t>(srcX1 - srcX0) * sizeof(uint16_t));
+        // No transparency. If image and canvas are the same width and the draw
+        // is unclipped horizontally, source and dest rows are contiguous in
+        // memory — one bulk memcpy covers all rows (PSRAM→SRAM burst).
+        if (srcX0 == 0 && srcX1 == image.width && drawX == 0 && m_width == image.width) {
+            std::memcpy(&fb[static_cast<size_t>((drawY + srcY0) * m_width)],
+                        &image.pixels[static_cast<size_t>(srcY0 * image.width)],
+                        static_cast<size_t>((srcY1 - srcY0) * image.width) * sizeof(uint16_t));
+        } else {
+            for (int py = srcY0; py < srcY1; ++py) {
+                const int dstY = drawY + py;
+                const size_t srcRow = static_cast<size_t>(py * image.width);
+                const size_t dstRow = static_cast<size_t>(dstY * m_width);
+                std::memcpy(&fb[dstRow + static_cast<size_t>(drawX + srcX0)],
+                            &image.pixels[srcRow + static_cast<size_t>(srcX0)],
+                            static_cast<size_t>(srcX1 - srcX0) * sizeof(uint16_t));
+            }
         }
     } else {
         // RLE alpha: iterate opaque runs per row, memcpy each run directly

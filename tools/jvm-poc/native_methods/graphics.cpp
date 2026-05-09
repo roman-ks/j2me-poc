@@ -36,7 +36,12 @@ std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& 
             canvas.setColor(ctx.graphicsColorRgb);
             return canvas;
         }
-        // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — fall through
+        // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — use cached canvas.
+        if (ctx.mainFbCanvas.has_value()) {
+            ctx.mainFbCanvas->setColor(ctx.graphicsColorRgb);
+            return *ctx.mainFbCanvas;
+        }
+        // Fallback if canvas wasn't pre-built (e.g. no framebuffer at ctx creation time).
     }
 
     if (ctx.graphicsFramebuffer == nullptr || ctx.graphicsWidth <= 0 || ctx.graphicsHeight <= 0) {
