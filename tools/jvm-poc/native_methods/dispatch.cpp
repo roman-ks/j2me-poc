@@ -61,10 +61,12 @@ NativeCallResult handleNativeInstanceCall(
     const MethodRef& ref,
     const std::vector<Value>& args) {
     // Record function-entry time for disp_call measurement.
+#if JVM_ENABLE_NATIVE_PROFILING
     if (ctx.tProfT0) {
         ctx.tProfTEntry = nowUs();
         if (ctx.host) ctx.host->drawImageDispCallStats.record(ctx.tProfTEntry - ctx.tProfT0);
     }
+#endif
     // Use a reference to avoid copying the Value (which holds a heap std::string for object refs).
     static const Value kMissingReceiver = Value::named("<missing-receiver>");
     const Value& receiver = args.empty() ? kMissingReceiver : args[0];
@@ -78,7 +80,9 @@ NativeCallResult handleNativeInstanceCall(
     }
 
     if (ref.className == "javax/microedition/lcdui/Graphics") {
+#if JVM_ENABLE_NATIVE_PROFILING
         if (ctx.tProfTEntry && ctx.host) ctx.host->drawImageDispFnStats.record(nowUs() - ctx.tProfTEntry);
+#endif
         return native_methods::handleGraphics(ctx, methodLabel, pc, ref, args);
     }
 

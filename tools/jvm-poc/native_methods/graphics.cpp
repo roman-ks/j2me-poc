@@ -60,7 +60,11 @@ NativeCallResult handleGraphics(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
+#if JVM_ENABLE_NATIVE_PROFILING
     const uint32_t tHG = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
+#else
+    constexpr uint32_t tHG = 0;
+#endif
     static const Value kMissingReceiver = Value::named("<missing-receiver>");
     const Value& receiver = args.empty() ? kMissingReceiver : args[0];
 
@@ -69,7 +73,11 @@ NativeCallResult handleGraphics(
         // Sub-phase timer: measures everything INSIDE this branch before the actual blit
         // (imageId, images.find, graphicsCanvas, intArg calls).
         // "routing" overhead = native_total - drawImageStats_total - drawImageSetupStats_total.
+#if JVM_ENABLE_NATIVE_PROFILING
         const uint32_t tSetup = (ctx.host && ctx.host->profileNatives) ? nowUs() : 0;
+#else
+        constexpr uint32_t tSetup = 0;
+#endif
         std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
         auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
         std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
@@ -77,10 +85,14 @@ NativeCallResult handleGraphics(
         const int diY = intArg(args, 3);
         const int diAnchor = intArg(args, 4);
         if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
+#if JVM_ENABLE_NATIVE_PROFILING
             const uint32_t t0 = nowUs();
             if (tSetup) ctx.host->drawImageSetupStats.record(t0 - tSetup);
             canvas->drawImage(imageIt->second, diX, diY, diAnchor);
-            if (ctx.host != nullptr) ctx.host->drawImageStats.record(nowUs() - t0);
+            if (ctx.host != nullptr && ctx.host->profileNatives) ctx.host->drawImageStats.record(nowUs() - t0);
+#else
+            canvas->drawImage(imageIt->second, diX, diY, diAnchor);
+#endif
         } else if (tSetup) {
             ctx.host->drawImageSetupStats.record(nowUs() - tSetup);
         }
@@ -120,9 +132,13 @@ NativeCallResult handleGraphics(
         int height = intArg(args, 4);
         std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
         if (canvas.has_value()) {
+#if JVM_ENABLE_NATIVE_PROFILING
             const uint32_t t0 = nowUs();
             canvas->fillRect(x, y, width, height);
-            if (ctx.host != nullptr) ctx.host->fillRectStats.record(nowUs() - t0);
+            if (ctx.host != nullptr && ctx.host->profileNatives) ctx.host->fillRectStats.record(nowUs() - t0);
+#else
+            canvas->fillRect(x, y, width, height);
+#endif
         }
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,

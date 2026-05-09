@@ -230,6 +230,21 @@ struct ThreadTask {
     bool finished = false;
 };
 
+struct MethodProfileAccumulator {
+    const ClassFile* cls = nullptr;
+    const MethodInfo* method = nullptr;
+    uint32_t calls = 0;
+    uint64_t totalUs = 0;
+    uint32_t maxUs = 0;
+};
+
+struct NamedProfileAccumulator {
+    std::string label;
+    uint32_t calls = 0;
+    uint64_t totalUs = 0;
+    uint32_t maxUs = 0;
+};
+
 struct Runtime {
     const JvmHost* host = nullptr;
     MidletSession* session = nullptr;
@@ -279,6 +294,11 @@ struct Runtime {
     int graphicsHeight = 0;
     int graphicsColorRgb = 0x000000;
     ExecutionTrace trace;
+    std::vector<MethodProfileAccumulator, SramAllocator<MethodProfileAccumulator>> taskMethodProfiles;
+    std::vector<NamedProfileAccumulator, SramAllocator<NamedProfileAccumulator>> taskNativeProfiles;
+    uint32_t pendingYieldRethrowStartUs = 0;
+    bool yieldRequested = false;
+    uint32_t yieldMillis = 0;
     size_t steps = 0;
     bool repaintRequested = true;
 };
@@ -683,6 +703,96 @@ void captureDisplayableFields(ExecutionTrace& trace, const Runtime& rt, const He
     }
 }
 
+void recordTaskMethodProfile(
+    Runtime& rt,
+    const ClassFile& cls,
+    const MethodInfo& method,
+    uint32_t elapsedUs) {
+    for (MethodProfileAccumulator& entry : rt.taskMethodProfiles) {
+        if (entry.cls == &cls && entry.method == &method) {
+            ++entry.calls;
+            entry.totalUs += elapsedUs;
+            if (elapsedUs > entry.maxUs) entry.maxUs = elapsedUs;
+            return;
+        }
+    }
+    rt.taskMethodProfiles.push_back(MethodProfileAccumulator{&cls, &method, 1, elapsedUs, elapsedUs});
+}
+
+void captureTaskMethodProfiles(Runtime& rt) {
+    if (rt.taskMethodProfiles.empty()) return;
+
+    std::vector<const MethodProfileAccumulator*> sorted;
+    sorted.reserve(rt.taskMethodProfiles.size());
+    for (const MethodProfileAccumulator& entry : rt.taskMethodProfiles) {
+        sorted.push_back(&entry);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const MethodProfileAccumulator* a, const MethodProfileAccumulator* b) {
+                  return a->totalUs > b->totalUs;
+              });
+
+    const uint8_t limit = rt.host != nullptr ? rt.host->profileTaskMethodLimit : 10;
+    const size_t count = sorted.size() < limit ? sorted.size() : limit;
+    rt.trace.taskMethodProfiles.clear();
+    rt.trace.taskMethodProfiles.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const MethodProfileAccumulator& entry = *sorted[i];
+        rt.trace.taskMethodProfiles.push_back(MethodProfile{
+            methodLabel(*entry.cls, *entry.method),
+            entry.calls,
+            entry.totalUs,
+            entry.maxUs,
+        });
+    }
+}
+
+void recordTaskNativeProfile(Runtime& rt, const MethodRef& ref, uint32_t elapsedUs) {
+    const std::string label = callName(ref);
+    for (NamedProfileAccumulator& entry : rt.taskNativeProfiles) {
+        if (entry.label == label) {
+            ++entry.calls;
+            entry.totalUs += elapsedUs;
+            if (elapsedUs > entry.maxUs) entry.maxUs = elapsedUs;
+            return;
+        }
+    }
+    rt.taskNativeProfiles.push_back(NamedProfileAccumulator{label, 1, elapsedUs, elapsedUs});
+}
+
+void captureTaskNativeProfiles(Runtime& rt) {
+    if (rt.taskNativeProfiles.empty()) return;
+
+    std::vector<const NamedProfileAccumulator*> sorted;
+    sorted.reserve(rt.taskNativeProfiles.size());
+    for (const NamedProfileAccumulator& entry : rt.taskNativeProfiles) {
+        sorted.push_back(&entry);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const NamedProfileAccumulator* a, const NamedProfileAccumulator* b) {
+                  return a->totalUs > b->totalUs;
+              });
+
+    const uint8_t limit = rt.host != nullptr ? rt.host->profileTaskMethodLimit : 10;
+    const size_t count = sorted.size() < limit ? sorted.size() : limit;
+    rt.trace.taskNativeProfiles.clear();
+    rt.trace.taskNativeProfiles.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const NamedProfileAccumulator& entry = *sorted[i];
+        rt.trace.taskNativeProfiles.push_back(MethodProfile{
+            entry.label,
+            entry.calls,
+            entry.totalUs,
+            entry.maxUs,
+        });
+    }
+}
+
+void requestThreadYield(Runtime& rt, uint32_t millis) {
+    rt.yieldRequested = true;
+    rt.yieldMillis = millis;
+}
+
 Value internString(Runtime& rt, const std::string& text) {
     auto internIt = rt.internedStrings.find(text);
     if (internIt != rt.internedStrings.end() && rt.strings.find(internIt->second) != rt.strings.end()) {
@@ -912,6 +1022,30 @@ std::optional<Value> resumeCurrentMethod(
     Frame& frame = runtimeFrame.frame;
     size_t pc = runtimeFrame.pc;
 
+    struct ScopedTaskMethodProfile {
+        Runtime& rt;
+        const ClassFile& cls;
+        const MethodInfo& method;
+        uint32_t startedUs;
+        bool active;
+
+        ~ScopedTaskMethodProfile() {
+            if (!active) return;
+            const uint32_t endedUs = nowUs();
+            if (rt.pendingYieldRethrowStartUs != 0) {
+                rt.trace.frameProfile.taskYieldUnwindUs += endedUs - rt.pendingYieldRethrowStartUs;
+                rt.pendingYieldRethrowStartUs = 0;
+            }
+            recordTaskMethodProfile(rt, cls, method, endedUs - startedUs);
+        }
+    } taskMethodProfile{
+        rt,
+        cls,
+        method,
+        (rt.host != nullptr && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0u,
+        rt.host != nullptr && rt.host->profileTaskMethods && rt.currentTask != nullptr,
+    };
+
     auto finish = [&](std::optional<Value> result) -> std::optional<Value> {
         rt.callStack.pop_back();
         return result;
@@ -941,7 +1075,8 @@ std::optional<Value> resumeCurrentMethod(
             },
             [&](uint32_t millis) {
                 if (rt.currentTask != nullptr) {
-                    throw YieldThreadSleep{millis};
+                    requestThreadYield(rt, millis);
+                    return;
                 }
                 if (rt.host != nullptr) {
                     rt.host->sleepMillis(millis);
@@ -1010,7 +1145,12 @@ std::optional<Value> resumeCurrentMethod(
 
     // When no host is attached (or host has no stats to collect) skip all
     // per-bytecode nowUs() calls: each costs ~6µs and there are ~13 000/frame.
-    const bool kCollectStats = (rt.host != nullptr && rt.host->collectBytecodeStats);
+    const bool kCollectStats =
+#if JVM_ENABLE_BYTECODE_PROFILING
+        (rt.host != nullptr && rt.host->collectBytecodeStats);
+#else
+        false;
+#endif
     // Zero-cost wrapper: returns nowUs() only when stats are active, 0 otherwise.
     // "if (kCollectStats)" is a compile-time-predictable branch; the nowUs() call
     // is completely absent from the hot path when kCollectStats==false.
@@ -1025,7 +1165,9 @@ std::optional<Value> resumeCurrentMethod(
             captureStackSnapshot(rt.trace, rt.callStack);
             return finish(std::nullopt);
         }
-        if (rt.host != nullptr) ++rt.host->bytecodeSteps;
+#if JVM_ENABLE_BYTECODE_PROFILING
+        if (rt.host != nullptr && rt.host->collectBytecodeStats) ++rt.host->bytecodeSteps;
+#endif
 
         uint8_t op = code[pc];
         switch (op) {
@@ -1555,16 +1697,38 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.receiverClassName = {};
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
-                        const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+                        const uint32_t tN =
+#if JVM_ENABLE_NATIVE_PROFILING
+                            (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+#else
+                            0;
+#endif
+                        const uint32_t tTaskNative =
+                            (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
                         try {
                             nativeResult = handleNativeStaticCall(
                                 sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
+                            if (tTaskNative != 0) {
+                                recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
+                            }
                             pc += 3;
                             runtimeFrame.pc = pc;
+                            rt.pendingYieldRethrowStartUs =
+                                (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
                             throw;
                         }
+                        if (tTaskNative != 0) {
+                            recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
+                        }
+#if JVM_ENABLE_NATIVE_PROFILING
                         if (tN) rt.host->nativeStats[nativeRef.className + "." + nativeRef.name].record(nowUs() - tN);
+#endif
+                        if (rt.yieldRequested) {
+                            pc += 3;
+                            runtimeFrame.pc = pc;
+                            return std::nullopt;
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1578,9 +1742,12 @@ std::optional<Value> resumeCurrentMethod(
                         }
                     } else {
                         runtimeFrame.pc = pc;
-                        const uint32_t tDisp0 = nowUs() - t0inv;
+                        const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
+                        if (rt.yieldRequested) {
+                            return std::nullopt;
+                        }
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -1693,18 +1860,40 @@ std::optional<Value> resumeCurrentMethod(
                         }
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
-                        const uint32_t tN = (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+                        const uint32_t tN =
+#if JVM_ENABLE_NATIVE_PROFILING
+                            (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+#else
+                            0;
+#endif
+                        const uint32_t tTaskNative =
+                            (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
                         sharedNativeCtx.tProfT0 = tN;
                         sharedNativeCtx.tProfTEntry = 0;
                         try {
                             nativeResult = handleNativeInstanceCall(
                                 sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
+                            if (tTaskNative != 0) {
+                                recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
+                            }
                             pc += op == 0xb9 ? 5 : 3;
                             runtimeFrame.pc = pc;
+                            rt.pendingYieldRethrowStartUs =
+                                (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
                             throw;
                         }
+                        if (tTaskNative != 0) {
+                            recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
+                        }
+#if JVM_ENABLE_NATIVE_PROFILING
                         if (tN) rt.host->nativeStats[nativeRef.className + "." + nativeRef.name].record(nowUs() - tN);
+#endif
+                        if (rt.yieldRequested) {
+                            pc += op == 0xb9 ? 5 : 3;
+                            runtimeFrame.pc = pc;
+                            return std::nullopt;
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1718,9 +1907,12 @@ std::optional<Value> resumeCurrentMethod(
                         }
                     } else {
                         runtimeFrame.pc = pc;
-                        const uint32_t tDisp0 = nowUs() - t0inv;
+                        const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
+                        if (rt.yieldRequested) {
+                            return std::nullopt;
+                        }
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -1877,6 +2069,11 @@ void resetRuntimeTrace(Runtime& rt) {
     bool recording = rt.trace.recording;
     rt.trace = ExecutionTrace{};
     rt.trace.recording = recording;
+    rt.taskMethodProfiles.clear();
+    rt.taskNativeProfiles.clear();
+    rt.pendingYieldRethrowStartUs = 0;
+    rt.yieldRequested = false;
+    rt.yieldMillis = 0;
     rt.steps = 0;
     rt.callStack.clear();
     rt.graphicsFramebuffer = nullptr;
@@ -1983,29 +2180,76 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
 
 ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width, int height) {
     Runtime& rt = session.runtime();
+    const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
+    const uint32_t profileStartUs = profileFrame ? nowUs() : 0;
     resetRuntimeTrace(rt);
+    const bool captureTraceDetails = rt.trace.recording || profileFrame;
     ScopedResourceReadTrace resourceReadTrace(rt.trace);
     rt.graphicsFramebuffer = pixels;
     rt.graphicsWidth = width;
     rt.graphicsHeight = height;
+    auto finishProfile = [&]() -> ExecutionTrace {
+        if (profileFrame && rt.host != nullptr) {
+            rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
+            rt.trace.frameProfile.steps = static_cast<uint32_t>(rt.steps);
+            captureTaskMethodProfiles(rt);
+            captureTaskNativeProfiles(rt);
+            rt.host->recordFrameProfile(
+                rt.trace.frameProfile,
+                rt.trace.taskMethodProfiles,
+                rt.trace.taskNativeProfiles);
+        }
+        return rt.trace;
+    };
+    auto captureSuspendedForTrace = [&]() {
+        if (!captureTraceDetails) {
+            return;
+        }
+        const uint32_t suspendedTraceStartUs = profileFrame ? nowUs() : 0;
+        captureSuspendedTasks(rt.trace, session);
+        if (profileFrame) {
+            rt.trace.frameProfile.suspendedTraceUs += nowUs() - suspendedTraceStartUs;
+        }
+    };
 
     if (!session.started()) {
         return startSession(session);
     }
 
+    const uint32_t inputStartUs = profileFrame ? nowUs() : 0;
     if (rt.host != nullptr) {
-        for (const HostKeyEvent& event : rt.host->drainInputEvents()) {
+        std::vector<HostKeyEvent> inputEvents = rt.host->drainInputEvents();
+        if (profileFrame) {
+            rt.trace.frameProfile.inputEvents = static_cast<uint16_t>(
+                inputEvents.size() > 0xffffu ? 0xffffu : inputEvents.size());
+        }
+        for (const HostKeyEvent& event : inputEvents) {
             dispatchCanvasKeyEvent(session, event);
         }
     }
+    if (profileFrame) {
+        rt.trace.frameProfile.inputUs = nowUs() - inputStartUs;
+    }
 
+    const uint32_t tasksStartUs = profileFrame ? nowUs() : 0;
     const uint32_t now = rt.host != nullptr ? rt.host->millis() : 0;
     for (ThreadTask& task : session.tasks()) {
-        if (task.finished || now < task.wakeAtMillis) {
+        if (task.finished) {
+            continue;
+        }
+        if (now < task.wakeAtMillis) {
+            if (profileFrame) {
+                ++rt.trace.frameProfile.taskSkippedSleeping;
+            }
             continue;
         }
 
+        if (profileFrame) {
+            ++rt.trace.frameProfile.taskRuns;
+        }
         rt.currentTask = &task;
+        const uint32_t taskInvokeStartUs = profileFrame ? nowUs() : 0;
+        bool taskYielded = false;
         try {
             if (task.suspendedFrame.has_value()) {
                 rt.callStack.push_back(std::move(*task.suspendedFrame));
@@ -2015,32 +2259,101 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 std::vector<Value> taskArgs = {task.receiver};
                 (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
             }
-            task.finished = true;
+            if (rt.yieldRequested) {
+                const uint32_t yieldStartUs = profileFrame ? nowUs() : 0;
+                if (profileFrame) {
+                    rt.trace.frameProfile.taskInvokeUs += yieldStartUs - taskInvokeStartUs;
+                    ++rt.trace.frameProfile.taskSleepYields;
+                    rt.trace.frameProfile.taskSleepRequestedMs += rt.yieldMillis;
+                }
+                taskYielded = true;
+                task.wakeAtMillis = now + rt.yieldMillis;
+                if (!rt.callStack.empty()) {
+                    const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
+                    task.suspendedFrame = std::move(rt.callStack.back());
+                    rt.callStack.pop_back();
+                    if (profileFrame) {
+                        rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
+                    }
+                }
+                rt.yieldRequested = false;
+                rt.yieldMillis = 0;
+                if (profileFrame) {
+                    rt.trace.frameProfile.taskCatchUs += nowUs() - yieldStartUs;
+                }
+            } else {
+                task.finished = true;
+            }
         } catch (const YieldThreadSleep& request) {
+            const uint32_t catchStartUs = profileFrame ? nowUs() : 0;
+            if (profileFrame) {
+                rt.trace.frameProfile.taskInvokeUs += catchStartUs - taskInvokeStartUs;
+                ++rt.trace.frameProfile.taskSleepYields;
+                rt.trace.frameProfile.taskSleepRequestedMs += request.millis;
+            }
+            taskYielded = true;
             task.wakeAtMillis = now + request.millis;
             if (!rt.callStack.empty()) {
+                const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
                 task.suspendedFrame = std::move(rt.callStack.back());
                 rt.callStack.pop_back();
+                if (profileFrame) {
+                    rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
+                }
+            }
+            if (profileFrame) {
+                rt.trace.frameProfile.taskCatchUs += nowUs() - catchStartUs;
             }
         }
+        if (profileFrame && !taskYielded) {
+            rt.trace.frameProfile.taskInvokeUs += nowUs() - taskInvokeStartUs;
+        }
         rt.currentTask = nullptr;
+        const uint32_t clearStartUs = profileFrame ? nowUs() : 0;
         rt.callStack.clear();
+        if (profileFrame) {
+            rt.trace.frameProfile.taskClearUs += nowUs() - clearStartUs;
+        }
+    }
+    if (profileFrame) {
+        rt.trace.frameProfile.tasksUs = nowUs() - tasksStartUs;
     }
 
+    const uint32_t displayLookupStartUs = profileFrame ? nowUs() : 0;
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
     if (!displayableId.has_value()) {
-        captureSuspendedTasks(rt.trace, session);
-        return rt.trace;
+        if (profileFrame) {
+            rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
+        }
+        captureSuspendedForTrace();
+        return finishProfile();
     }
     auto displayableIt = rt.heap.find(*displayableId);
     if (displayableIt == rt.heap.end()) {
-        captureSuspendedTasks(rt.trace, session);
-        return rt.trace;
+        if (profileFrame) {
+            rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
+        }
+        captureSuspendedForTrace();
+        return finishProfile();
+    }
+    if (profileFrame) {
+        rt.trace.frameProfile.displayableFound = true;
     }
     rt.trace.currentDisplayableClass = displayableIt->second.className;
-    captureDisplayableFields(rt.trace, rt, displayableIt->second);
+    if (profileFrame) {
+        rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
+    }
+
+    if (captureTraceDetails) {
+        const uint32_t displayTraceStartUs = profileFrame ? nowUs() : 0;
+        captureDisplayableFields(rt.trace, rt, displayableIt->second);
+        if (profileFrame) {
+            rt.trace.frameProfile.displayTraceUs = nowUs() - displayTraceStartUs;
+        }
+    }
 
     const std::vector<ClassFile>& classes = session.classes();
+    const uint32_t paintLookupStartUs = profileFrame ? nowUs() : 0;
     const ClassFile* paintOwner = nullptr;
     const MethodInfo* paint = findMethodInHierarchy(
         classes,
@@ -2048,23 +2361,34 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         "paint",
         "(Ljavax/microedition/lcdui/Graphics;)V",
         &paintOwner);
+    if (profileFrame) {
+        rt.trace.frameProfile.paintLookupUs = nowUs() - paintLookupStartUs;
+        rt.trace.frameProfile.repaintRequested = rt.repaintRequested;
+    }
     if (!rt.repaintRequested) {
-        captureSuspendedTasks(rt.trace, session);
-        return rt.trace;
+        captureSuspendedForTrace();
+        return finishProfile();
     }
 
+    const uint32_t paintStartUs = profileFrame ? nowUs() : 0;
     if (paintOwner != nullptr && paint != nullptr) {
+        if (profileFrame) {
+            rt.trace.frameProfile.paintCalled = true;
+        }
         std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
         (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)});
     }
+    if (profileFrame) {
+        rt.trace.frameProfile.paintUs = nowUs() - paintStartUs;
+    }
     rt.repaintRequested = false;
 
-    captureSuspendedTasks(rt.trace, session);
+    captureSuspendedForTrace();
 
-    return rt.trace;
+    return finishProfile();
 }
 
 } // namespace

@@ -131,6 +131,38 @@ struct ImageLoad {
     int height = 0;
 };
 
+struct FrameProfile {
+    uint32_t renderSessionUs = 0;
+    uint32_t inputUs = 0;
+    uint32_t tasksUs = 0;
+    uint32_t taskInvokeUs = 0;
+    uint32_t taskYieldUnwindUs = 0;
+    uint32_t taskCatchUs = 0;
+    uint32_t taskSuspendSaveUs = 0;
+    uint32_t taskClearUs = 0;
+    uint32_t displayLookupUs = 0;
+    uint32_t displayTraceUs = 0;
+    uint32_t paintLookupUs = 0;
+    uint32_t paintUs = 0;
+    uint32_t suspendedTraceUs = 0;
+    uint32_t steps = 0;
+    uint16_t inputEvents = 0;
+    uint16_t taskRuns = 0;
+    uint16_t taskSkippedSleeping = 0;
+    uint16_t taskSleepYields = 0;
+    uint32_t taskSleepRequestedMs = 0;
+    bool repaintRequested = false;
+    bool paintCalled = false;
+    bool displayableFound = false;
+};
+
+struct MethodProfile {
+    std::string methodLabel;
+    uint32_t calls = 0;
+    uint64_t totalUs = 0;
+    uint32_t maxUs = 0;
+};
+
 struct ExecutionTrace {
     bool recording = true;
     std::vector<LocalWrite> localWrites;
@@ -151,8 +183,11 @@ struct ExecutionTrace {
     std::vector<ResourceRead> resourceReads;
     std::vector<std::string> stackSnapshot;
     std::vector<std::string> suspendedTasks;
+    std::vector<MethodProfile> taskMethodProfiles;
+    std::vector<MethodProfile> taskNativeProfiles;
     std::string currentDisplayableClass;
     std::vector<std::string> currentDisplayableFields;
+    FrameProfile frameProfile;
     bool stepLimitHit = false;
 };
 

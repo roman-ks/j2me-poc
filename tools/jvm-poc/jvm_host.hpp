@@ -5,7 +5,18 @@
 #include <unordered_map>
 #include <vector>
 
+#ifndef JVM_ENABLE_NATIVE_PROFILING
+#define JVM_ENABLE_NATIVE_PROFILING 0
+#endif
+
+#ifndef JVM_ENABLE_BYTECODE_PROFILING
+#define JVM_ENABLE_BYTECODE_PROFILING 0
+#endif
+
 namespace jvmpoc {
+
+struct FrameProfile;
+struct MethodProfile;
 
 struct DrawCallStats {
     uint32_t count = 0;
@@ -43,6 +54,10 @@ public:
     virtual int screenHeight() const = 0;
     virtual uint32_t millis() const = 0;
     virtual void sleepMillis(uint32_t /*ms*/) const {}
+    virtual void recordFrameProfile(
+        const FrameProfile& /*profile*/,
+        const std::vector<MethodProfile>& /*taskMethods*/,
+        const std::vector<MethodProfile>& /*taskNatives*/) const {}
     virtual void present(const uint16_t* pixels, int width, int height) = 0;
 
     // Per-frame draw stats accumulated by native graphics handlers.
@@ -74,6 +89,12 @@ public:
     // Per-native-method profiling (only active when profileNatives == true)
     bool profileNatives = false;
     mutable std::unordered_map<std::string, DrawCallStats> nativeStats;
+
+    // Coarse per-render JVM timings. Keep this off for baseline runs; it adds
+    // nowUs() calls and trace capture around scheduler/paint phases.
+    bool profileFrameTimings = false;
+    bool profileTaskMethods = false;
+    uint8_t profileTaskMethodLimit = 10;
 
     virtual void handlePress(int keyCode) {
         inputEvents_.push_back(HostKeyEvent{HostKeyEventType::Press, keyCode});
