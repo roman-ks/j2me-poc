@@ -25,6 +25,7 @@ public:
     // Must be at least screenWidth * screenHeight elements. If not set, an
     // internal heap-allocated buffer is used.
     void setExternalFramebuffer(uint16_t* ptr, size_t size);
+    void setTraceRecording(bool enabled);
     const ExecutionTrace& lastTrace() const { return lastTrace_; }
     const std::string& midletClassName() const { return midletClassName_; }
 

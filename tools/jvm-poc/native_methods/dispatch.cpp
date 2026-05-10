@@ -3,8 +3,27 @@
 #include "handlers.hpp"
 #include "helpers.hpp"
 #include "../method_resolution.hpp"
+#include "../jvm_host.hpp"
+
+#ifdef ESP32_BUILD
+#include <esp_timer.h>
+#else
+#include <chrono>
+#endif
 
 namespace jvmpoc {
+
+namespace {
+inline uint32_t nowUs() {
+#ifdef ESP32_BUILD
+    return static_cast<uint32_t>(esp_timer_get_time());
+#else
+    return static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
+} // namespace
 
 NativeCallResult handleNativeStaticCall(
     NativeCallContext& ctx,
@@ -41,7 +60,16 @@ NativeCallResult handleNativeInstanceCall(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+    // Record function-entry time for disp_call measurement.
+#if JVM_ENABLE_NATIVE_PROFILING
+    if (ctx.tProfT0) {
+        ctx.tProfTEntry = nowUs();
+        if (ctx.host) ctx.host->drawImageDispCallStats.record(ctx.tProfTEntry - ctx.tProfT0);
+    }
+#endif
+    // Use a reference to avoid copying the Value (which holds a heap std::string for object refs).
+    static const Value kMissingReceiver = Value::named("<missing-receiver>");
+    const Value& receiver = args.empty() ? kMissingReceiver : args[0];
 
     if (ref.className == "javax/microedition/midlet/MIDlet") {
         return native_methods::handleMidlet(ctx, methodLabel, pc, ref, args);
@@ -52,6 +80,9 @@ NativeCallResult handleNativeInstanceCall(
     }
 
     if (ref.className == "javax/microedition/lcdui/Graphics") {
+#if JVM_ENABLE_NATIVE_PROFILING
+        if (ctx.tProfTEntry && ctx.host) ctx.host->drawImageDispFnStats.record(nowUs() - ctx.tProfTEntry);
+#endif
         return native_methods::handleGraphics(ctx, methodLabel, pc, ref, args);
     }
 

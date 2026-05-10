@@ -11,7 +11,8 @@ NativeCallResult handleCanvas(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    Value receiver = args.empty() ? Value::named("<missing-receiver>") : args[0];
+    static const Value kMissingReceiver = Value::named("<missing-receiver>");
+    const Value& receiver = args.empty() ? kMissingReceiver : args[0];
 
     if (ref.name == "<init>" && ref.descriptor == "()V") {
         return handledVoid();
@@ -21,7 +22,7 @@ NativeCallResult handleCanvas(
         const int value = ref.name == "getWidth"
             ? (ctx.host != nullptr ? ctx.host->screenWidth() : 240)
             : (ctx.host != nullptr ? ctx.host->screenHeight() : 320);
-        ctx.trace.canvasSizeQueries.push_back(CanvasSizeQuery{
+        if (ctx.trace.recording) ctx.trace.canvasSizeQueries.push_back(CanvasSizeQuery{
             methodLabel,
             pc,
             receiver,
