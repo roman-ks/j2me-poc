@@ -23,7 +23,9 @@ struct TestCase {
     std::vector<std::string> expectedDisplayCurrents;
     std::vector<std::string> expectedRenderGraphicsOps;
     bool midlet = false;
-    std::vector<std::pair<size_t, uint16_t>> expectedPixels;
+    std::vector<std::pair<size_t, uint16_t>> expectedPixels = {};
+    std::vector<std::string> expectedUncaughtExceptions = {};
+    std::vector<std::string> expectedThreadDeaths = {};
 };
 
 class TestHost final : public jvmpoc::JvmHost {
@@ -99,6 +101,22 @@ std::vector<std::string> graphicsOps(const jvmpoc::ExecutionTrace& trace) {
         ops.push_back(op.op);
     }
     return ops;
+}
+
+std::vector<std::string> uncaughtExceptions(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> exceptions;
+    for (const jvmpoc::UncaughtExceptionTrace& exception : trace.uncaughtExceptions) {
+        exceptions.push_back(exception.threadLabel + ":" + exception.exceptionClass);
+    }
+    return exceptions;
+}
+
+std::vector<std::string> threadDeaths(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> deaths;
+    for (const jvmpoc::ThreadDeathTrace& death : trace.threadDeaths) {
+        deaths.push_back(death.threadLabel + ":" + death.exceptionClass);
+    }
+    return deaths;
 }
 
 std::vector<std::string> appendAll(
@@ -242,6 +260,16 @@ bool runCase(const std::string& root, const TestCase& test) {
     ok = expectList(test.name, "freed strings", lastFreedStrings(trace), test.expectedFreedStrings) && ok;
     ok = expectList(test.name, "unknown calls", unknownCalls(trace), test.expectedUnknownCalls) && ok;
     ok = expectList(test.name, "display currents", displayCurrents(trace), test.expectedDisplayCurrents) && ok;
+    std::vector<std::string> allUncaught = appendAll(
+        uncaughtExceptions(trace),
+        uncaughtExceptions(renderTrace),
+        appendAll(uncaughtExceptions(pressTrace), uncaughtExceptions(releaseTrace), {}));
+    std::vector<std::string> allThreadDeaths = appendAll(
+        threadDeaths(trace),
+        threadDeaths(renderTrace),
+        appendAll(threadDeaths(pressTrace), threadDeaths(releaseTrace), {}));
+    ok = expectList(test.name, "uncaught exceptions", allUncaught, test.expectedUncaughtExceptions) && ok;
+    ok = expectList(test.name, "thread deaths", allThreadDeaths, test.expectedThreadDeaths) && ok;
     if (test.midlet) {
         ok = expectList(test.name, "render unknown calls", unknownCalls(renderTrace), test.expectedUnknownCalls) && ok;
         ok = expectList(test.name, "render graphics ops", graphicsOps(renderTrace), test.expectedRenderGraphicsOps) && ok;
@@ -459,6 +487,57 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+        },
+        TestCase{
+            "exception handling",
+            "dev/roman/hello/ExceptionHandling",
+            {
+                "dev/roman/hello/ExceptionHandling",
+                "dev/roman/hello/MarkerException",
+                "dev/roman/hello/ChildMarkerException",
+            },
+            {"exact", "parent", "miss-parent", "propagated", "finally-return", "3", "finally-throw", "finally-caught", "4"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            "uncaught exception",
+            "dev/roman/hello/ExceptionUncaught",
+            {"dev/roman/hello/ExceptionUncaught"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            false,
+            {},
+            {"<main>:java/lang/RuntimeException"},
+            {},
+        },
+        TestCase{
+            "uncaught thread exception",
+            "dev/roman/hello/ExceptionThreadMidlet",
+            {
+                "dev/roman/hello/ExceptionThreadMidlet",
+                "dev/roman/hello/ExceptionThreadTask",
+            },
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            true,
+            {{0, 0x39e7}},
+            {"dev/roman/hello/ExceptionThreadTask.run()V:java/lang/RuntimeException"},
+            {"dev/roman/hello/ExceptionThreadTask.run()V:java/lang/RuntimeException"},
         },
         TestCase{
             "long arithmetic",

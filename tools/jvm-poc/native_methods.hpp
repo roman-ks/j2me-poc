@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace jvmpoc {
@@ -52,6 +53,16 @@ struct NativeCallContext {
 struct NativeCallResult {
     bool handled = false;
     std::optional<Value> returnValue;
+    std::optional<Value> exception;
+
+    NativeCallResult() = default;
+    NativeCallResult(
+        bool handled,
+        std::optional<Value> returnValue = std::nullopt,
+        std::optional<Value> exception = std::nullopt)
+        : handled(handled),
+          returnValue(std::move(returnValue)),
+          exception(std::move(exception)) {}
 };
 
 NativeCallResult handleNativeStaticCall(

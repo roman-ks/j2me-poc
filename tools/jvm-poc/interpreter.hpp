@@ -163,6 +163,18 @@ struct MethodProfile {
     uint32_t maxUs = 0;
 };
 
+struct UncaughtExceptionTrace {
+    std::string threadLabel;
+    std::string methodLabel;
+    uint32_t pc = 0;
+    std::string exceptionClass;
+};
+
+struct ThreadDeathTrace {
+    std::string threadLabel;
+    std::string exceptionClass;
+};
+
 struct ExecutionTrace {
     bool recording = true;
     std::vector<LocalWrite> localWrites;
@@ -183,6 +195,8 @@ struct ExecutionTrace {
     std::vector<ResourceRead> resourceReads;
     std::vector<std::string> stackSnapshot;
     std::vector<std::string> suspendedTasks;
+    std::vector<UncaughtExceptionTrace> uncaughtExceptions;
+    std::vector<ThreadDeathTrace> threadDeaths;
     std::vector<MethodProfile> taskMethodProfiles;
     std::vector<MethodProfile> taskNativeProfiles;
     std::string currentDisplayableClass;

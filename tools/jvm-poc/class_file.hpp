@@ -48,6 +48,14 @@ struct MethodInfo {
         uint16_t index = 0;
     };
 
+    struct ExceptionHandler {
+        uint16_t startPc = 0;
+        uint16_t endPc = 0;
+        uint16_t handlerPc = 0;
+        uint16_t catchType = 0;
+        std::string catchClass;
+    };
+
     uint16_t access = 0;
     std::string name;
     std::string descriptor;
@@ -56,6 +64,7 @@ struct MethodInfo {
     uint16_t maxLocals = 0;
     uint32_t codeLength = 0;
     std::vector<uint8_t> code;
+    std::vector<ExceptionHandler> exceptionHandlers;
     std::vector<LocalVariable> locals;
 };
 

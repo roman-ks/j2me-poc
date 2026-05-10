@@ -36,5 +36,8 @@ Value Frame::pop() {
     return value;
 }
 
-} // namespace jvmpoc
+void Frame::clearStack() {
+    stack_.clear();
+}
 
+} // namespace jvmpoc

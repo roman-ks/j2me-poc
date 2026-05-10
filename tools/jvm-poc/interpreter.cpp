@@ -228,6 +228,7 @@ struct ThreadTask {
     std::optional<RuntimeFrame> suspendedFrame;
     uint32_t wakeAtMillis = 0;
     bool finished = false;
+    std::optional<Value> pendingException;
 };
 
 struct MethodProfileAccumulator {
@@ -296,6 +297,9 @@ struct Runtime {
     ExecutionTrace trace;
     std::vector<MethodProfileAccumulator, SramAllocator<MethodProfileAccumulator>> taskMethodProfiles;
     std::vector<NamedProfileAccumulator, SramAllocator<NamedProfileAccumulator>> taskNativeProfiles;
+    std::optional<Value> pendingException;
+    std::string pendingExceptionMethodLabel;
+    uint32_t pendingExceptionPc = 0;
     uint32_t pendingYieldRethrowStartUs = 0;
     bool yieldRequested = false;
     uint32_t yieldMillis = 0;
@@ -660,6 +664,90 @@ bool isReference(const Value& value) {
     return t == Value::kHandleObjTag || t == Value::kHandleArrTag;
 }
 
+std::string exceptionClassName(const Runtime& rt, const Value& exception) {
+    std::optional<uint32_t> id = objectId(exception);
+    if (!id.has_value()) {
+        return exception.asText();
+    }
+    auto objectIt = rt.heap.find(*id);
+    return objectIt == rt.heap.end() ? exception.asText() : objectIt->second.className;
+}
+
+void setPendingException(Runtime& rt, Value exception, const std::string& methodLabel, uint32_t pc) {
+    rt.pendingException = std::move(exception);
+    rt.pendingExceptionMethodLabel = methodLabel;
+    rt.pendingExceptionPc = pc;
+}
+
+void clearPendingException(Runtime& rt) {
+    rt.pendingException.reset();
+    rt.pendingExceptionMethodLabel.clear();
+    rt.pendingExceptionPc = 0;
+}
+
+const MethodInfo::ExceptionHandler* findExceptionHandler(
+    const Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const MethodInfo& method,
+    uint32_t throwPc) {
+    if (!rt.pendingException.has_value()) {
+        return nullptr;
+    }
+    const std::string thrownClass = exceptionClassName(rt, *rt.pendingException);
+    for (const MethodInfo::ExceptionHandler& handler : method.exceptionHandlers) {
+        if (throwPc < handler.startPc || throwPc >= handler.endPc) {
+            continue;
+        }
+        if (handler.catchType == 0 ||
+            isClassOrSubclassOf(classes, thrownClass, handler.catchClass)) {
+            return &handler;
+        }
+    }
+    return nullptr;
+}
+
+bool handlePendingExceptionAt(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const MethodInfo& method,
+    Frame& frame,
+    uint32_t throwPc,
+    size_t& pc) {
+    const MethodInfo::ExceptionHandler* handler =
+        findExceptionHandler(rt, classes, method, throwPc);
+    if (handler == nullptr) {
+        return false;
+    }
+    Value exception = *rt.pendingException;
+    clearPendingException(rt);
+    frame.clearStack();
+    frame.push(std::move(exception));
+    pc = handler->handlerPc;
+    return true;
+}
+
+void recordUncaughtException(Runtime& rt, const std::string& threadLabel) {
+    if (!rt.trace.recording || !rt.pendingException.has_value()) {
+        return;
+    }
+    rt.trace.uncaughtExceptions.push_back(UncaughtExceptionTrace{
+        threadLabel,
+        rt.pendingExceptionMethodLabel,
+        rt.pendingExceptionPc,
+        exceptionClassName(rt, *rt.pendingException),
+    });
+}
+
+void recordThreadDeath(Runtime& rt, const std::string& threadLabel) {
+    if (!rt.trace.recording || !rt.pendingException.has_value()) {
+        return;
+    }
+    rt.trace.threadDeaths.push_back(ThreadDeathTrace{
+        threadLabel,
+        exceptionClassName(rt, *rt.pendingException),
+    });
+}
+
 std::string debugValueText(const Runtime& rt, const Value& value) {
     std::optional<uint32_t> id = objectId(value);
     if (id.has_value()) {
@@ -864,6 +952,9 @@ void collectGarbage(Runtime& rt, std::string when) {
     for (const auto& field : rt.staticFields) {
         addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays);
     }
+    if (rt.pendingException.has_value()) {
+        addRoot(report, "pendingException", *rt.pendingException, rt, markedObjects, markedArrays);
+    }
     for (const RuntimeFrame& runtimeFrame : rt.callStack) {
         const Frame::ValueVec& locals = runtimeFrame.frame.locals();
         for (size_t i = 0; i < locals.size(); ++i) {
@@ -877,6 +968,9 @@ void collectGarbage(Runtime& rt, std::string when) {
     }
     if (rt.session != nullptr) {
         for (const ThreadTask& task : rt.session->tasks()) {
+            if (task.pendingException.has_value()) {
+                addRoot(report, "task pendingException", *task.pendingException, rt, markedObjects, markedArrays);
+            }
             if (!task.suspendedFrame.has_value()) {
                 continue;
             }
@@ -975,7 +1069,7 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         return;
     }
     if (rt.session != nullptr) {
-        rt.session->tasks().push_back(ThreadTask{owner, run, runnable, std::nullopt, 0, false});
+        rt.session->tasks().push_back(ThreadTask{owner, run, runnable, std::nullopt, 0, false, std::nullopt});
         return;
     }
     std::vector<Value> runArgs = {runnable};
@@ -1060,6 +1154,14 @@ std::optional<Value> resumeCurrentMethod(
         Value value = frame.pop();
         frame.setLocal(index, value);
         recordLocal(index, writePc, value, "store");
+    };
+
+    auto catchPendingException = [&](uint32_t throwPc) {
+        if (!handlePendingExceptionAt(rt, classes, method, frame, throwPc, pc)) {
+            return false;
+        }
+        runtimeFrame.pc = pc;
+        return true;
     };
 
     auto makeNativeContext = [&]() {
@@ -1729,6 +1831,18 @@ std::optional<Value> resumeCurrentMethod(
                             runtimeFrame.pc = pc;
                             return std::nullopt;
                         }
+                        if (nativeResult.exception.has_value()) {
+                            setPendingException(rt, *nativeResult.exception, label, callPc);
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(callPc)) {
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            }
+                            runtimeFrame.pc = callPc;
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            return finish(std::nullopt);
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1747,6 +1861,15 @@ std::optional<Value> resumeCurrentMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
                         if (rt.yieldRequested) {
                             return std::nullopt;
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(callPc)) {
+                                if(t0inv) rt.host->invokeStats.record(tDisp0);
+                                break;
+                            }
+                            runtimeFrame.pc = callPc;
+                            if(t0inv) rt.host->invokeStats.record(tDisp0);
+                            return finish(std::nullopt);
                         }
                         if (result.has_value()) {
                             frame.push(*result);
@@ -1894,6 +2017,18 @@ std::optional<Value> resumeCurrentMethod(
                             runtimeFrame.pc = pc;
                             return std::nullopt;
                         }
+                        if (nativeResult.exception.has_value()) {
+                            setPendingException(rt, *nativeResult.exception, label, static_cast<uint32_t>(pc));
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            }
+                            runtimeFrame.pc = pc;
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            return finish(std::nullopt);
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1913,6 +2048,15 @@ std::optional<Value> resumeCurrentMethod(
                         if (rt.yieldRequested) {
                             return std::nullopt;
                         }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                if(t0inv) rt.host->invokeStats.record(tDisp0);
+                                break;
+                            }
+                            runtimeFrame.pc = pc;
+                            if(t0inv) rt.host->invokeStats.record(tDisp0);
+                            return finish(std::nullopt);
+                        }
                         if (result.has_value()) {
                             frame.push(*result);
                         }
@@ -1924,6 +2068,18 @@ std::optional<Value> resumeCurrentMethod(
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
                     NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, rt.callArgsBuf);
                     if (builtInResult.handled) {
+                        if (builtInResult.exception.has_value()) {
+                            setPendingException(rt, *builtInResult.exception, label, static_cast<uint32_t>(pc));
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            }
+                            runtimeFrame.pc = pc;
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            return finish(std::nullopt);
+                        }
                         if (builtInResult.returnValue.has_value()) {
                             frame.push(*builtInResult.returnValue);
                         }
@@ -2020,6 +2176,20 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
+            case 0xbf: {
+                const uint32_t throwPc = static_cast<uint32_t>(pc);
+                Value exception = frame.pop();
+                if (exception.isNull()) {
+                    exception = allocateObject(rt, classes, label, throwPc, "java/lang/NullPointerException");
+                }
+                setPendingException(rt, std::move(exception), label, throwPc);
+                if (catchPendingException(throwPc)) {
+                    break;
+                }
+                runtimeFrame.pc = throwPc;
+                return finish(std::nullopt);
+            }
+
             case 0xac:
             case 0xad:
             case 0xb0: {
@@ -2071,6 +2241,7 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.trace.recording = recording;
     rt.taskMethodProfiles.clear();
     rt.taskNativeProfiles.clear();
+    clearPendingException(rt);
     rt.pendingYieldRethrowStartUs = 0;
     rt.yieldRequested = false;
     rt.yieldMillis = 0;
@@ -2119,6 +2290,11 @@ ExecutionTrace startSession(MidletSession& session) {
     if (init != nullptr) {
         std::vector<Value> initArgs = {session.midletRef()};
         (void)executeMethod(classes, *midletClass, *init, initArgs, rt, 0);
+        if (rt.pendingException.has_value()) {
+            recordUncaughtException(rt, "<midlet-init>");
+            clearPendingException(rt);
+            return rt.trace;
+        }
     } else {
         MethodRef ref{midletClass->thisClass, "<init>", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
@@ -2129,6 +2305,10 @@ ExecutionTrace startSession(MidletSession& session) {
     if (startOwner != nullptr && startApp != nullptr) {
         std::vector<Value> startArgs = {session.midletRef()};
         (void)executeMethod(classes, *startOwner, *startApp, startArgs, rt, 0);
+        if (rt.pendingException.has_value()) {
+            recordUncaughtException(rt, "<midlet-start>");
+            clearPendingException(rt);
+        }
     } else {
         MethodRef ref{midletClass->thisClass, "startApp", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
@@ -2175,6 +2355,10 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         keyArgs,
         rt,
         0);
+    if (rt.pendingException.has_value()) {
+        recordUncaughtException(rt, "<input>");
+        clearPendingException(rt);
+    }
     rt.repaintRequested = true;
 }
 
@@ -2248,6 +2432,11 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             ++rt.trace.frameProfile.taskRuns;
         }
         rt.currentTask = &task;
+        rt.pendingException = task.pendingException;
+        task.pendingException.reset();
+        std::string taskLabel = task.method != nullptr
+            ? task.cls->thisClass + "." + task.method->name + task.method->descriptor
+            : std::string("<task>");
         const uint32_t taskInvokeStartUs = profileFrame ? nowUs() : 0;
         bool taskYielded = false;
         try {
@@ -2259,7 +2448,14 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 std::vector<Value> taskArgs = {task.receiver};
                 (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
             }
-            if (rt.yieldRequested) {
+            if (rt.pendingException.has_value()) {
+                recordUncaughtException(rt, taskLabel);
+                recordThreadDeath(rt, taskLabel);
+                task.finished = true;
+                clearPendingException(rt);
+                rt.yieldRequested = false;
+                rt.yieldMillis = 0;
+            } else if (rt.yieldRequested) {
                 const uint32_t yieldStartUs = profileFrame ? nowUs() : 0;
                 if (profileFrame) {
                     rt.trace.frameProfile.taskInvokeUs += yieldStartUs - taskInvokeStartUs;
@@ -2308,6 +2504,10 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         if (profileFrame && !taskYielded) {
             rt.trace.frameProfile.taskInvokeUs += nowUs() - taskInvokeStartUs;
         }
+        if (taskYielded) {
+            task.pendingException = rt.pendingException;
+        }
+        clearPendingException(rt);
         rt.currentTask = nullptr;
         const uint32_t clearStartUs = profileFrame ? nowUs() : 0;
         rt.callStack.clear();
@@ -2377,6 +2577,10 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         }
         std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
         (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);
+        if (rt.pendingException.has_value()) {
+            recordUncaughtException(rt, "<paint>");
+            clearPendingException(rt);
+        }
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)});
@@ -2421,6 +2625,10 @@ ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const 
     rt.callStack.reserve(kMaxCallDepth + 1);
     std::vector<Value> emptyArgs;
     (void)executeMethod(classes, cls, method, emptyArgs, rt, 0);
+    if (rt.pendingException.has_value()) {
+        recordUncaughtException(rt, "<main>");
+        clearPendingException(rt);
+    }
     return rt.trace;
 }
 

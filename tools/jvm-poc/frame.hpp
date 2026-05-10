@@ -28,6 +28,7 @@ public:
     const Value& local(uint16_t index) const; // returns ref into locals_ — no copy on push sites
     void push(Value value);
     Value pop(); // uses std::move from stack_.back() — no copy
+    void clearStack();
     const ValueVec& locals() const { return locals_; }
     const ValueVec& stack() const { return stack_; }
 

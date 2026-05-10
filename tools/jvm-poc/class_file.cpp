@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <stdexcept>
+#include <utility>
 
 namespace jvmpoc {
 namespace {
@@ -138,7 +139,18 @@ MethodInfo readMethod(Reader& r, const std::vector<CpEntry>& cp) {
         method.code = code.bytes(method.codeLength);
 
         uint16_t exceptionTableLength = code.u2();
-        code.skip(static_cast<size_t>(exceptionTableLength) * 8);
+        method.exceptionHandlers.reserve(exceptionTableLength);
+        for (uint16_t j = 0; j < exceptionTableLength; ++j) {
+            MethodInfo::ExceptionHandler handler;
+            handler.startPc = code.u2();
+            handler.endPc = code.u2();
+            handler.handlerPc = code.u2();
+            handler.catchType = code.u2();
+            if (handler.catchType != 0) {
+                handler.catchClass = className(cp, handler.catchType);
+            }
+            method.exceptionHandlers.push_back(std::move(handler));
+        }
 
         uint16_t codeAttributesCount = code.u2();
         for (uint16_t j = 0; j < codeAttributesCount; ++j) {
