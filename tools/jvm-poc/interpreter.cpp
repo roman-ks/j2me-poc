@@ -33,7 +33,6 @@ constexpr size_t kMaxSteps = 100000;
 constexpr size_t kMaxCallDepth = 64;
 constexpr uint16_t kAccNative = 0x0100;
 constexpr const char* kClassHandlePrefix = "class:";
-constexpr const char* kResourceStreamHandlePrefix = "resource-stream:";
 
 uint32_t branchTarget(size_t pc, int16_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
@@ -482,6 +481,63 @@ Value allocateArray(Runtime& rt, const std::string& label, uint32_t pc, size_t l
 std::optional<uint32_t> objectId(const Value& value);
 std::optional<uint32_t> arrayId(const Value& value);
 
+bool writeFieldValue(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const Value& object,
+    const std::string& fieldName,
+    Value value) {
+    std::optional<uint32_t> id = objectId(object);
+    if (!id.has_value()) {
+        return false;
+    }
+    auto objectIt = rt.heap.find(*id);
+    if (objectIt == rt.heap.end() || objectIt->second.cls == nullptr) {
+        return false;
+    }
+
+    HeapObject& obj = objectIt->second;
+    buildFieldSlots(rt, classes, *obj.cls);
+    auto slotCacheIt = rt.fieldSlotCache.find(obj.cls);
+    if (slotCacheIt == rt.fieldSlotCache.end()) {
+        return false;
+    }
+    auto nameIt = slotCacheIt->second.find(fieldName);
+    if (nameIt == slotCacheIt->second.end()) {
+        return false;
+    }
+
+    const uint16_t slot = nameIt->second;
+    if (slot >= obj.fields.size()) {
+        obj.fields.resize(slot + 1);
+    }
+    obj.fields[slot] = std::move(value);
+    return true;
+}
+
+Value allocateByteArrayInputStream(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const std::string& label,
+    uint32_t pc,
+    const std::vector<uint8_t>& data) {
+    Value buffer = allocateArray(rt, label, pc, data.size());
+    std::optional<uint32_t> bufferId = arrayId(buffer);
+    if (bufferId.has_value()) {
+        std::vector<Value>& values = rt.arrays[*bufferId];
+        for (size_t i = 0; i < data.size(); ++i) {
+            values[i] = Value::ofInt(static_cast<int>(static_cast<int8_t>(data[i])));
+        }
+    }
+
+    Value stream = allocateObject(rt, classes, label, pc, "java/io/ByteArrayInputStream");
+    writeFieldValue(rt, classes, stream, "buf", buffer);
+    writeFieldValue(rt, classes, stream, "pos", Value::ofInt(0));
+    writeFieldValue(rt, classes, stream, "mark", Value::ofInt(0));
+    writeFieldValue(rt, classes, stream, "count", Value::ofInt(static_cast<int32_t>(data.size())));
+    return stream;
+}
+
 Value allocateMultiArray(
     Runtime& rt,
     const std::string& label,
@@ -560,7 +616,11 @@ void storeArrayElement(
     if (rt.trace.recording) rt.trace.arrayWrites.push_back(ArrayWrite{label, pc, arrayValue, indexValue, value});
 }
 
-NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, const std::vector<Value>& args) {
+NativeCallResult handleBuiltInInstanceCall(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const MethodRef& ref,
+    const std::vector<Value>& args) {
     if (ref.className == "java/lang/Object" && ref.name == "getClass" &&
         ref.descriptor == "()Ljava/lang/Class;") {
         std::string className = ref.className;
@@ -577,34 +637,14 @@ NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, co
     if (ref.className == "java/lang/Class" && ref.name == "getResourceAsStream" &&
         ref.descriptor == "(Ljava/lang/String;)Ljava/io/InputStream;") {
         std::string path = args.size() > 1 ? runtimeString(rt, args[1]).value_or(args[1].asText()) : "";
-        return NativeCallResult{true, path.empty()
-            ? std::optional<Value>(Value::named("0"))
-            : std::optional<Value>(Value::named(std::string(kResourceStreamHandlePrefix) + path))};
-    }
-
-    if (ref.className == "java/io/InputStream" && ref.name == "read" && ref.descriptor == "([B)I") {
-        if (args.size() < 2) {
+        if (path.empty()) {
             return NativeCallResult{true, Value::named("0")};
         }
-
-        std::optional<std::string> path = parseTextHandle(args[0], kResourceStreamHandlePrefix);
-        std::optional<uint32_t> id = arrayId(args[1]);
-        auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
-        if (!path.has_value() || !id.has_value() || arrayIt == rt.arrays.end()) {
-            return NativeCallResult{true, Value::named("0")};
-        }
-
         std::vector<uint8_t> data;
-        if (!port::readResourceAll(*path, data) || data.empty()) {
+        if (!port::readResourceAll(path, data)) {
             return NativeCallResult{true, Value::named("0")};
         }
-
-        const int count = std::min(static_cast<int>(arrayIt->second.size()), static_cast<int>(data.size()));
-        for (int i = 0; i < count; ++i) {
-            arrayIt->second[static_cast<size_t>(i)] =
-                Value::named(std::to_string(static_cast<int>(static_cast<int8_t>(data[static_cast<size_t>(i)]))));
-        }
-        return NativeCallResult{true, Value::named(std::to_string(count))};
+        return NativeCallResult{true, allocateByteArrayInputStream(rt, classes, "<resource>", 0, data)};
     }
 
     return NativeCallResult{};
@@ -1531,9 +1571,109 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
-            case 0x92:
+            case 0x78:
+            case 0x7a:
+            case 0x7c:
+            case 0x7e:
+            case 0x80:
+            case 0x82: {
+                const uint32_t t0arith = statNow();
+                Value rhsValue = frame.pop();
+                Value lhsValue = frame.pop();
+                std::optional<int> rhs = parseIntValue(rhsValue);
+                std::optional<int> lhs = parseIntValue(lhsValue);
+                if (lhs.has_value() && rhs.has_value()) {
+                    switch (op) {
+                        case 0x78: frame.push(Value::ofInt(*lhs << (*rhs & 0x1f))); break;
+                        case 0x7a: frame.push(Value::ofInt(*lhs >> (*rhs & 0x1f))); break;
+                        case 0x7c: frame.push(Value::ofInt(static_cast<int32_t>(static_cast<uint32_t>(*lhs) >> (*rhs & 0x1f)))); break;
+                        case 0x7e: frame.push(Value::ofInt(*lhs & *rhs)); break;
+                        case 0x80: frame.push(Value::ofInt(*lhs | *rhs)); break;
+                        case 0x82: frame.push(Value::ofInt(*lhs ^ *rhs)); break;
+                    }
+                } else {
+                    frame.push(Value::named("<int-bitop>"));
+                }
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
                 ++pc;
                 break;
+            }
+
+            case 0x79:
+            case 0x7b:
+            case 0x7d: {
+                const uint32_t t0arith = statNow();
+                Value rhsValue = frame.pop();
+                Value lhsValue = frame.pop();
+                std::optional<int> rhs = parseIntValue(rhsValue);
+                std::optional<long long> lhs = parseLongValue(lhsValue);
+                if (lhs.has_value() && rhs.has_value()) {
+                    switch (op) {
+                        case 0x79: frame.push(Value::ofLong(*lhs << (*rhs & 0x3f))); break;
+                        case 0x7b: frame.push(Value::ofLong(*lhs >> (*rhs & 0x3f))); break;
+                        case 0x7d: frame.push(Value::ofLong(static_cast<int64_t>(static_cast<uint64_t>(*lhs) >> (*rhs & 0x3f)))); break;
+                    }
+                } else {
+                    frame.push(Value::named("<long-shift>"));
+                }
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
+                ++pc;
+                break;
+            }
+
+            case 0x7f:
+            case 0x81:
+            case 0x83: {
+                const uint32_t t0arith = statNow();
+                Value rhsValue = frame.pop();
+                Value lhsValue = frame.pop();
+                std::optional<long long> rhs = parseLongValue(rhsValue);
+                std::optional<long long> lhs = parseLongValue(lhsValue);
+                if (lhs.has_value() && rhs.has_value()) {
+                    switch (op) {
+                        case 0x7f: frame.push(Value::ofLong(*lhs & *rhs)); break;
+                        case 0x81: frame.push(Value::ofLong(*lhs | *rhs)); break;
+                        case 0x83: frame.push(Value::ofLong(*lhs ^ *rhs)); break;
+                    }
+                } else {
+                    frame.push(Value::named("<long-bitop>"));
+                }
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
+                ++pc;
+                break;
+            }
+
+            case 0x85: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofLong(*parsed) : Value::named("<i2l:" + value.asText() + ">"));
+                ++pc;
+                break;
+            }
+
+            case 0x91: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<int8_t>(*parsed)) : value);
+                ++pc;
+                break;
+            }
+
+            case 0x92: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<uint16_t>(*parsed)) : value);
+                ++pc;
+                break;
+            }
+
+            case 0x93: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<int16_t>(*parsed)) : value);
+                ++pc;
+                break;
+            }
 
             case 0x94: {
                 Value rhs = frame.pop();
@@ -2066,7 +2206,7 @@ std::optional<Value> resumeCurrentMethod(
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
-                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, rt.callArgsBuf);
+                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, classes, ref, rt.callArgsBuf);
                     if (builtInResult.handled) {
                         if (builtInResult.exception.has_value()) {
                             setPendingException(rt, *builtInResult.exception, label, static_cast<uint32_t>(pc));

@@ -489,6 +489,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "boot DataInputStream",
+            "dev/roman/hello/DataInputStreamBoot",
+            {"dev/roman/hello/DataInputStreamBoot"},
+            {"16909060", "5", "test", "98", "eof"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "exception handling",
             "dev/roman/hello/ExceptionHandling",
             {

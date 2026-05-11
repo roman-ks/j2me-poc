@@ -16,4 +16,14 @@ public class RecordStore {
         // Placeholder implementation
         return 0;
     }
+
+    public void setRecord(int recordId, byte[] newData,
+                          int offset, int numBytes) throws RecordStoreException {
+        // Placeholder implementation
+    }
+
+    public byte[] getRecord(int recordId) throws RecordStoreException {
+        // Placeholder implementation
+        return new byte[0];
+    }
 }
