@@ -501,6 +501,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "boot RecordStore",
+            "dev/roman/hello/RecordStoreBoot",
+            {"dev/roman/hello/RecordStoreBoot"},
+            {"1", "4", "3", "98"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "exception handling",
             "dev/roman/hello/ExceptionHandling",
             {

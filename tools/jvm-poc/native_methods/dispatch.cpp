@@ -51,6 +51,10 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleThread(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "javax/microedition/rms/RecordStore") {
+        return native_methods::handleRecordStore(ctx, methodLabel, pc, ref, args);
+    }
+
     return NativeCallResult{};
 }
 
@@ -104,6 +108,10 @@ NativeCallResult handleNativeInstanceCall(
 
     if (ref.className == "java/lang/Thread") {
         return native_methods::handleThread(ctx, methodLabel, pc, ref, args);
+    }
+
+    if (ref.className == "javax/microedition/rms/RecordStore") {
+        return native_methods::handleRecordStore(ctx, methodLabel, pc, ref, args);
     }
 
     return NativeCallResult{};
