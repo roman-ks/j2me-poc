@@ -1651,6 +1651,14 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
+            case 0x88: {
+                Value value = frame.pop();
+                std::optional<long long> parsed = parseLongValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<int32_t>(*parsed)) : Value::named("<l2i:" + value.asText() + ">"));
+                ++pc;
+                break;
+            }
+
             case 0x91: {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);

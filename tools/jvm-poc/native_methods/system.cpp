@@ -2,7 +2,26 @@
 
 #include "helpers.hpp"
 
+#ifdef ESP32_BUILD
+#include <esp_timer.h>
+#else
+#include <chrono>
+#endif
+
 namespace jvmpoc::native_methods {
+namespace {
+
+int64_t currentTimeMillis() {
+#ifdef ESP32_BUILD
+	return static_cast<int64_t>(esp_timer_get_time() / 1000);
+#else
+	return static_cast<int64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now().time_since_epoch()).count());
+#endif
+}
+
+} // namespace
 
 NativeCallResult handleSystem(
 	NativeCallContext& ctx,
@@ -15,6 +34,10 @@ NativeCallResult handleSystem(
 	if (ref.name == "gc" && ref.descriptor == "()V") {
 		ctx.collectGarbage(methodLabel + " pc=" + std::to_string(pc));
 		return handledVoid();
+	}
+
+	if (ref.name == "currentTimeMillis" && ref.descriptor == "()J") {
+		return handledValue(Value::ofLong(currentTimeMillis()));
 	}
 
 	if (ref.name == "arraycopy" && ref.descriptor == "(Ljava/lang/Object;ILjava/lang/Object;II)V") {

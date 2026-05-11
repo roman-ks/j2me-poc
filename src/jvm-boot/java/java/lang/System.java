@@ -7,5 +7,7 @@ public class System {
 
     public static native void gc();
 
+    public static native long currentTimeMillis();
+
     public static native void arraycopy(Object src, int srcPos, Object dest, int destPos, int length);
 }
