@@ -13,6 +13,7 @@ final class InputCanvas extends Canvas {
 
     protected void keyPressed(int keyCode) {
         NativeRuntime.printString("pressed:" + keyCode);
+        NativeRuntime.printString("left-code:" + getKeyCode(LEFT));
     }
 
     protected void keyReleased(int keyCode) {
