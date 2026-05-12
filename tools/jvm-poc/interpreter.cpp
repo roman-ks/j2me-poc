@@ -663,8 +663,15 @@ std::optional<Value> recordUnknownCall(
     }
 
     bool nooped = ref.name == "<init>" || !returnsValue(ref.descriptor);
+    std::string caller = label;
+    if (caller.empty() && !rt.callStack.empty()) {
+        const RuntimeFrame& frame = rt.callStack.back();
+        if (frame.cls != nullptr && frame.method != nullptr) {
+            caller = methodLabel(*frame.cls, *frame.method);
+        }
+    }
     rt.trace.unknownMethodCalls.push_back(UnknownMethodCall{
-        label,
+        caller,
         pc,
         callName(ref),
         args,
