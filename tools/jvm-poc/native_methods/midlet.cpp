@@ -14,6 +14,10 @@ NativeCallResult handleMidlet(
         return handledVoid();
     }
 
+    if (ref.name == "getAppProperty" && ref.descriptor == "(Ljava/lang/String;)Ljava/lang/String;") {
+        return handledValue(Value::named("0"));
+    }
+
     return NativeCallResult{};
 }
 

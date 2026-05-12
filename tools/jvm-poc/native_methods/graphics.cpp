@@ -149,6 +149,47 @@ NativeCallResult handleGraphics(
         return handledVoid();
     }
 
+    if (ref.name == "setClip" && ref.descriptor == "(IIII)V") {
+        int x = intArg(args, 1);
+        int y = intArg(args, 2);
+        int width = intArg(args, 3);
+        int height = intArg(args, 4);
+        std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
+        if (targetImage.has_value() && *targetImage == 0 && ctx.mainFbCanvas.has_value()) {
+            ctx.mainFbCanvas->setClip(x, y, width, height);
+        } else {
+            std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
+            if (canvas.has_value()) {
+                canvas->setClip(x, y, width, height);
+            }
+        }
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
+            methodLabel,
+            pc,
+            "setClip(" + argText(args, 1) + "," + argText(args, 2) + "," +
+                argText(args, 3) + "," + argText(args, 4) + ")",
+        });
+        return handledVoid();
+    }
+
+    if (ref.name == "drawLine" && ref.descriptor == "(IIII)V") {
+        int x1 = intArg(args, 1);
+        int y1 = intArg(args, 2);
+        int x2 = intArg(args, 3);
+        int y2 = intArg(args, 4);
+        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
+        if (canvas.has_value()) {
+            canvas->drawLine(x1, y1, x2, y2);
+        }
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
+            methodLabel,
+            pc,
+            "drawLine(" + argText(args, 1) + "," + argText(args, 2) + "," +
+                argText(args, 3) + "," + argText(args, 4) + ")",
+        });
+        return handledVoid();
+    }
+
     if (ref.name == "drawString" && ref.descriptor == "(Ljava/lang/String;III)V") {
         std::string text = stringArg(ctx, args, 1);
         int x = intArg(args, 2);

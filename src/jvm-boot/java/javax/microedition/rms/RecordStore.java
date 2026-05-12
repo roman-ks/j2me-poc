@@ -19,6 +19,15 @@ public class RecordStore {
         return new RecordStore(recordStoreName);
     }
 
+    public static void deleteRecordStore(String recordStoreName) throws RecordStoreException {
+        if (recordStoreName == null) {
+            throw new NullPointerException();
+        }
+        if (!delete0(recordStoreName)) {
+            throw new RecordStoreException();
+        }
+    }
+
     public int addRecord(byte[] data, int offset, int numBytes) throws RecordStoreException {
         checkOpen();
         int recordId = addRecord0(data, offset, numBytes);
@@ -65,6 +74,7 @@ public class RecordStore {
     }
 
     private static native boolean open0(String recordStoreName, boolean createIfNecessary);
+    private static native boolean delete0(String recordStoreName);
     private native int addRecord0(byte[] data, int offset, int numBytes);
     private native int getNumRecords0();
     private native boolean setRecord0(int recordId, byte[] newData, int offset, int numBytes);

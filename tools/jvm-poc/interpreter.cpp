@@ -34,7 +34,7 @@ constexpr size_t kMaxCallDepth = 64;
 constexpr uint16_t kAccNative = 0x0100;
 constexpr const char* kClassHandlePrefix = "class:";
 
-uint32_t branchTarget(size_t pc, int16_t offset) {
+uint32_t branchTarget(size_t pc, int32_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
 }
 
@@ -302,6 +302,7 @@ struct Runtime {
     uint32_t pendingYieldRethrowStartUs = 0;
     bool yieldRequested = false;
     uint32_t yieldMillis = 0;
+    bool stepLimitYieldEnabled = false;
     size_t steps = 0;
     bool repaintRequested = true;
 };
@@ -766,6 +767,13 @@ bool handlePendingExceptionAt(
     if (handler == nullptr) {
         return false;
     }
+    rt.trace.caughtExceptions.push_back(CaughtExceptionTrace{
+        rt.pendingExceptionMethodLabel,
+        rt.pendingExceptionPc,
+        methodLabel(*rt.callStack.back().cls, method),
+        handler->handlerPc,
+        exceptionClassName(rt, *rt.pendingException),
+    });
     Value exception = *rt.pendingException;
     clearPendingException(rt);
     frame.clearStack();
@@ -1324,6 +1332,10 @@ std::optional<Value> resumeCurrentMethod(
     while (pc < codeSize) {
         if (++rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
+            if (!rt.stepLimitYieldEnabled) {
+                rt.steps = 0;
+                continue;
+            }
             runtimeFrame.pc = pc;
             captureStackSnapshot(rt.trace, rt.callStack);
             requestThreadYield(rt, 1);
@@ -1776,6 +1788,83 @@ std::optional<Value> resumeCurrentMethod(
             case 0xa7: {
                 const uint32_t t0b=statNow();
                 pc = branchTarget(pc, codeS2(code, pc + 1));
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
+                break;
+            }
+
+            case 0xaa: {
+                const uint32_t t0b=statNow();
+                Value keyValue = frame.pop();
+                const int32_t key = parseIntValue(keyValue).value_or(0);
+                size_t table = pc + 1;
+                while ((table & 3u) != 0u) {
+                    ++table;
+                }
+                const int32_t defaultOffset = codeS4(code, table);
+                const int32_t low = codeS4(code, table + 4);
+                const int32_t high = codeS4(code, table + 8);
+                int32_t offset = defaultOffset;
+                if (key >= low && key <= high) {
+                    const size_t index = static_cast<size_t>(key - low);
+                    offset = codeS4(code, table + 12 + index * 4);
+                }
+                const uint32_t target = branchTarget(pc, offset);
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        "tableswitch " + keyValue.asText(),
+                        true,
+                        offset != defaultOffset || (key >= low && key <= high),
+                        target,
+                    });
+                }
+                pc = target;
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
+                break;
+            }
+
+            case 0xab: {
+                const uint32_t t0b=statNow();
+                Value keyValue = frame.pop();
+                const int32_t key = parseIntValue(keyValue).value_or(0);
+                size_t table = pc + 1;
+                while ((table & 3u) != 0u) {
+                    ++table;
+                }
+                const int32_t defaultOffset = codeS4(code, table);
+                const int32_t pairs = codeS4(code, table + 4);
+                const size_t pairsStart = table + 8;
+                int32_t offset = defaultOffset;
+                bool matched = false;
+                int32_t lo = 0;
+                int32_t hi = pairs - 1;
+                while (lo <= hi) {
+                    const int32_t mid = lo + ((hi - lo) >> 1);
+                    const size_t pair = pairsStart + static_cast<size_t>(mid) * 8;
+                    const int32_t match = codeS4(code, pair);
+                    if (key < match) {
+                        hi = mid - 1;
+                    } else if (key > match) {
+                        lo = mid + 1;
+                    } else {
+                        offset = codeS4(code, pair + 4);
+                        matched = true;
+                        break;
+                    }
+                }
+                const uint32_t target = branchTarget(pc, offset);
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        "lookupswitch " + keyValue.asText(),
+                        true,
+                        matched,
+                        target,
+                    });
+                }
+                pc = target;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
                 break;
             }
@@ -2621,6 +2710,8 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             : std::string("<task>");
         const uint32_t taskInvokeStartUs = profileFrame ? nowUs() : 0;
         bool taskYielded = false;
+        const bool previousStepLimitYieldEnabled = rt.stepLimitYieldEnabled;
+        rt.stepLimitYieldEnabled = true;
         try {
             if (!task.suspendedFrames.empty()) {
                 rt.callStack = std::move(task.suspendedFrames);
@@ -2685,6 +2776,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 rt.trace.frameProfile.taskCatchUs += nowUs() - catchStartUs;
             }
         }
+        rt.stepLimitYieldEnabled = previousStepLimitYieldEnabled;
         if (profileFrame && !taskYielded) {
             rt.trace.frameProfile.taskInvokeUs += nowUs() - taskInvokeStartUs;
         }

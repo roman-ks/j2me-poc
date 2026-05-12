@@ -170,6 +170,14 @@ struct UncaughtExceptionTrace {
     std::string exceptionClass;
 };
 
+struct CaughtExceptionTrace {
+    std::string throwMethodLabel;
+    uint32_t throwPc = 0;
+    std::string catchMethodLabel;
+    uint32_t catchPc = 0;
+    std::string exceptionClass;
+};
+
 struct ThreadDeathTrace {
     std::string threadLabel;
     std::string exceptionClass;
@@ -196,6 +204,7 @@ struct ExecutionTrace {
     std::vector<std::string> stackSnapshot;
     std::vector<std::string> suspendedTasks;
     std::vector<UncaughtExceptionTrace> uncaughtExceptions;
+    std::vector<CaughtExceptionTrace> caughtExceptions;
     std::vector<ThreadDeathTrace> threadDeaths;
     std::vector<MethodProfile> taskMethodProfiles;
     std::vector<MethodProfile> taskNativeProfiles;

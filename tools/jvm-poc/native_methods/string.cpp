@@ -2,6 +2,8 @@
 
 #include "helpers.hpp"
 
+#include <algorithm>
+
 namespace jvmpoc::native_methods {
 
 NativeCallResult handleString(
@@ -47,6 +49,62 @@ NativeCallResult handleString(
         return handledValue(id.has_value() && strIt != ctx.strings.end()
             ? Value::named(std::to_string(strIt->second.size()))
             : Value::named("<string-length:" + receiver.asText() + ">"));
+    }
+
+    if (ref.name == "charAt" && ref.descriptor == "(I)C") {
+        std::optional<uint32_t> id = stringObjectId(ctx, receiver);
+        auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
+        const int index = intArg(args, 1);
+        if (id.has_value() && strIt != ctx.strings.end() &&
+            index >= 0 && static_cast<size_t>(index) < strIt->second.size()) {
+            const unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(index)]);
+            return handledValue(Value::ofInt(static_cast<int32_t>(c)));
+        }
+        return handledValue(Value::ofInt(0));
+    }
+
+    if (ref.name == "indexOf" && ref.descriptor == "(II)I") {
+        std::optional<uint32_t> id = stringObjectId(ctx, receiver);
+        auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
+        int ch = intArg(args, 1);
+        int fromIndex = intArg(args, 2);
+        if (!id.has_value() || strIt == ctx.strings.end() || ch < 0 || ch > 255) {
+            return handledValue(Value::ofInt(-1));
+        }
+        if (fromIndex < 0) {
+            fromIndex = 0;
+        }
+        const std::string& text = strIt->second;
+        for (size_t i = static_cast<size_t>(fromIndex); i < text.size(); ++i) {
+            if (static_cast<unsigned char>(text[i]) == static_cast<unsigned char>(ch)) {
+                return handledValue(Value::ofInt(static_cast<int32_t>(i)));
+            }
+        }
+        return handledValue(Value::ofInt(-1));
+    }
+
+    if (ref.name == "compareTo" && ref.descriptor == "(Ljava/lang/String;)I") {
+        std::optional<uint32_t> leftId = stringObjectId(ctx, receiver);
+        std::optional<uint32_t> rightId = args.size() > 1 ? stringObjectId(ctx, args[1]) : std::nullopt;
+        auto leftIt = leftId.has_value() ? ctx.strings.find(*leftId) : ctx.strings.end();
+        auto rightIt = rightId.has_value() ? ctx.strings.find(*rightId) : ctx.strings.end();
+        if (!leftId.has_value() || leftIt == ctx.strings.end()) {
+            return handledValue(Value::ofInt(rightId.has_value() && rightIt != ctx.strings.end() ? -1 : 0));
+        }
+        if (!rightId.has_value() || rightIt == ctx.strings.end()) {
+            return handledValue(Value::ofInt(1));
+        }
+        const std::string& left = leftIt->second;
+        const std::string& right = rightIt->second;
+        const size_t count = std::min(left.size(), right.size());
+        for (size_t i = 0; i < count; ++i) {
+            const int diff = static_cast<int>(static_cast<unsigned char>(left[i])) -
+                static_cast<int>(static_cast<unsigned char>(right[i]));
+            if (diff != 0) {
+                return handledValue(Value::ofInt(diff));
+            }
+        }
+        return handledValue(Value::ofInt(static_cast<int32_t>(left.size()) - static_cast<int32_t>(right.size())));
     }
 
     if (ref.name == "getChars" && ref.descriptor == "(II[CI)V") {

@@ -6,6 +6,7 @@ import javax.microedition.rms.RecordStore;
 
 public final class RecordStoreBoot {
     public static void main(String[] args) throws Exception {
+        RecordStore.deleteRecordStore("boot-rms");
         RecordStore store = RecordStore.openRecordStore("boot-rms", true);
         ByteArrayOutputStream firstBytes = new ByteArrayOutputStream();
         DataOutputStream firstOut = new DataOutputStream(firstBytes);
@@ -33,5 +34,13 @@ public final class RecordStoreBoot {
         byte[] saved = reopened.getRecord(1);
         NativeRuntime.printInt(saved[0] * 10 + saved[1]);
         reopened.closeRecordStore();
+
+        RecordStore.deleteRecordStore("boot-rms");
+        try {
+            RecordStore.openRecordStore("boot-rms", false);
+            NativeRuntime.printString("delete-fail");
+        } catch (Exception expected) {
+            NativeRuntime.printString("deleted");
+        }
     }
 }

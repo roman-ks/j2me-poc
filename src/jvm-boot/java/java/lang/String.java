@@ -84,6 +84,10 @@ public final class String {
         return indexOf(value, 0);
     }
 
+    public int indexOf(int ch) {
+        return indexOf(ch, 0);
+    }
+
     public int indexOf(String value, int fromIndex) {
         if (value == null) {
             return -1;
@@ -115,6 +119,12 @@ public final class String {
         }
         return -1;
     }
+
+    public native char charAt(int index);
+
+    public native int indexOf(int ch, int fromIndex);
+
+    public native int compareTo(String anotherString);
 
     public native int length();
 

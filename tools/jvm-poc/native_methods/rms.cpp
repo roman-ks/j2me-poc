@@ -208,6 +208,25 @@ bool saveStore(const std::string& name, const RmsStore& store) {
     return writeFileAll(rmsPath(name), encodeStore(store));
 }
 
+bool deleteStoreFile(const std::string& name) {
+    const std::string path = rmsPath(name);
+    esp_gallery::Fs* fs = port::resourceFs();
+    if (fs == nullptr) {
+#if !defined(ESP32_BUILD)
+        std::error_code ec;
+        const bool removed = std::filesystem::remove(path, ec);
+        return removed || (!ec && !std::filesystem::exists(path, ec));
+#else
+        return false;
+#endif
+    }
+
+    if (!fs->exists(path.c_str())) {
+        return true;
+    }
+    return fs->remove(path.c_str());
+}
+
 std::string runtimeString(const NativeCallContext& ctx, const Value& value) {
     std::optional<uint32_t> id = stringObjectId(ctx, value);
     auto it = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
@@ -284,6 +303,11 @@ NativeCallResult handleRecordStore(
         }
         store.records.clear();
         return handledValue(Value::ofInt(saveStore(name, store) ? 1 : 0));
+    }
+
+    if (ref.name == "delete0" && ref.descriptor == "(Ljava/lang/String;)Z") {
+        const std::string name = args.empty() ? "" : runtimeString(ctx, args[0]);
+        return handledValue(Value::ofInt(deleteStoreFile(name) ? 1 : 0));
     }
 
     const std::string name = storeNameFromReceiver(ctx, args);

@@ -9,5 +9,11 @@ public class StringIndexOf {
         NativeRuntime.printInt(text.indexOf("|"));
         NativeRuntime.printInt(text.indexOf("|", 4));
         NativeRuntime.printInt(text.indexOf("missing"));
+        NativeRuntime.printInt(text.indexOf((int) '|', 4));
+        NativeRuntime.printInt(text.indexOf((int) 'x', 0));
+        NativeRuntime.printInt(text.charAt(4));
+        NativeRuntime.printInt("abc".compareTo("abc"));
+        NativeRuntime.printInt("abc".compareTo("abd"));
+        NativeRuntime.printInt("abc".compareTo("ab"));
     }
 }
