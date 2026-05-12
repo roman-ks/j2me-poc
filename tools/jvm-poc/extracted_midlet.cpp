@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace jvmpoc {
 namespace {
@@ -56,6 +57,18 @@ std::string manifestValue(const std::vector<std::string>& lines, const std::stri
         }
     }
     return "";
+}
+
+std::unordered_map<std::string, std::string> manifestProperties(const std::vector<std::string>& lines) {
+    std::unordered_map<std::string, std::string> props;
+    for (const std::string& line : lines) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos || colon == 0) {
+            continue;
+        }
+        props[trim(line.substr(0, colon))] = trim(line.substr(colon + 1));
+    }
+    return props;
 }
 
 std::string midletClassFromMidlet1(const std::string& value) {
@@ -134,10 +147,13 @@ ExtractedMidlet loadExtractedMidlet(const std::string& root, const std::string& 
 
     ExtractedMidlet result;
     result.root = root;
-    result.midletClass = midletOverride.empty() ? readMidletClassFromManifest(root) : classNameToInternal(midletOverride);
+    std::filesystem::path manifestPath = std::filesystem::path(root) / "META-INF" / "MANIFEST.MF";
+    std::vector<std::string> lines = manifestLines(manifestPath.string());
+    result.midletClass = midletOverride.empty() ? midletClassFromMidlet1(manifestValue(lines, "MIDlet-1")) : classNameToInternal(midletOverride);
     if (result.midletClass.empty()) {
         throw std::runtime_error("cannot infer MIDlet class from " + root + "/META-INF/MANIFEST.MF");
     }
+    result.appProperties = manifestProperties(lines);
 
     for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file() || !isClassFile(entry.path())) {

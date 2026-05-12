@@ -18,8 +18,12 @@ NativeCallResult handleDisplay(
     }
 
     if (ref.name == "setCurrent" && ref.descriptor == "(Ljavax/microedition/lcdui/Displayable;)V") {
+        Value previousDisplayable = ctx.currentDisplayable;
         ctx.currentDisplayable = args.size() > 1 ? args[1] : Value::named("0");
         ctx.requestRepaint();
+        if (ctx.notifyDisplayChanged) {
+            ctx.notifyDisplayChanged(previousDisplayable, ctx.currentDisplayable);
+        }
         ctx.trace.displaySetCurrents.push_back(DisplaySetCurrent{
             methodLabel,
             pc,

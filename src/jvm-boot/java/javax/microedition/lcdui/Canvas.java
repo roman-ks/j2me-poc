@@ -70,6 +70,19 @@ public abstract class Canvas extends Displayable {
         return gameAction;
     }
 
+    public int getGameAction(int keyCode) {
+        if (keyCode == -1) return UP;
+        if (keyCode == -2) return DOWN;
+        if (keyCode == -3) return LEFT;
+        if (keyCode == -4) return RIGHT;
+        if (keyCode == -5) return FIRE;
+        if (keyCode == -6) return GAME_A;
+        if (keyCode == -7) return GAME_B;
+        if (keyCode == KEY_STAR) return GAME_C;
+        if (keyCode == KEY_POUND) return GAME_D;
+        return 0;
+    }
+
     protected void keyPressed(int keyCode) {
     }
 

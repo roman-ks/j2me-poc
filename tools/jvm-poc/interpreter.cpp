@@ -815,38 +815,6 @@ std::string debugValueText(const Runtime& rt, const Value& value) {
     return value.asText();
 }
 
-void captureDisplayableFields(ExecutionTrace& trace, const Runtime& rt, const HeapObject& object) {
-    static const char* kInterestingFields[] = {
-        "screen",
-        "state",
-        "ani_step",
-        "p_mode",
-        "m_mode",
-        "game_on",
-        "t_game_on",
-        "msg",
-        "h_x",
-        "h_y",
-        "h_dir",
-        "auto_move",
-        "w_dir",
-        "stage",
-        "chap",
-    };
-
-    trace.currentDisplayableFields.clear();
-    for (const char* fieldName : kInterestingFields) {
-        auto slotCacheIt = rt.fieldSlotCache.find(object.cls);
-        if (slotCacheIt == rt.fieldSlotCache.end()) continue;
-        auto nameIt = slotCacheIt->second.find(fieldName);
-        if (nameIt == slotCacheIt->second.end()) continue;
-        uint16_t slot = nameIt->second;
-        if (slot >= object.fields.size() || !object.fields[slot].isInitialized()) continue;
-        trace.currentDisplayableFields.push_back(
-            std::string(fieldName) + "=" + debugValueText(rt, object.fields[slot]));
-    }
-}
-
 void recordTaskMethodProfile(
     Runtime& rt,
     const ClassFile& cls,
@@ -1233,6 +1201,29 @@ std::optional<Value> resumeCurrentMethod(
         return invokeOp == 0xb9 ? 5u : 3u;
     };
 
+    auto invokeDisplayableNotify = [&](const Value& displayable, const char* methodName) {
+        std::optional<uint32_t> id = objectId(displayable);
+        if (!id.has_value()) {
+            return;
+        }
+        auto objectIt = rt.heap.find(*id);
+        if (objectIt == rt.heap.end()) {
+            return;
+        }
+        const ClassFile* owner = nullptr;
+        const MethodInfo* notify = findMethodInHierarchy(
+            classes,
+            objectIt->second.className,
+            methodName,
+            "()V",
+            &owner);
+        if (owner == nullptr || notify == nullptr) {
+            return;
+        }
+        std::vector<Value> notifyArgs = {displayable};
+        (void)executeMethod(classes, *owner, *notify, notifyArgs, rt, depth + 1);
+    };
+
     auto makeNativeContext = [&]() {
         return NativeCallContext{
             rt.host,
@@ -1254,6 +1245,17 @@ std::optional<Value> resumeCurrentMethod(
                 }
             },
             [&]() {
+                rt.repaintRequested = true;
+            },
+            [&](const Value& oldDisplayable, const Value& newDisplayable) {
+                if (oldDisplayable.asText() == newDisplayable.asText()) {
+                    return;
+                }
+                invokeDisplayableNotify(oldDisplayable, "hideNotify");
+                if (rt.pendingException.has_value()) {
+                    return;
+                }
+                invokeDisplayableNotify(newDisplayable, "showNotify");
                 rt.repaintRequested = true;
             },
             rt.strings,
@@ -2818,14 +2820,6 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     rt.trace.currentDisplayableClass = displayableIt->second.className;
     if (profileFrame) {
         rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
-    }
-
-    if (captureTraceDetails) {
-        const uint32_t displayTraceStartUs = profileFrame ? nowUs() : 0;
-        captureDisplayableFields(rt.trace, rt, displayableIt->second);
-        if (profileFrame) {
-            rt.trace.frameProfile.displayTraceUs = nowUs() - displayTraceStartUs;
-        }
     }
 
     const std::vector<ClassFile>& classes = session.classes();

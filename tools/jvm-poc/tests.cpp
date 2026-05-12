@@ -740,6 +740,25 @@ int main(int argc, char** argv) {
             },
             true,
         },
+        TestCase{
+            "display notify lifecycle",
+            "dev/roman/hello/DisplayNotifyMidlet",
+            {"dev/roman/hello/DisplayNotifyMidlet", "dev/roman/hello/DisplayNotifyCanvas"},
+            {"first:show", "first:hide", "second:show"},
+            {},
+            {},
+            {},
+            {},
+            {"display#1.setCurrent(obj#2)", "display#1.setCurrent(obj#4)"},
+            {
+                "setColor(16777215)",
+                "fillRect(0,0,240,320)",
+                "setColor(0)",
+                "fillRect(0,0,1,1)",
+            },
+            true,
+            {{0, 0x0000}, {1, 0xffff}},
+        },
     };
 
     try {

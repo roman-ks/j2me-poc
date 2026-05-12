@@ -3,6 +3,7 @@
 #include "class_file.hpp"
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace jvmpoc {
@@ -12,6 +13,7 @@ struct ExtractedMidlet {
     std::string midletClass;
     std::vector<std::string> classFiles;
     std::vector<ClassFile> classes;
+    std::unordered_map<std::string, std::string> appProperties;
 };
 
 bool isDirectory(const std::string& path);

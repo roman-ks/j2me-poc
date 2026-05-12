@@ -209,7 +209,6 @@ struct ExecutionTrace {
     std::vector<MethodProfile> taskMethodProfiles;
     std::vector<MethodProfile> taskNativeProfiles;
     std::string currentDisplayableClass;
-    std::vector<std::string> currentDisplayableFields;
     FrameProfile frameProfile;
     bool stepLimitHit = false;
 };
