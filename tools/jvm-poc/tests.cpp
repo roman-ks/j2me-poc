@@ -32,7 +32,7 @@ class TestHost final : public jvmpoc::JvmHost {
 public:
     int screenWidth() const override { return 240; }
     int screenHeight() const override { return 320; }
-    uint32_t millis() const override { return 123; }
+    uint32_t millis() const override { return nowMillis; }
     void present(const uint16_t* pixels, int width, int height) override {
         lastPresentWidth = width;
         lastPresentHeight = height;
@@ -45,6 +45,7 @@ public:
     int lastPresentWidth = 0;
     int lastPresentHeight = 0;
     int presentCount = 0;
+    uint32_t nowMillis = 123;
     std::vector<uint16_t> lastPixels;
 };
 
@@ -287,6 +288,72 @@ bool runCase(const std::string& root, const TestCase& test) {
 
     if (ok) {
         std::cout << "PASS " << test.name << "\n";
+    }
+    return ok;
+}
+
+bool runStepLimitPreemptionCase(const std::string& root) {
+    const std::string testName = "step limit preempts task";
+    port::setResourceRoot(root + "/target/classes");
+
+    std::vector<jvmpoc::ClassFile> classes;
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/StepLimitMidlet")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/StepLimitTask")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/StepLimitCanvas")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NativeRuntime")));
+    jvmpoc::appendDefaultBootClasses(classes);
+
+    TestHost host;
+    jvmpoc::JvmMidletApp app(host);
+    app.setClasses(classes);
+    (void)app.start("dev/roman/hello/StepLimitMidlet");
+
+    jvmpoc::ExecutionTrace first = app.render();
+    host.nowMillis += 2;
+    jvmpoc::ExecutionTrace second = app.render();
+
+    bool ok = true;
+    if (!first.stepLimitHit || !second.stepLimitHit) {
+        std::cout << "FAIL " << testName << ": expected both render passes to hit step limit\n";
+        ok = false;
+    }
+    if (first.suspendedTasks.empty() || second.suspendedTasks.empty()) {
+        std::cout << "FAIL " << testName << ": expected spinning task to remain suspended\n";
+        ok = false;
+    }
+    if (!first.threadDeaths.empty() || !second.threadDeaths.empty()) {
+        std::cout << "FAIL " << testName << ": spinning task was marked dead\n";
+        ok = false;
+    }
+    if (ok) {
+        std::cout << "PASS " << testName << "\n";
+    }
+    return ok;
+}
+
+bool runNestedTaskSleepCase(const std::string& root) {
+    const std::string testName = "nested task sleep resumes stack";
+    port::setResourceRoot(root + "/target/classes");
+
+    std::vector<jvmpoc::ClassFile> classes;
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NestedSleepMidlet")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NestedSleepTask")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NativeRuntime")));
+    jvmpoc::appendDefaultBootClasses(classes);
+
+    TestHost host;
+    jvmpoc::JvmMidletApp app(host);
+    app.setClasses(classes);
+    (void)app.start("dev/roman/hello/NestedSleepMidlet");
+
+    jvmpoc::ExecutionTrace first = app.render();
+    host.nowMillis += 2;
+    jvmpoc::ExecutionTrace second = app.render();
+
+    const std::vector<std::string> stdout = appendAll(stdoutValues(first), stdoutValues(second), {});
+    const bool ok = expectList(testName, "stdout", stdout, {"before", "after"});
+    if (ok) {
+        std::cout << "PASS " << testName << "\n";
     }
     return ok;
 }
@@ -669,6 +736,12 @@ int main(int argc, char** argv) {
             if (!runCase(root, test)) {
                 ++failed;
             }
+        }
+        if (!runStepLimitPreemptionCase(root)) {
+            ++failed;
+        }
+        if (!runNestedTaskSleepCase(root)) {
+            ++failed;
         }
 
         if (failed != 0) {

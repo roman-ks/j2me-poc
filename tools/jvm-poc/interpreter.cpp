@@ -224,7 +224,7 @@ struct ThreadTask {
     const ClassFile* cls = nullptr;
     const MethodInfo* method = nullptr;
     Value receiver = Value::named("0");
-    std::optional<RuntimeFrame> suspendedFrame;
+    std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> suspendedFrames;
     uint32_t wakeAtMillis = 0;
     bool finished = false;
     std::optional<Value> pendingException;
@@ -415,8 +415,9 @@ void captureSuspendedTasks(ExecutionTrace& trace, const MidletSession& session) 
             ? task.cls->thisClass + "." + task.method->name + task.method->descriptor
             : std::string("<unknown-task>");
         state += " wake=" + std::to_string(task.wakeAtMillis);
-        if (task.suspendedFrame.has_value()) {
-            state += " suspended=" + task.suspendedFrame->label + " pc=" + std::to_string(task.suspendedFrame->pc);
+        if (!task.suspendedFrames.empty()) {
+            const RuntimeFrame& top = task.suspendedFrames.back();
+            state += " suspended=" + top.label + " pc=" + std::to_string(top.pc);
         }
         trace.suspendedTasks.push_back(std::move(state));
     }
@@ -921,6 +922,12 @@ void requestThreadYield(Runtime& rt, uint32_t millis) {
     rt.yieldMillis = millis;
 }
 
+void restoreCallStackReserve(Runtime& rt) {
+    if (rt.callStack.capacity() < kMaxCallDepth + 1) {
+        rt.callStack.reserve(kMaxCallDepth + 1);
+    }
+}
+
 Value internString(Runtime& rt, const std::string& text) {
     auto internIt = rt.internedStrings.find(text);
     if (internIt != rt.internedStrings.end() && rt.strings.find(internIt->second) != rt.strings.end()) {
@@ -1011,16 +1018,15 @@ void collectGarbage(Runtime& rt, std::string when) {
             if (task.pendingException.has_value()) {
                 addRoot(report, "task pendingException", *task.pendingException, rt, markedObjects, markedArrays);
             }
-            if (!task.suspendedFrame.has_value()) {
-                continue;
-            }
-            const Frame::ValueVec& locals = task.suspendedFrame->frame.locals();
-            for (size_t i = 0; i < locals.size(); ++i) {
-                addRoot(report, task.suspendedFrame->label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
-            }
-            const Frame::ValueVec& stack = task.suspendedFrame->frame.stack();
-            for (size_t i = 0; i < stack.size(); ++i) {
-                addRoot(report, task.suspendedFrame->label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+            for (const RuntimeFrame& runtimeFrame : task.suspendedFrames) {
+                const Frame::ValueVec& locals = runtimeFrame.frame.locals();
+                for (size_t i = 0; i < locals.size(); ++i) {
+                    addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
+                }
+                const Frame::ValueVec& stack = runtimeFrame.frame.stack();
+                for (size_t i = 0; i < stack.size(); ++i) {
+                    addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+                }
             }
         }
     }
@@ -1109,7 +1115,11 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         return;
     }
     if (rt.session != nullptr) {
-        rt.session->tasks().push_back(ThreadTask{owner, run, runnable, std::nullopt, 0, false, std::nullopt});
+        ThreadTask task;
+        task.cls = owner;
+        task.method = run;
+        task.receiver = runnable;
+        rt.session->tasks().push_back(std::move(task));
         return;
     }
     std::vector<Value> runArgs = {runnable};
@@ -1202,6 +1212,10 @@ std::optional<Value> resumeCurrentMethod(
         }
         runtimeFrame.pc = pc;
         return true;
+    };
+
+    auto invokeLength = [&](uint8_t invokeOp) -> size_t {
+        return invokeOp == 0xb9 ? 5u : 3u;
     };
 
     auto makeNativeContext = [&]() {
@@ -1305,7 +1319,8 @@ std::optional<Value> resumeCurrentMethod(
             rt.trace.stepLimitHit = true;
             runtimeFrame.pc = pc;
             captureStackSnapshot(rt.trace, rt.callStack);
-            return finish(std::nullopt);
+            requestThreadYield(rt, 1);
+            return std::nullopt;
         }
 #if JVM_ENABLE_BYTECODE_PROFILING
         if (rt.host != nullptr && rt.host->collectBytecodeStats) ++rt.host->bytecodeSteps;
@@ -2003,7 +2018,7 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
-                        runtimeFrame.pc = pc;
+                        runtimeFrame.pc = pc + 3;
                         const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
@@ -2189,7 +2204,7 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
-                        runtimeFrame.pc = pc;
+                        runtimeFrame.pc = pc + invokeLength(op);
                         const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
@@ -2395,6 +2410,7 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.yieldMillis = 0;
     rt.steps = 0;
     rt.callStack.clear();
+    restoreCallStackReserve(rt);
     rt.graphicsFramebuffer = nullptr;
     rt.graphicsWidth = 0;
     rt.graphicsHeight = 0;
@@ -2565,6 +2581,17 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
 
     const uint32_t tasksStartUs = profileFrame ? nowUs() : 0;
     const uint32_t now = rt.host != nullptr ? rt.host->millis() : 0;
+    auto resumeTaskStack = [&]() {
+        while (!rt.callStack.empty()) {
+            std::optional<Value> result = resumeCurrentMethod(session.classes(), rt, 0);
+            if (rt.yieldRequested || rt.pendingException.has_value()) {
+                return;
+            }
+            if (result.has_value() && !rt.callStack.empty()) {
+                rt.callStack.back().frame.push(*result);
+            }
+        }
+    };
     for (ThreadTask& task : session.tasks()) {
         if (task.finished) {
             continue;
@@ -2588,10 +2615,10 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         const uint32_t taskInvokeStartUs = profileFrame ? nowUs() : 0;
         bool taskYielded = false;
         try {
-            if (task.suspendedFrame.has_value()) {
-                rt.callStack.push_back(std::move(*task.suspendedFrame));
-                task.suspendedFrame.reset();
-                (void)resumeCurrentMethod(session.classes(), rt, 0);
+            if (!task.suspendedFrames.empty()) {
+                rt.callStack = std::move(task.suspendedFrames);
+                task.suspendedFrames.clear();
+                resumeTaskStack();
             } else if (task.cls != nullptr && task.method != nullptr) {
                 std::vector<Value> taskArgs = {task.receiver};
                 (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
@@ -2614,8 +2641,9 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 task.wakeAtMillis = now + rt.yieldMillis;
                 if (!rt.callStack.empty()) {
                     const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
-                    task.suspendedFrame = std::move(rt.callStack.back());
-                    rt.callStack.pop_back();
+                    task.suspendedFrames = std::move(rt.callStack);
+                    rt.callStack.clear();
+                    restoreCallStackReserve(rt);
                     if (profileFrame) {
                         rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
                     }
@@ -2639,8 +2667,9 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             task.wakeAtMillis = now + request.millis;
             if (!rt.callStack.empty()) {
                 const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
-                task.suspendedFrame = std::move(rt.callStack.back());
-                rt.callStack.pop_back();
+                task.suspendedFrames = std::move(rt.callStack);
+                rt.callStack.clear();
+                restoreCallStackReserve(rt);
                 if (profileFrame) {
                     rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
                 }
