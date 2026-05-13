@@ -32,9 +32,14 @@ std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& 
             if (imageIt == ctx.images.end()) {
                 return std::nullopt;
             }
-            port::Canvas canvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
-            canvas.setColor(ctx.graphicsColorRgb);
-            return canvas;
+            // Use cached canvas to preserve clip and other state across native calls.
+            auto cacheIt = ctx.imageCanvases.find(*targetImage);
+            if (cacheIt == ctx.imageCanvases.end()) {
+                port::Canvas newCanvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
+                cacheIt = ctx.imageCanvases.emplace(*targetImage, std::move(newCanvas)).first;
+            }
+            cacheIt->second.setColor(ctx.graphicsColorRgb);
+            return cacheIt->second;
         }
         // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — use cached canvas.
         if (ctx.mainFbCanvas.has_value()) {
@@ -157,6 +162,17 @@ NativeCallResult handleGraphics(
         std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
         if (targetImage.has_value() && *targetImage == 0 && ctx.mainFbCanvas.has_value()) {
             ctx.mainFbCanvas->setClip(x, y, width, height);
+        } else if (targetImage.has_value() && *targetImage != 0) {
+            // Persist clip on the cached image canvas so subsequent draw calls see it.
+            auto imageIt = ctx.images.find(*targetImage);
+            if (imageIt != ctx.images.end()) {
+                auto cacheIt = ctx.imageCanvases.find(*targetImage);
+                if (cacheIt == ctx.imageCanvases.end()) {
+                    port::Canvas newCanvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
+                    cacheIt = ctx.imageCanvases.emplace(*targetImage, std::move(newCanvas)).first;
+                }
+                cacheIt->second.setClip(x, y, width, height);
+            }
         } else {
             std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
             if (canvas.has_value()) {

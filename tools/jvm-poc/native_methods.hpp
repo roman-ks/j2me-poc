@@ -49,6 +49,10 @@ struct NativeCallContext {
     // Cached main-framebuffer Canvas — built once per executeMethod call,
     // reused by graphicsCanvas() for all ID=0 graphics targets.
     std::optional<port::Canvas> mainFbCanvas = std::nullopt;
+    // Cached canvases for image-backed Graphics objects (ID != 0),
+    // keyed by image ID. Preserves clip and color state across native calls
+    // within the same executeMethod invocation.
+    std::unordered_map<uint32_t, port::Canvas> imageCanvases;
 };
 
 struct NativeCallResult {

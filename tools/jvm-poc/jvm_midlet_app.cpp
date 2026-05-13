@@ -17,7 +17,6 @@ void JvmMidletApp::loadClasses(const std::vector<std::string>& classFiles) {
 
 void JvmMidletApp::setClasses(std::vector<ClassFile> classes) {
     classes_ = std::move(classes);
-    appendDefaultBootClasses(classes_);
 }
 
 const ExecutionTrace& JvmMidletApp::start(const std::string& className) {
