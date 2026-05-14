@@ -55,24 +55,61 @@ NativeCallResult handleSystem(
 			return handledVoid();
 		}
 
-		auto srcIt = ctx.arrays.find(*srcId);
-		auto destIt = ctx.arrays.find(*destId);
-		if (srcIt == ctx.arrays.end() || destIt == ctx.arrays.end() ||
-			*srcPos < 0 || *destPos < 0 || *length < 0 ||
-			*length > static_cast<int>(srcIt->second.size()) - *srcPos ||
-			*length > static_cast<int>(destIt->second.size()) - *destPos) {
+		auto srcPrimIt = ctx.primitiveArrays.find(*srcId);
+		auto dstPrimIt = ctx.primitiveArrays.find(*destId);
+		const bool srcPrim = (srcPrimIt != ctx.primitiveArrays.end());
+		const bool dstPrim = (dstPrimIt != ctx.primitiveArrays.end());
+		auto srcIt = !srcPrim ? ctx.arrays.find(*srcId) : ctx.arrays.end();
+		auto destIt = !dstPrim ? ctx.arrays.find(*destId) : ctx.arrays.end();
+		if ((!srcPrim && srcIt == ctx.arrays.end()) ||
+		    (!dstPrim && destIt == ctx.arrays.end())) {
 			return handledVoid();
 		}
 
-		if (*srcId == *destId && *destPos > *srcPos && *destPos < *srcPos + *length) {
-			for (int i = *length - 1; i >= 0; --i) {
-				destIt->second[static_cast<size_t>(*destPos + i)] =
-					srcIt->second[static_cast<size_t>(*srcPos + i)];
+		const size_t srcSize = srcPrim ? srcPrimIt->second.size() : srcIt->second.size();
+		const size_t dstSize = dstPrim ? dstPrimIt->second.size() : destIt->second.size();
+		if (*srcPos < 0 || *destPos < 0 || *length < 0 ||
+		    *length > static_cast<int>(srcSize) - *srcPos ||
+		    *length > static_cast<int>(dstSize) - *destPos) {
+			return handledVoid();
+		}
+
+		const bool overlap = (*srcId == *destId) && (*destPos > *srcPos) &&
+		                     (*destPos < *srcPos + *length);
+
+		if (srcPrim && dstPrim) {
+			auto& src = srcPrimIt->second;
+			auto& dst = dstPrimIt->second;
+			if (overlap) {
+				for (int i = *length - 1; i >= 0; --i)
+					dst[static_cast<size_t>(*destPos + i)] = src[static_cast<size_t>(*srcPos + i)];
+			} else {
+				for (int i = 0; i < *length; ++i)
+					dst[static_cast<size_t>(*destPos + i)] = src[static_cast<size_t>(*srcPos + i)];
+			}
+		} else if (!srcPrim && !dstPrim) {
+			if (overlap) {
+				for (int i = *length - 1; i >= 0; --i)
+					destIt->second[static_cast<size_t>(*destPos + i)] =
+						srcIt->second[static_cast<size_t>(*srcPos + i)];
+			} else {
+				for (int i = 0; i < *length; ++i)
+					destIt->second[static_cast<size_t>(*destPos + i)] =
+						srcIt->second[static_cast<size_t>(*srcPos + i)];
 			}
 		} else {
-			for (int i = 0; i < *length; ++i) {
-				destIt->second[static_cast<size_t>(*destPos + i)] =
-					srcIt->second[static_cast<size_t>(*srcPos + i)];
+			auto getI = [&](int i) -> int32_t {
+				return srcPrim ? srcPrimIt->second[static_cast<size_t>(*srcPos + i)]
+				               : parseIntValue(srcIt->second[static_cast<size_t>(*srcPos + i)]).value_or(0);
+			};
+			auto setI = [&](int i, int32_t v) {
+				if (dstPrim) dstPrimIt->second[static_cast<size_t>(*destPos + i)] = v;
+				else destIt->second[static_cast<size_t>(*destPos + i)] = Value::ofInt(v);
+			};
+			if (overlap) {
+				for (int i = *length - 1; i >= 0; --i) setI(i, getI(i));
+			} else {
+				for (int i = 0; i < *length; ++i) setI(i, getI(i));
 			}
 		}
 		return handledVoid();

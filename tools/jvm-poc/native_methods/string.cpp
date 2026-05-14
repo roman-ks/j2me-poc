@@ -21,22 +21,29 @@ NativeCallResult handleString(
         int offset = intArg(args, 2);
         int count = intArg(args, 3);
 
-        auto arrayIt = source.has_value() ? ctx.arrays.find(*source) : ctx.arrays.end();
-        if (!id.has_value() || !source.has_value() || arrayIt == ctx.arrays.end() || offset < 0 || count < 0) {
+        if (!id.has_value() || !source.has_value() || offset < 0 || count < 0) {
             return handledVoid();
         }
 
-        const std::vector<Value>& values = arrayIt->second;
+        auto primIt = ctx.primitiveArrays.find(*source);
+        auto arrayIt = ctx.arrays.find(*source);
+        const bool hasPrim = (primIt != ctx.primitiveArrays.end());
+        const bool hasValues = (arrayIt != ctx.arrays.end());
+        if (!hasPrim && !hasValues) {
+            return handledVoid();
+        }
+        const size_t totalSize = hasPrim ? primIt->second.size() : arrayIt->second.size();
         size_t begin = static_cast<size_t>(offset);
         size_t end = begin + static_cast<size_t>(count);
-        if (begin > values.size() || end > values.size()) {
+        if (begin > totalSize || end > totalSize) {
             return handledVoid();
         }
 
         std::string text;
         text.reserve(static_cast<size_t>(count));
         for (size_t index = begin; index < end; ++index) {
-            int ch = intArg(values, index);
+            int ch = hasPrim ? static_cast<int>(primIt->second[index])
+                             : intArg(arrayIt->second, static_cast<int>(index));
             text.push_back(static_cast<char>(ch & 0xff));
         }
         ctx.strings[*id] = std::move(text);
@@ -115,16 +122,28 @@ NativeCallResult handleString(
         int dstBegin = intArg(args, 4);
 
         auto strIt = string.has_value() ? ctx.strings.find(*string) : ctx.strings.end();
-        auto arrayIt = dst.has_value() ? ctx.arrays.find(*dst) : ctx.arrays.end();
-        if (string.has_value() && strIt != ctx.strings.end() &&
-            dst.has_value() && arrayIt != ctx.arrays.end() &&
-            srcBegin >= 0 && srcEnd >= srcBegin &&
-            static_cast<size_t>(srcEnd) <= strIt->second.size() &&
-            dstBegin >= 0 &&
-            static_cast<size_t>(dstBegin + (srcEnd - srcBegin)) <= arrayIt->second.size()) {
-            for (int i = srcBegin; i < srcEnd; ++i) {
-                unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(i)]);
-                arrayIt->second[static_cast<size_t>(dstBegin + i - srcBegin)] = Value::named(std::to_string(static_cast<int>(c)));
+        if (!string.has_value() || strIt == ctx.strings.end() || !dst.has_value() ||
+            srcBegin < 0 || srcEnd < srcBegin ||
+            static_cast<size_t>(srcEnd) > strIt->second.size() || dstBegin < 0) {
+            return handledVoid();
+        }
+        const int copyLen = srcEnd - srcBegin;
+        auto primIt = ctx.primitiveArrays.find(*dst);
+        if (primIt != ctx.primitiveArrays.end()) {
+            if (static_cast<size_t>(dstBegin + copyLen) <= primIt->second.size()) {
+                for (int i = 0; i < copyLen; ++i) {
+                    unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(srcBegin + i)]);
+                    primIt->second[static_cast<size_t>(dstBegin + i)] = static_cast<int32_t>(c);
+                }
+            }
+        } else {
+            auto arrayIt = ctx.arrays.find(*dst);
+            if (arrayIt != ctx.arrays.end() &&
+                static_cast<size_t>(dstBegin + copyLen) <= arrayIt->second.size()) {
+                for (int i = 0; i < copyLen; ++i) {
+                    unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(srcBegin + i)]);
+                    arrayIt->second[static_cast<size_t>(dstBegin + i)] = Value::named(std::to_string(static_cast<int>(c)));
+                }
             }
         }
         return handledVoid();

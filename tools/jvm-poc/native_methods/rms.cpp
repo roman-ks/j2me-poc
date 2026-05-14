@@ -247,12 +247,21 @@ bool bytesFromJavaArray(
     int length,
     std::vector<uint8_t>& out) {
     std::optional<uint32_t> id = arrayId(array);
-    auto it = id.has_value() ? ctx.arrays.find(*id) : ctx.arrays.end();
-    if (!id.has_value() || it == ctx.arrays.end() || offset < 0 || length < 0 ||
-        length > static_cast<int>(it->second.size()) - offset) {
+    if (!id.has_value() || offset < 0 || length < 0) {
         return false;
     }
-
+    auto primIt = ctx.primitiveArrays.find(*id);
+    if (primIt != ctx.primitiveArrays.end()) {
+        if (length > static_cast<int>(primIt->second.size()) - offset) return false;
+        out.resize(static_cast<size_t>(length));
+        for (int i = 0; i < length; ++i)
+            out[static_cast<size_t>(i)] = static_cast<uint8_t>(primIt->second[static_cast<size_t>(offset + i)] & 0xff);
+        return true;
+    }
+    auto it = ctx.arrays.find(*id);
+    if (it == ctx.arrays.end() || length > static_cast<int>(it->second.size()) - offset) {
+        return false;
+    }
     out.resize(static_cast<size_t>(length));
     for (int i = 0; i < length; ++i) {
         std::optional<int> value = parseIntValue(it->second[static_cast<size_t>(offset + i)]);
@@ -268,13 +277,22 @@ bool copyRecordToJavaArray(
     int offset,
     int length) {
     std::optional<uint32_t> id = arrayId(array);
-    auto it = id.has_value() ? ctx.arrays.find(*id) : ctx.arrays.end();
-    if (!id.has_value() || it == ctx.arrays.end() || offset < 0 || length < 0 ||
-        length > static_cast<int>(it->second.size()) - offset ||
+    if (!id.has_value() || offset < 0 || length < 0 ||
         length > static_cast<int>(record.size())) {
         return false;
     }
-
+    auto primIt = ctx.primitiveArrays.find(*id);
+    if (primIt != ctx.primitiveArrays.end()) {
+        if (length > static_cast<int>(primIt->second.size()) - offset) return false;
+        for (int i = 0; i < length; ++i)
+            primIt->second[static_cast<size_t>(offset + i)] =
+                static_cast<int32_t>(static_cast<int8_t>(record[static_cast<size_t>(i)]));
+        return true;
+    }
+    auto it = ctx.arrays.find(*id);
+    if (it == ctx.arrays.end() || length > static_cast<int>(it->second.size()) - offset) {
+        return false;
+    }
     for (int i = 0; i < length; ++i) {
         it->second[static_cast<size_t>(offset + i)] =
             Value::ofInt(static_cast<int>(static_cast<int8_t>(record[static_cast<size_t>(i)])));

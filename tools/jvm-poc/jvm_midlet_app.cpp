@@ -22,6 +22,9 @@ void JvmMidletApp::setClasses(std::vector<ClassFile> classes) {
 const ExecutionTrace& JvmMidletApp::start(const std::string& className) {
     midletClassName_ = className;
     session_ = createMidletSession(classes_, className, &host_);
+#ifdef ESP32_BUILD
+    jvmpoc::setTraceRecording(*session_, false);
+#endif
     lastTrace_ = startMidletSession(*session_);
     return lastTrace_;
 }

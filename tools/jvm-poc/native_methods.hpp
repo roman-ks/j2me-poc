@@ -28,6 +28,7 @@ struct NativeCallContext {
     std::function<void(const Value&, const Value&)> notifyDisplayChanged;
     std::unordered_map<uint32_t, std::string>& strings;
     std::unordered_map<uint32_t, std::vector<Value>>& arrays;
+    std::unordered_map<uint32_t, std::vector<int32_t>>& primitiveArrays;
     std::unordered_map<uint32_t, port::Image>& images;
     std::map<std::string, uint32_t>& resourceImages;
     uint32_t& nextImageId;

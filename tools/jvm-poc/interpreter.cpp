@@ -11,6 +11,9 @@
 #ifdef ESP32_BUILD
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <Arduino.h>
 #endif
 
 #include <algorithm>
@@ -208,6 +211,7 @@ struct HeapObject {
 
 using Heap = std::unordered_map<uint32_t, HeapObject>;
 using ArrayHeap = std::unordered_map<uint32_t, std::vector<Value>>;
+using CompactArrayHeap = std::unordered_map<uint32_t, std::vector<int32_t>>;
 using StringHeap = std::unordered_map<uint32_t, std::string>;
 using ImageHeap = std::unordered_map<uint32_t, port::Image>;
 using ResourceImageCache = std::map<std::string, uint32_t>;
@@ -252,6 +256,7 @@ struct Runtime {
     std::unordered_map<std::string, Value> staticFields;
     Heap heap;
     ArrayHeap arrays;
+    CompactArrayHeap primitiveArrays;
     StringHeap strings;
     ImageHeap images;
     ResourceImageCache resourceImages;
@@ -480,6 +485,20 @@ Value allocateArray(Runtime& rt, const std::string& label, uint32_t pc, size_t l
     return ref;
 }
 
+Value allocatePrimitiveArray(Runtime& rt, const std::string& label, uint32_t pc, size_t length) {
+    uint32_t id = 0;
+    if (!rt.freeArrayIds.empty()) {
+        id = rt.freeArrayIds.back();
+        rt.freeArrayIds.pop_back();
+    } else {
+        id = rt.nextArrayId++;
+    }
+    rt.primitiveArrays[id] = std::vector<int32_t>(length, 0);
+    Value ref = arrayRef(id);
+    if (rt.trace.recording) rt.trace.arrayAllocs.push_back(ArrayAlloc{label, pc, ref, length});
+    return ref;
+}
+
 std::optional<uint32_t> objectId(const Value& value);
 std::optional<uint32_t> arrayId(const Value& value);
 
@@ -523,12 +542,14 @@ Value allocateByteArrayInputStream(
     const std::string& label,
     uint32_t pc,
     const std::vector<uint8_t>& data) {
-    Value buffer = allocateArray(rt, label, pc, data.size());
+    Value buffer = allocatePrimitiveArray(rt, label, pc, data.size());
     std::optional<uint32_t> bufferId = arrayId(buffer);
     if (bufferId.has_value()) {
-        std::vector<Value>& values = rt.arrays[*bufferId];
-        for (size_t i = 0; i < data.size(); ++i) {
-            values[i] = Value::ofInt(static_cast<int>(static_cast<int8_t>(data[i])));
+        auto primIt = rt.primitiveArrays.find(*bufferId);
+        if (primIt != rt.primitiveArrays.end()) {
+            for (size_t i = 0; i < data.size(); ++i) {
+                primIt->second[i] = static_cast<int32_t>(static_cast<int8_t>(data[i]));
+            }
         }
     }
 
@@ -576,17 +597,20 @@ std::optional<std::string> runtimeString(const Runtime& rt, const Value& value) 
 }
 
 Value loadArrayElement(Runtime& rt, const Value& arrayValue, const Value& indexValue) {
-    Value loaded = Value::ofInt(0);
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
-    if (id.has_value() && index.has_value()) {
+    if (id.has_value() && index.has_value() && *index >= 0) {
+        const size_t idx = static_cast<size_t>(*index);
+        auto primIt = rt.primitiveArrays.find(*id);
+        if (primIt != rt.primitiveArrays.end()) {
+            return idx < primIt->second.size() ? Value::ofInt(primIt->second[idx]) : Value::ofInt(0);
+        }
         auto arrayIt = rt.arrays.find(*id);
-        if (arrayIt != rt.arrays.end() && *index >= 0 &&
-            static_cast<size_t>(*index) < arrayIt->second.size()) {
-            loaded = arrayIt->second[static_cast<size_t>(*index)];
+        if (arrayIt != rt.arrays.end() && idx < arrayIt->second.size()) {
+            return arrayIt->second[idx];
         }
     }
-    return loaded;
+    return Value::ofInt(0);
 }
 
 Value normalizeByteValue(const Value& value) {
@@ -608,11 +632,18 @@ void storeArrayElement(
     Value value = normalizeByte ? normalizeByteValue(rawValue) : rawValue;
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
-    if (id.has_value() && index.has_value()) {
-        auto arrayIt = rt.arrays.find(*id);
-        if (arrayIt != rt.arrays.end() && *index >= 0 &&
-            static_cast<size_t>(*index) < arrayIt->second.size()) {
-            arrayIt->second[static_cast<size_t>(*index)] = value;
+    if (id.has_value() && index.has_value() && *index >= 0) {
+        const size_t idx = static_cast<size_t>(*index);
+        auto primIt = rt.primitiveArrays.find(*id);
+        if (primIt != rt.primitiveArrays.end()) {
+            if (idx < primIt->second.size()) {
+                primIt->second[idx] = parseIntValue(value).value_or(0);
+            }
+        } else {
+            auto arrayIt = rt.arrays.find(*id);
+            if (arrayIt != rt.arrays.end() && idx < arrayIt->second.size()) {
+                arrayIt->second[idx] = value;
+            }
         }
     }
     if (rt.trace.recording) rt.trace.arrayWrites.push_back(ArrayWrite{label, pc, arrayValue, indexValue, value});
@@ -1032,6 +1063,12 @@ void collectGarbage(Runtime& rt, std::string when) {
             arraysToFree.push_back(array.first);
         }
     }
+    for (const auto& array : rt.primitiveArrays) {
+        if (markedArrays.find(array.first) == markedArrays.end()) {
+            report.unreachableArrays.push_back(arrayRef(array.first));
+            arraysToFree.push_back(array.first);
+        }
+    }
 
     for (uint32_t id : objectsToFree) {
         auto objectIt = rt.heap.find(id);
@@ -1050,7 +1087,9 @@ void collectGarbage(Runtime& rt, std::string when) {
         }
     }
     for (uint32_t id : arraysToFree) {
-        rt.arrays.erase(id);
+        if (rt.primitiveArrays.erase(id) == 0) {
+            rt.arrays.erase(id);
+        }
         rt.freeArrayIds.push_back(id);
         report.freedArrays.push_back(arrayRef(id));
     }
@@ -1260,6 +1299,7 @@ std::optional<Value> resumeCurrentMethod(
             },
             rt.strings,
             rt.arrays,
+            rt.primitiveArrays,
             rt.images,
             rt.resourceImages,
             rt.nextImageId,
@@ -2374,8 +2414,8 @@ std::optional<Value> resumeCurrentMethod(
                 uint8_t atype = codeU1(code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
-                if ((atype == 4 || atype == 5 || atype == 8 || atype == 10) && count.has_value() && *count >= 0) {
-                    frame.push(allocateArray(rt, label, allocPc, static_cast<size_t>(*count)));
+                if ((atype == 4 || atype == 5 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
+                    frame.push(allocatePrimitiveArray(rt, label, allocPc, static_cast<size_t>(*count)));
                 } else {
                     frame.push(Value::named("<array>"));
                 }
@@ -2426,12 +2466,23 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow();
                 Value arrayValue = frame.pop();
                 std::optional<uint32_t> id = arrayId(arrayValue);
-                auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
-                if (id.has_value() && arrayIt != rt.arrays.end()) {
-                    frame.push(Value::ofInt(static_cast<int32_t>(arrayIt->second.size())));
-                } else {
-                    frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
+                if (id.has_value()) {
+                    auto primIt = rt.primitiveArrays.find(*id);
+                    if (primIt != rt.primitiveArrays.end()) {
+                        frame.push(Value::ofInt(static_cast<int32_t>(primIt->second.size())));
+                        ++pc;
+                        if(t0m) rt.host->miscStats.record(nowUs()-t0m);
+                        break;
+                    }
+                    auto arrayIt = rt.arrays.find(*id);
+                    if (arrayIt != rt.arrays.end()) {
+                        frame.push(Value::ofInt(static_cast<int32_t>(arrayIt->second.size())));
+                        ++pc;
+                        if(t0m) rt.host->miscStats.record(nowUs()-t0m);
+                        break;
+                    }
                 }
+                frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
                 ++pc;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
