@@ -24,13 +24,13 @@ inline uint32_t nowUs() {
 #endif
 }
 
-std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
+port::Canvas* graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
     std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
     if (targetImage.has_value()) {
         if (*targetImage != 0) {
             auto imageIt = ctx.images.find(*targetImage);
             if (imageIt == ctx.images.end()) {
-                return std::nullopt;
+                return nullptr;
             }
             // Use cached canvas to preserve clip and other state across native calls.
             auto cacheIt = ctx.imageCanvases.find(*targetImage);
@@ -39,22 +39,22 @@ std::optional<port::Canvas> graphicsCanvas(NativeCallContext& ctx, const Value& 
                 cacheIt = ctx.imageCanvases.emplace(*targetImage, std::move(newCanvas)).first;
             }
             cacheIt->second.setColor(ctx.graphicsColorRgb);
-            return cacheIt->second;
+            return &cacheIt->second;
         }
         // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — use cached canvas.
         if (ctx.mainFbCanvas.has_value()) {
             ctx.mainFbCanvas->setColor(ctx.graphicsColorRgb);
-            return *ctx.mainFbCanvas;
+            return &ctx.mainFbCanvas.value();
         }
         // Fallback if canvas wasn't pre-built (e.g. no framebuffer at ctx creation time).
     }
 
     if (ctx.graphicsFramebuffer == nullptr || ctx.graphicsWidth <= 0 || ctx.graphicsHeight <= 0) {
-        return std::nullopt;
+        return nullptr;
     }
-    port::Canvas canvas(ctx.graphicsWidth, ctx.graphicsHeight, ctx.graphicsFramebuffer);
-    canvas.setColor(ctx.graphicsColorRgb);
-    return canvas;
+    ctx.scratchCanvas.emplace(ctx.graphicsWidth, ctx.graphicsHeight, ctx.graphicsFramebuffer);
+    ctx.scratchCanvas->setColor(ctx.graphicsColorRgb);
+    return &ctx.scratchCanvas.value();
 }
 
 } // namespace
@@ -85,11 +85,11 @@ NativeCallResult handleGraphics(
 #endif
         std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
         auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
         const int diX = intArg(args, 2);
         const int diY = intArg(args, 3);
         const int diAnchor = intArg(args, 4);
-        if (canvas.has_value() && image.has_value() && imageIt != ctx.images.end()) {
+        if (canvas != nullptr && image.has_value() && imageIt != ctx.images.end()) {
 #if JVM_ENABLE_NATIVE_PROFILING
             const uint32_t t0 = nowUs();
             if (tSetup) ctx.host->drawImageSetupStats.record(t0 - tSetup);
@@ -135,8 +135,8 @@ NativeCallResult handleGraphics(
         int y = intArg(args, 2);
         int width = intArg(args, 3);
         int height = intArg(args, 4);
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
-        if (canvas.has_value()) {
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        if (canvas != nullptr) {
 #if JVM_ENABLE_NATIVE_PROFILING
             const uint32_t t0 = nowUs();
             canvas->fillRect(x, y, width, height);
@@ -174,8 +174,8 @@ NativeCallResult handleGraphics(
                 cacheIt->second.setClip(x, y, width, height);
             }
         } else {
-            std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
-            if (canvas.has_value()) {
+            port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+            if (canvas != nullptr) {
                 canvas->setClip(x, y, width, height);
             }
         }
@@ -193,8 +193,8 @@ NativeCallResult handleGraphics(
         int y1 = intArg(args, 2);
         int x2 = intArg(args, 3);
         int y2 = intArg(args, 4);
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
-        if (canvas.has_value()) {
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        if (canvas != nullptr) {
             canvas->drawLine(x1, y1, x2, y2);
         }
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
@@ -211,8 +211,8 @@ NativeCallResult handleGraphics(
         int x = intArg(args, 2);
         int y = intArg(args, 3);
         int anchor = intArg(args, 4);
-        std::optional<port::Canvas> canvas = graphicsCanvas(ctx, receiver);
-        if (canvas.has_value()) {
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        if (canvas != nullptr) {
             canvas->drawString(text, x, y, anchor);
         }
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{

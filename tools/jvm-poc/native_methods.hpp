@@ -54,6 +54,10 @@ struct NativeCallContext {
     // keyed by image ID. Preserves clip and color state across native calls
     // within the same executeMethod invocation.
     std::unordered_map<uint32_t, port::Canvas> imageCanvases;
+    // Fallback canvas for the rare path where there is no mainFbCanvas and no
+    // image-backed target. graphicsCanvas() writes here and returns a pointer
+    // into it so call sites never receive an owned copy.
+    std::optional<port::Canvas> scratchCanvas;
 };
 
 struct NativeCallResult {
