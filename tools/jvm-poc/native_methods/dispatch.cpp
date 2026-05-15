@@ -58,6 +58,18 @@ NativeCallResult handleNativeStaticCall(
     return NativeCallResult{};
 }
 
+NativeHandler resolveNativeStaticHandler(const std::string& className) {
+    if (native_methods::nativeRuntimeClassMatches(className)) {
+        return &native_methods::handleNativeRuntime;
+    }
+    if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
+    if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
+    if (className == "java/lang/System")                 return &native_methods::handleSystem;
+    if (className == "java/lang/Thread")                 return &native_methods::handleThread;
+    if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
+    return nullptr;
+}
+
 NativeCallResult handleNativeInstanceCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
@@ -115,6 +127,18 @@ NativeCallResult handleNativeInstanceCall(
     }
 
     return NativeCallResult{};
+}
+
+NativeHandler resolveNativeInstanceHandler(const std::string& className) {
+    if (className == "javax/microedition/midlet/MIDlet")    return &native_methods::handleMidlet;
+    if (className == "javax/microedition/lcdui/Display")    return &native_methods::handleDisplay;
+    if (className == "javax/microedition/lcdui/Graphics")   return &native_methods::handleGraphics;
+    if (className == "javax/microedition/lcdui/Image")      return &native_methods::handleImage;
+    if (className == "javax/microedition/lcdui/Canvas")     return &native_methods::handleCanvas;
+    if (className == "java/lang/String")                    return &native_methods::handleString;
+    if (className == "java/lang/Thread")                    return &native_methods::handleThread;
+    if (className == "javax/microedition/rms/RecordStore")  return &native_methods::handleRecordStore;
+    return nullptr;
 }
 
 } // namespace jvmpoc
