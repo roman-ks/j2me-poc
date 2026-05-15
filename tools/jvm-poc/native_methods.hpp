@@ -17,6 +17,18 @@ namespace jvmpoc {
 
 class JvmHost;
 
+// Lightweight per-image clip state. Stores only what must persist between a
+// setClip and the following drawImage call. Canvas is reconstructed on demand
+// in graphicsCanvas() — no embedded Canvas means no vector-header overhead in
+// the flat array, keeping NativeCallContext small.
+struct ImageCanvasEntry {
+    uint32_t id = 0;
+    uint16_t* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+    int clipX = 0, clipY = 0, clipW = 0, clipH = 0;
+};
+
 struct NativeCallContext {
     const JvmHost* host = nullptr;
     const std::vector<ClassFile>* classes = nullptr;
@@ -50,14 +62,16 @@ struct NativeCallContext {
     // Cached main-framebuffer Canvas — built once per executeMethod call,
     // reused by graphicsCanvas() for all ID=0 graphics targets.
     std::optional<port::Canvas> mainFbCanvas = std::nullopt;
-    // Cached canvases for image-backed Graphics objects (ID != 0),
-    // keyed by image ID. Preserves clip and color state across native calls
-    // within the same executeMethod invocation.
-    std::unordered_map<uint32_t, port::Canvas> imageCanvases;
-    // Fallback canvas for the rare path where there is no mainFbCanvas and no
-    // image-backed target. graphicsCanvas() writes here and returns a pointer
-    // into it so call sites never receive an owned copy.
-    std::optional<port::Canvas> scratchCanvas;
+    // Flat array of lightweight clip-state entries for image-backed Graphics objects.
+    // graphicsCanvas() reconstructs a Canvas into scratchCanvas on each call.
+    // Linear scan dominates unordered_map for the 1–2 entries games use, with
+    // no hash computation, no heap allocation, and minimal struct growth.
+    static constexpr int kMaxImageCanvases = 4;
+    ImageCanvasEntry imageCanvasEntries[kMaxImageCanvases] {};
+    int imageCanvasCount = 0;
+    // Scratch canvas written by graphicsCanvas() on each call; also used for the
+    // framebuffer fallback path. Callers must not hold the pointer across calls.
+    std::optional<port::Canvas> scratchCanvas = std::nullopt;
 };
 
 struct NativeCallResult {

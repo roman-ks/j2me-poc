@@ -28,18 +28,34 @@ port::Canvas* graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
     std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
     if (targetImage.has_value()) {
         if (*targetImage != 0) {
+            // Scan flat array for cached entry (warm path: 1 comparison).
+            for (int i = 0; i < ctx.imageCanvasCount; ++i) {
+                if (ctx.imageCanvasEntries[i].id == *targetImage) {
+                    const ImageCanvasEntry& e = ctx.imageCanvasEntries[i];
+                    ctx.scratchCanvas.emplace(e.width, e.height, e.pixels);
+                    ctx.scratchCanvas->setClip(e.clipX, e.clipY, e.clipW, e.clipH);
+                    ctx.scratchCanvas->setColor(ctx.graphicsColorRgb);
+                    return &ctx.scratchCanvas.value();
+                }
+            }
+            // Cache miss — populate entry from the image map.
             auto imageIt = ctx.images.find(*targetImage);
             if (imageIt == ctx.images.end()) {
                 return nullptr;
             }
-            // Use cached canvas to preserve clip and other state across native calls.
-            auto cacheIt = ctx.imageCanvases.find(*targetImage);
-            if (cacheIt == ctx.imageCanvases.end()) {
-                port::Canvas newCanvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
-                cacheIt = ctx.imageCanvases.emplace(*targetImage, std::move(newCanvas)).first;
+            if (ctx.imageCanvasCount >= NativeCallContext::kMaxImageCanvases) {
+                return nullptr;
             }
-            cacheIt->second.setColor(ctx.graphicsColorRgb);
-            return &cacheIt->second;
+            ImageCanvasEntry& e = ctx.imageCanvasEntries[ctx.imageCanvasCount++];
+            e.id = *targetImage;
+            e.pixels = imageIt->second.pixels.data();
+            e.width = imageIt->second.getWidth();
+            e.height = imageIt->second.getHeight();
+            e.clipX = 0; e.clipY = 0; e.clipW = e.width; e.clipH = e.height;
+            ctx.scratchCanvas.emplace(e.width, e.height, e.pixels);
+            // Full canvas by default — no setClip needed.
+            ctx.scratchCanvas->setColor(ctx.graphicsColorRgb);
+            return &ctx.scratchCanvas.value();
         }
         // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — use cached canvas.
         if (ctx.mainFbCanvas.has_value()) {
@@ -163,15 +179,30 @@ NativeCallResult handleGraphics(
         if (targetImage.has_value() && *targetImage == 0 && ctx.mainFbCanvas.has_value()) {
             ctx.mainFbCanvas->setClip(x, y, width, height);
         } else if (targetImage.has_value() && *targetImage != 0) {
-            // Persist clip on the cached image canvas so subsequent draw calls see it.
-            auto imageIt = ctx.images.find(*targetImage);
-            if (imageIt != ctx.images.end()) {
-                auto cacheIt = ctx.imageCanvases.find(*targetImage);
-                if (cacheIt == ctx.imageCanvases.end()) {
-                    port::Canvas newCanvas(imageIt->second.getWidth(), imageIt->second.getHeight(), imageIt->second.pixels.data());
-                    cacheIt = ctx.imageCanvases.emplace(*targetImage, std::move(newCanvas)).first;
+            // Find or create entry; persist clip fields directly — no Canvas construction.
+            ImageCanvasEntry* entry = nullptr;
+            for (int i = 0; i < ctx.imageCanvasCount; ++i) {
+                if (ctx.imageCanvasEntries[i].id == *targetImage) {
+                    entry = &ctx.imageCanvasEntries[i];
+                    break;
                 }
-                cacheIt->second.setClip(x, y, width, height);
+            }
+            if (entry == nullptr) {
+                auto imageIt = ctx.images.find(*targetImage);
+                if (imageIt != ctx.images.end() &&
+                        ctx.imageCanvasCount < NativeCallContext::kMaxImageCanvases) {
+                    ImageCanvasEntry& e = ctx.imageCanvasEntries[ctx.imageCanvasCount++];
+                    e.id = *targetImage;
+                    e.pixels = imageIt->second.pixels.data();
+                    e.width = imageIt->second.getWidth();
+                    e.height = imageIt->second.getHeight();
+                    e.clipX = 0; e.clipY = 0; e.clipW = e.width; e.clipH = e.height;
+                    entry = &e;
+                }
+            }
+            if (entry != nullptr) {
+                entry->clipX = x; entry->clipY = y;
+                entry->clipW = width; entry->clipH = height;
             }
         } else {
             port::Canvas* canvas = graphicsCanvas(ctx, receiver);
