@@ -31,9 +31,6 @@ NativeCallResult handleNativeStaticCall(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    if (native_methods::nativeRuntimeClassMatches(ref.className)) {
-        return native_methods::handleNativeRuntime(ctx, methodLabel, pc, ref, args);
-    }
 
     if (ref.className == "javax/microedition/lcdui/Display") {
         return native_methods::handleDisplay(ctx, methodLabel, pc, ref, args);
@@ -55,18 +52,20 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleRecordStore(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "dev/roman/hello/NativeRuntime") {
+        return native_methods::handleNativeRuntime(ctx, methodLabel, pc, ref, args);
+    }
+
     return NativeCallResult{};
 }
 
 NativeHandler resolveNativeStaticHandler(const std::string& className) {
-    if (native_methods::nativeRuntimeClassMatches(className)) {
-        return &native_methods::handleNativeRuntime;
-    }
     if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
     if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
     if (className == "java/lang/System")                 return &native_methods::handleSystem;
     if (className == "java/lang/Thread")                 return &native_methods::handleThread;
     if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
+    if (className == "dev/roman/hello/NativeRuntime")    return &native_methods::handleNativeRuntime;
     return nullptr;
 }
 

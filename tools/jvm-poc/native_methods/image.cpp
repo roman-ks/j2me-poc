@@ -77,13 +77,13 @@ NativeCallResult handleImage(
     std::optional<uint32_t> id = imageId(receiver);
     auto imageIt = id.has_value() ? ctx.images.find(*id) : ctx.images.end();
     if (ref.name == "getWidth" && ref.descriptor == "()I") {
-        return handledValue(Value::named(
-            id.has_value() && imageIt != ctx.images.end() ? std::to_string(imageIt->second.getWidth()) : "0"));
+        return handledValue(Value::ofInt(
+            id.has_value() && imageIt != ctx.images.end() ? imageIt->second.getWidth() : 0));
     }
 
     if (ref.name == "getHeight" && ref.descriptor == "()I") {
-        return handledValue(Value::named(
-            id.has_value() && imageIt != ctx.images.end() ? std::to_string(imageIt->second.getHeight()) : "0"));
+        return handledValue(Value::ofInt(
+            id.has_value() && imageIt != ctx.images.end() ? imageIt->second.getHeight() : 0));
     }
 
     if (ref.name == "getGraphics" && ref.descriptor == "()Ljavax/microedition/lcdui/Graphics;") {

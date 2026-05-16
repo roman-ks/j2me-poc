@@ -4,13 +4,6 @@
 
 namespace jvmpoc::native_methods {
 
-bool nativeRuntimeClassMatches(const std::string& className) {
-    const std::string suffix = "/NativeRuntime";
-    return className == "NativeRuntime" ||
-           (className.size() >= suffix.size() &&
-            className.compare(className.size() - suffix.size(), suffix.size(), suffix) == 0);
-}
-
 bool returnsValue(const std::string& descriptor) {
     size_t close = descriptor.find(')');
     return close != std::string::npos && close + 1 < descriptor.size() && descriptor[close + 1] != 'V';

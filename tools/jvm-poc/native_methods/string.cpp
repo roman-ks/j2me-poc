@@ -53,8 +53,8 @@ NativeCallResult handleString(
     if (ref.name == "length" && ref.descriptor == "()I") {
         std::optional<uint32_t> id = stringObjectId(ctx, receiver);
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
-        return handledValue(id.has_value() && strIt != ctx.strings.end()
-            ? Value::named(std::to_string(strIt->second.size()))
+        return handledValue(strIt != ctx.strings.end()
+            ? Value::ofInt(static_cast<int32_t>(strIt->second.size()))
             : Value::named("<string-length:" + receiver.asText() + ">"));
     }
 
@@ -142,7 +142,7 @@ NativeCallResult handleString(
                 static_cast<size_t>(dstBegin + copyLen) <= arrayIt->second.size()) {
                 for (int i = 0; i < copyLen; ++i) {
                     unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(srcBegin + i)]);
-                    arrayIt->second[static_cast<size_t>(dstBegin + i)] = Value::named(std::to_string(static_cast<int>(c)));
+                    arrayIt->second[static_cast<size_t>(dstBegin + i)] = Value::ofInt(static_cast<int32_t>(c));
                 }
             }
         }
