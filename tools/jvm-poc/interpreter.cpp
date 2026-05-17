@@ -1462,7 +1462,13 @@ std::optional<Value> resumeCurrentMethod(
     };
 
     while (pc < codeSize) {
-        if (++rt.steps > kMaxSteps) {
+        // Batched step-limit check: increment every step, but only consult
+        // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
+        // (currently 100000), so ±256 drift is irrelevant. The hot path
+        // pays one increment + a single low-byte test; the (rt.steps & 0xFF)
+        // == 0 branch is taken 255 of every 256 steps, so the branch
+        // predictor learns it cleanly and the slow body stays cold.
+        if ((++rt.steps & 0xFFu) == 0 && rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
             if (!rt.stepLimitYieldEnabled) {
                 rt.steps = 0;
