@@ -51,7 +51,11 @@ NativeCallResult handleString(
     }
 
     if (ref.name == "length" && ref.descriptor == "()I") {
-        std::optional<uint32_t> id = stringObjectId(ctx, receiver);
+        // strings.find on an object-handle id naturally returns end() for any
+        // non-String object (id present in ctx.strings only when string-init
+        // populated it), so the explicit "is this a string" validation in
+        // stringObjectId would just duplicate the find we're about to do.
+        std::optional<uint32_t> id = objectId(receiver);
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         return handledValue(strIt != ctx.strings.end()
             ? Value::ofInt(static_cast<int32_t>(strIt->second.size()))
@@ -59,10 +63,10 @@ NativeCallResult handleString(
     }
 
     if (ref.name == "charAt" && ref.descriptor == "(I)C") {
-        std::optional<uint32_t> id = stringObjectId(ctx, receiver);
+        std::optional<uint32_t> id = objectId(receiver);
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         const int index = intArg(args, 1);
-        if (id.has_value() && strIt != ctx.strings.end() &&
+        if (strIt != ctx.strings.end() &&
             index >= 0 && static_cast<size_t>(index) < strIt->second.size()) {
             const unsigned char c = static_cast<unsigned char>(strIt->second[static_cast<size_t>(index)]);
             return handledValue(Value::ofInt(static_cast<int32_t>(c)));
@@ -71,11 +75,11 @@ NativeCallResult handleString(
     }
 
     if (ref.name == "indexOf" && ref.descriptor == "(II)I") {
-        std::optional<uint32_t> id = stringObjectId(ctx, receiver);
+        std::optional<uint32_t> id = objectId(receiver);
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         int ch = intArg(args, 1);
         int fromIndex = intArg(args, 2);
-        if (!id.has_value() || strIt == ctx.strings.end() || ch < 0 || ch > 255) {
+        if (strIt == ctx.strings.end() || ch < 0 || ch > 255) {
             return handledValue(Value::ofInt(-1));
         }
         if (fromIndex < 0) {
@@ -91,14 +95,14 @@ NativeCallResult handleString(
     }
 
     if (ref.name == "compareTo" && ref.descriptor == "(Ljava/lang/String;)I") {
-        std::optional<uint32_t> leftId = stringObjectId(ctx, receiver);
-        std::optional<uint32_t> rightId = args.size() > 1 ? stringObjectId(ctx, args[1]) : std::nullopt;
+        std::optional<uint32_t> leftId = objectId(receiver);
+        std::optional<uint32_t> rightId = args.size() > 1 ? objectId(args[1]) : std::nullopt;
         auto leftIt = leftId.has_value() ? ctx.strings.find(*leftId) : ctx.strings.end();
         auto rightIt = rightId.has_value() ? ctx.strings.find(*rightId) : ctx.strings.end();
-        if (!leftId.has_value() || leftIt == ctx.strings.end()) {
-            return handledValue(Value::ofInt(rightId.has_value() && rightIt != ctx.strings.end() ? -1 : 0));
+        if (leftIt == ctx.strings.end()) {
+            return handledValue(Value::ofInt(rightIt != ctx.strings.end() ? -1 : 0));
         }
-        if (!rightId.has_value() || rightIt == ctx.strings.end()) {
+        if (rightIt == ctx.strings.end()) {
             return handledValue(Value::ofInt(1));
         }
         const std::string& left = leftIt->second;
@@ -115,14 +119,14 @@ NativeCallResult handleString(
     }
 
     if (ref.name == "getChars" && ref.descriptor == "(II[CI)V") {
-        std::optional<uint32_t> string = stringObjectId(ctx, receiver);
+        std::optional<uint32_t> string = objectId(receiver);
         int srcBegin = intArg(args, 1);
         int srcEnd = intArg(args, 2);
         std::optional<uint32_t> dst = args.size() > 3 ? arrayId(args[3]) : std::nullopt;
         int dstBegin = intArg(args, 4);
 
         auto strIt = string.has_value() ? ctx.strings.find(*string) : ctx.strings.end();
-        if (!string.has_value() || strIt == ctx.strings.end() || !dst.has_value() ||
+        if (strIt == ctx.strings.end() || !dst.has_value() ||
             srcBegin < 0 || srcEnd < srcBegin ||
             static_cast<size_t>(srcEnd) > strIt->second.size() || dstBegin < 0) {
             return handledVoid();

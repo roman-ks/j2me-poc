@@ -85,9 +85,9 @@ std::string stringArg(const NativeCallContext& ctx, const std::vector<Value>& ar
     if (index >= args.size()) {
         return "";
     }
-    std::optional<uint32_t> id = stringObjectId(ctx, args[index]);
+    std::optional<uint32_t> id = objectId(args[index]);
     auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
-    return id.has_value() && strIt != ctx.strings.end() ? strIt->second : args[index].asText();
+    return strIt != ctx.strings.end() ? strIt->second : args[index].asText();
 }
 
 } // namespace jvmpoc::native_methods

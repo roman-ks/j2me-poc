@@ -228,9 +228,9 @@ bool deleteStoreFile(const std::string& name) {
 }
 
 std::string runtimeString(const NativeCallContext& ctx, const Value& value) {
-    std::optional<uint32_t> id = stringObjectId(ctx, value);
+    std::optional<uint32_t> id = objectId(value);
     auto it = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
-    return id.has_value() && it != ctx.strings.end() ? it->second : value.asText();
+    return it != ctx.strings.end() ? it->second : value.asText();
 }
 
 std::string storeNameFromReceiver(NativeCallContext& ctx, const std::vector<Value>& args) {
