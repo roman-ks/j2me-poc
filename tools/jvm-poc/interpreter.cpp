@@ -1461,18 +1461,18 @@ std::optional<Value> resumeCurrentMethod(
         return kCollectStats ? nowUs() : 0u;
     };
 
-    // ---- Computed-goto dispatch scaffold (Step 1) ----
-    // Table is populated with op_unknown for every slot; per-opcode handler
-    // labels fill in during Step 2. The table is unused until Step 3 wires
-    // DISPATCH() into the main flow; switch() still drives execution today.
-    // Initialized at runtime because label-address values are not constant
-    // expressions in C++ (no designated/range initializers permitted).
-    const void* kDispatch[256];
-    for (auto& slot : kDispatch) slot = &&op_unknown;
+    // ---- Computed-goto dispatch table ----
+    // Function-local static: address-of-label values are stable for the
+    // lifetime of the program, so we initialize once on first call and
+    // reuse on every subsequent (including recursive) call. This keeps
+    // ~2 KB off the per-call stack and avoids ~200 writes per entry —
+    // critical because resumeCurrentMethod is reentered for every invoke.
+    static const void* kDispatch[256];
+    static bool kDispatchInit = false;
     uint8_t op = 0;
     (void)op;
-
-    // ---- kDispatch entries (filled per group during Step 2) ----
+    if (__builtin_expect(!kDispatchInit, 0)) {
+        for (auto& slot : kDispatch) slot = &&op_unknown;
     // Group 1: Constants (0x01–0x14)
     kDispatch[0x01] = &&op_aconst_null;
     kDispatch[0x02] = &&op_iconst_m1;
@@ -1610,6 +1610,8 @@ std::optional<Value> resumeCurrentMethod(
     kDispatch[0xbe] = &&op_arraylength;
     kDispatch[0xbf] = &&op_athrow;
     kDispatch[0xc5] = &&op_multianewarray;
+        kDispatchInit = true;
+    }
 
 #if JVM_ENABLE_BYTECODE_PROFILING
 #  define JVM_BYTECODE_STEP_INC()                                              \
@@ -1633,48 +1635,24 @@ std::optional<Value> resumeCurrentMethod(
 
 dispatch_entry:
     DISPATCH();
-    // ---- Step 3: dispatch table drives execution from here on. ----
-    // The while/switch block below is unreachable; it is retained so that
-    // the per-opcode `case 0xXX:` labels and the `default:` body remain
-    // present in source. Step 4 deletes the wrapper and the case labels;
-    // Step 5 polishes op_unknown and adds the debug pc-bounds assert.
-    while (pc < codeSize) {
-        // Batched step-limit check: increment every step, but only consult
-        // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
-        // (currently 100000), so ±256 drift is irrelevant. The hot path
-        // pays one increment + a single low-byte test; the (rt.steps & 0xFF)
-        // == 0 branch is taken 255 of every 256 steps, so the branch
-        // predictor learns it cleanly and the slow body stays cold.
-        if ((++rt.steps & 0xFFu) == 0 && rt.steps > kMaxSteps) {
-            rt.trace.stepLimitHit = true;
-            if (!rt.stepLimitYieldEnabled) {
-                rt.steps = 0;
-                continue;
-            }
-            runtimeFrame.pc = pc;
-            captureStackSnapshot(rt.trace, rt.callStack);
-            requestThreadYield(rt, 1);
-            return std::nullopt;
-        }
-#if JVM_ENABLE_BYTECODE_PROFILING
-        if (rt.host != nullptr && rt.host->collectBytecodeStats) ++rt.host->bytecodeSteps;
-#endif
-
-        uint8_t op = code[pc];
-        switch (op) {
-            case 0x01: op_aconst_null: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // aconst_null
-            case 0x02: op_iconst_m1:   { const uint32_t t0=statNow(); frame.push(Value::ofInt(-1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }  // iconst_m1
-            case 0x03: op_iconst_0:    { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // iconst_0
-            case 0x04: op_iconst_1:    { const uint32_t t0=statNow(); frame.push(Value::ofInt(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // iconst_1
-            case 0x05: op_iconst_2:    { const uint32_t t0=statNow(); frame.push(Value::ofInt(2)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // iconst_2
-            case 0x06: op_iconst_3:    { const uint32_t t0=statNow(); frame.push(Value::ofInt(3)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // iconst_3
-            case 0x07: op_iconst_4:    { const uint32_t t0=statNow(); frame.push(Value::ofInt(4)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // iconst_4
-            case 0x08: op_iconst_5:    { const uint32_t t0=statNow(); frame.push(Value::ofInt(5)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }   // iconst_5
-            case 0x09: op_lconst_0:    { const uint32_t t0=statNow(); frame.push(Value::ofLong(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }  // lconst_0
-            case 0x0a: op_lconst_1:    { const uint32_t t0=statNow(); frame.push(Value::ofLong(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }  // lconst_1
-            case 0x10: op_bipush:      { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS1(code, pc + 1))); pc += 2; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }  // bipush
-            case 0x11: op_sipush:      { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS2(code, pc + 1))); pc += 3; if(t0) rt.host->pushStats.record(nowUs()-t0); DISPATCH(); }  // sipush
-            case 0x12: op_ldc: {
+    // ---- Computed-goto handler bodies ----
+    // Step 4: while/switch wrapper deleted. Step-limit check and per-step
+    // profile increment now live inside DISPATCH() (defined above);
+    // op_unknown handles unmapped opcodes; step_limit_path handles the
+    // soft-yield branch. All entry comes through `goto *kDispatch[op]`.
+            op_aconst_null: { { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto aconst_null_done; } aconst_null_done: DISPATCH(); }   // aconst_null
+            op_iconst_m1:   { { const uint32_t t0=statNow(); frame.push(Value::ofInt(-1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_m1_done; } iconst_m1_done: DISPATCH(); }  // iconst_m1
+            op_iconst_0:    { { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_0_done; } iconst_0_done: DISPATCH(); }   // iconst_0
+            op_iconst_1:    { { const uint32_t t0=statNow(); frame.push(Value::ofInt(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_1_done; } iconst_1_done: DISPATCH(); }   // iconst_1
+            op_iconst_2:    { { const uint32_t t0=statNow(); frame.push(Value::ofInt(2)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_2_done; } iconst_2_done: DISPATCH(); }   // iconst_2
+            op_iconst_3:    { { const uint32_t t0=statNow(); frame.push(Value::ofInt(3)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_3_done; } iconst_3_done: DISPATCH(); }   // iconst_3
+            op_iconst_4:    { { const uint32_t t0=statNow(); frame.push(Value::ofInt(4)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_4_done; } iconst_4_done: DISPATCH(); }   // iconst_4
+            op_iconst_5:    { { const uint32_t t0=statNow(); frame.push(Value::ofInt(5)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto iconst_5_done; } iconst_5_done: DISPATCH(); }   // iconst_5
+            op_lconst_0:    { { const uint32_t t0=statNow(); frame.push(Value::ofLong(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto lconst_0_done; } lconst_0_done: DISPATCH(); }  // lconst_0
+            op_lconst_1:    { { const uint32_t t0=statNow(); frame.push(Value::ofLong(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); goto lconst_1_done; } lconst_1_done: DISPATCH(); }  // lconst_1
+            op_bipush:      { { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS1(code, pc + 1))); pc += 2; if(t0) rt.host->pushStats.record(nowUs()-t0); goto bipush_done; } bipush_done: DISPATCH(); }  // bipush
+            op_sipush:      { { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS2(code, pc + 1))); pc += 3; if(t0) rt.host->pushStats.record(nowUs()-t0); goto sipush_done; } sipush_done: DISPATCH(); }  // sipush
+            op_ldc: { {
                 const uint32_t t0=statNow();
                 uint16_t index = codeU1(code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
@@ -1682,9 +1660,9 @@ dispatch_entry:
                     : internString(rt, resolveStringConstant(cls, index)));
                 pc += 2;
                 if(t0) rt.host->pushStats.record(nowUs()-t0);
-                DISPATCH();
-            }
-            case 0x13: op_ldc_w: {
+                goto ldc_done;
+            } ldc_done: DISPATCH(); }
+            op_ldc_w: { {
                 const uint32_t t0=statNow();
                 uint16_t index = codeU2(code, pc + 1);
                 frame.push(cls.cp[index].tag == CpInteger
@@ -1692,66 +1670,68 @@ dispatch_entry:
                     : internString(rt, resolveStringConstant(cls, index)));
                 pc += 3;
                 if(t0) rt.host->pushStats.record(nowUs()-t0);
-                DISPATCH();
-            }
-            case 0x14: op_ldc2_w: {
+                goto ldc_w_done;
+            } ldc_w_done: DISPATCH(); }
+            op_ldc2_w: { {
                 const uint32_t t0=statNow();
                 uint16_t index = codeU2(code, pc + 1);
                 frame.push(Value::ofLong(resolveLongConstant(cls, index)));
                 pc += 3;
                 if(t0) rt.host->pushStats.record(nowUs()-t0);
-                DISPATCH();
-            }
+                goto ldc2_w_done;
+            } ldc2_w_done: DISPATCH(); }
 
-            case 0x1e: op_lload_0: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x1f: op_lload_1: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x20: op_lload_2: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x21: op_lload_3: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x1a: op_iload_0: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x1b: op_iload_1: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x1c: op_iload_2: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x1d: op_iload_3: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x16: op_lload:   { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x15: op_iload:   { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x19: op_aload:   { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x2a: op_aload_0: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x2b: op_aload_1: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x2c: op_aload_2: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x2d: op_aload_3: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); DISPATCH(); }
+            op_lload_0: { { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto lload_0_done; } lload_0_done: DISPATCH(); }
+            op_lload_1: { { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto lload_1_done; } lload_1_done: DISPATCH(); }
+            op_lload_2: { { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto lload_2_done; } lload_2_done: DISPATCH(); }
+            op_lload_3: { { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto lload_3_done; } lload_3_done: DISPATCH(); }
+            op_iload_0: { { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto iload_0_done; } iload_0_done: DISPATCH(); }
+            op_iload_1: { { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto iload_1_done; } iload_1_done: DISPATCH(); }
+            op_iload_2: { { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto iload_2_done; } iload_2_done: DISPATCH(); }
+            op_iload_3: { { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto iload_3_done; } iload_3_done: DISPATCH(); }
+            op_lload:   { { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto lload_done; } lload_done: DISPATCH(); }
+            op_iload:   { { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto iload_done; } iload_done: DISPATCH(); }
+            op_aload:   { { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto aload_done; } aload_done: DISPATCH(); }
+            op_aload_0: { { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto aload_0_done; } aload_0_done: DISPATCH(); }
+            op_aload_1: { { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto aload_1_done; } aload_1_done: DISPATCH(); }
+            op_aload_2: { { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto aload_2_done; } aload_2_done: DISPATCH(); }
+            op_aload_3: { { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); goto aload_3_done; } aload_3_done: DISPATCH(); }
 
-            case 0x2e: op_iaload:
-            case 0x32: op_aaload:
-            case 0x33: op_baload:
-            case 0x34: op_caload: {
-                Value indexValue = frame.pop();
-                Value arrayValue = frame.pop();
-                const uint32_t t0 = statNow();
-                frame.push(loadArrayElement(rt, arrayValue, indexValue));
-                if(t0) rt.host->arrayLoadStats.record(nowUs() - t0);
-                ++pc;
-                DISPATCH();
-            }
+            op_iaload:
+            op_aaload:
+            op_baload:
+            op_caload: { {
+                {
+                    Value indexValue = frame.pop();
+                    Value arrayValue = frame.pop();
+                    const uint32_t t0 = statNow();
+                    frame.push(loadArrayElement(rt, arrayValue, indexValue));
+                    if(t0) rt.host->arrayLoadStats.record(nowUs() - t0);
+                    ++pc;
+                }
+                goto caload_done;
+            } caload_done: DISPATCH(); }
 
-            case 0x3f: op_lstore_0: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x40: op_lstore_1: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x41: op_lstore_2: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x42: op_lstore_3: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x3b: op_istore_0: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x3c: op_istore_1: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x3d: op_istore_2: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x3e: op_istore_3: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x37: op_lstore:   { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x36: op_istore:   { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x3a: op_astore:   { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x4b: op_astore_0: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x4c: op_astore_1: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x4d: op_astore_2: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
-            case 0x4e: op_astore_3: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); DISPATCH(); }
+            op_lstore_0: { { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto lstore_0_done; } lstore_0_done: DISPATCH(); }
+            op_lstore_1: { { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto lstore_1_done; } lstore_1_done: DISPATCH(); }
+            op_lstore_2: { { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto lstore_2_done; } lstore_2_done: DISPATCH(); }
+            op_lstore_3: { { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto lstore_3_done; } lstore_3_done: DISPATCH(); }
+            op_istore_0: { { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto istore_0_done; } istore_0_done: DISPATCH(); }
+            op_istore_1: { { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto istore_1_done; } istore_1_done: DISPATCH(); }
+            op_istore_2: { { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto istore_2_done; } istore_2_done: DISPATCH(); }
+            op_istore_3: { { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto istore_3_done; } istore_3_done: DISPATCH(); }
+            op_lstore:   { { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); goto lstore_done; } lstore_done: DISPATCH(); }
+            op_istore:   { { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); goto istore_done; } istore_done: DISPATCH(); }
+            op_astore:   { { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); goto astore_done; } astore_done: DISPATCH(); }
+            op_astore_0: { { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto astore_0_done; } astore_0_done: DISPATCH(); }
+            op_astore_1: { { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto astore_1_done; } astore_1_done: DISPATCH(); }
+            op_astore_2: { { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto astore_2_done; } astore_2_done: DISPATCH(); }
+            op_astore_3: { { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); goto astore_3_done; } astore_3_done: DISPATCH(); }
 
-            case 0x4f: op_iastore:
-            case 0x53: op_aastore:
-            case 0x54: op_bastore:
-            case 0x55: op_castore: {
+            op_iastore:
+            op_aastore:
+            op_bastore:
+            op_castore: { {
                 const uint32_t t0=statNow();
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 Value value = frame.pop();
@@ -1760,28 +1740,28 @@ dispatch_entry:
                 storeArrayElement(rt, label, writePc, arrayValue, indexValue, value, op == 0x54);
                 ++pc;
                 if(t0) rt.host->arrayStoreStats.record(nowUs()-t0);
-                DISPATCH();
-            }
+                goto castore_done;
+            } castore_done: DISPATCH(); }
 
-            case 0x59: op_dup: {
+            op_dup: { {
                 Value value = frame.pop();
                 frame.push(value);
                 frame.push(value);
                 ++pc;
-                DISPATCH();
-            }
+                goto dup_done;
+            } dup_done: DISPATCH(); }
 
-            case 0x5a: op_dup_x1: {
+            op_dup_x1: { {
                 Value value1 = frame.pop();
                 Value value2 = frame.pop();
                 frame.push(value1);
                 frame.push(value2);
                 frame.push(value1);
                 ++pc;
-                DISPATCH();
-            }
+                goto dup_x1_done;
+            } dup_x1_done: DISPATCH(); }
 
-            case 0x5b: op_dup_x2: {
+            op_dup_x2: { {
                 Value value1 = frame.pop();
                 Value value2 = frame.pop();
                 Value value3 = frame.pop();
@@ -1790,10 +1770,10 @@ dispatch_entry:
                 frame.push(value2);
                 frame.push(value1);
                 ++pc;
-                DISPATCH();
-            }
+                goto dup_x2_done;
+            } dup_x2_done: DISPATCH(); }
 
-            case 0x5c: op_dup2: {
+            op_dup2: { {
                 Value value1 = frame.pop();
                 Value value2 = frame.pop();
                 frame.push(value2);
@@ -1801,10 +1781,10 @@ dispatch_entry:
                 frame.push(value2);
                 frame.push(value1);
                 ++pc;
-                DISPATCH();
-            }
+                goto dup2_done;
+            } dup2_done: DISPATCH(); }
 
-            case 0x5d: op_dup2_x1: {
+            op_dup2_x1: { {
                 Value value1 = frame.pop();
                 Value value2 = frame.pop();
                 Value value3 = frame.pop();
@@ -1814,10 +1794,10 @@ dispatch_entry:
                 frame.push(value2);
                 frame.push(value1);
                 ++pc;
-                DISPATCH();
-            }
+                goto dup2_x1_done;
+            } dup2_x1_done: DISPATCH(); }
 
-            case 0x5e: op_dup2_x2: {
+            op_dup2_x2: { {
                 Value value1 = frame.pop();
                 Value value2 = frame.pop();
                 Value value3 = frame.pop();
@@ -1829,23 +1809,23 @@ dispatch_entry:
                 frame.push(value2);
                 frame.push(value1);
                 ++pc;
-                DISPATCH();
-            }
+                goto dup2_x2_done;
+            } dup2_x2_done: DISPATCH(); }
 
-            case 0x5f: op_swap: {
+            op_swap: { {
                 Value value1 = frame.pop();
                 Value value2 = frame.pop();
                 frame.push(value1);
                 frame.push(value2);
                 ++pc;
-                DISPATCH();
-            }
+                goto swap_done;
+            } swap_done: DISPATCH(); }
 
-            case 0x57: op_pop: {
-                const uint32_t t0m=statNow(); (void)frame.pop(); ++pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); DISPATCH();
-            }
+            op_pop: { {
+                const uint32_t t0m=statNow(); (void)frame.pop(); ++pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); goto pop_done;
+            } pop_done: DISPATCH(); }
 
-            case 0x84: op_iinc: {
+            op_iinc: { {
                 const uint32_t t0arith = statNow();
                 uint16_t index = codeU1(code, pc + 1);
                 int delta = codeS1(code, pc + 2);
@@ -1858,19 +1838,19 @@ dispatch_entry:
                 recordLocal(index, static_cast<uint32_t>(pc), newValue, "iinc");
                 pc += 3;
                 if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
-                DISPATCH();
-            }
+                goto iinc_done;
+            } iinc_done: DISPATCH(); }
 
-            case 0x60: op_iadd:
-            case 0x61: op_ladd:
-            case 0x64: op_isub:
-            case 0x65: op_lsub:
-            case 0x68: op_imul:
-            case 0x69: op_lmul:
-            case 0x6c: op_idiv:
-            case 0x6d: op_ldiv:
-            case 0x70: op_irem:
-            case 0x71: op_lrem: {
+            op_iadd:
+            op_ladd:
+            op_isub:
+            op_lsub:
+            op_imul:
+            op_lmul:
+            op_idiv:
+            op_ldiv:
+            op_irem:
+            op_lrem: { {
                 const uint32_t t0arith2 = statNow();
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
@@ -1897,35 +1877,35 @@ dispatch_entry:
                 }
                 if(t0arith2) rt.host->arithStats.record(nowUs() - t0arith2);
                 ++pc;
-                DISPATCH();
-            }
+                goto lrem_done;
+            } lrem_done: DISPATCH(); }
 
-            case 0x74: op_ineg: {
+            op_ineg: { {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
                 frame.push(parsed.has_value()
                     ? Value::ofInt(-*parsed)
                     : Value::named("(-" + value.asText() + ")"));
                 ++pc;
-                DISPATCH();
-            }
+                goto ineg_done;
+            } ineg_done: DISPATCH(); }
 
-            case 0x75: op_lneg: {
+            op_lneg: { {
                 Value value = frame.pop();
                 std::optional<long long> parsed = parseLongValue(value);
                 frame.push(parsed.has_value()
                     ? Value::ofLong(-*parsed)
                     : Value::named("(-" + value.asText() + ")"));
                 ++pc;
-                DISPATCH();
-            }
+                goto lneg_done;
+            } lneg_done: DISPATCH(); }
 
-            case 0x78: op_ishl:
-            case 0x7a: op_ishr:
-            case 0x7c: op_iushr:
-            case 0x7e: op_iand:
-            case 0x80: op_ior:
-            case 0x82: op_ixor: {
+            op_ishl:
+            op_ishr:
+            op_iushr:
+            op_iand:
+            op_ior:
+            op_ixor: { {
                 const uint32_t t0arith = statNow();
                 Value rhsValue = frame.pop();
                 Value lhsValue = frame.pop();
@@ -1945,12 +1925,12 @@ dispatch_entry:
                 }
                 if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
                 ++pc;
-                DISPATCH();
-            }
+                goto ixor_done;
+            } ixor_done: DISPATCH(); }
 
-            case 0x79: op_lshl:
-            case 0x7b: op_lshr:
-            case 0x7d: op_lushr: {
+            op_lshl:
+            op_lshr:
+            op_lushr: { {
                 const uint32_t t0arith = statNow();
                 Value rhsValue = frame.pop();
                 Value lhsValue = frame.pop();
@@ -1967,12 +1947,12 @@ dispatch_entry:
                 }
                 if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
                 ++pc;
-                DISPATCH();
-            }
+                goto lushr_done;
+            } lushr_done: DISPATCH(); }
 
-            case 0x7f: op_land:
-            case 0x81: op_lor:
-            case 0x83: op_lxor: {
+            op_land:
+            op_lor:
+            op_lxor: { {
                 const uint32_t t0arith = statNow();
                 Value rhsValue = frame.pop();
                 Value lhsValue = frame.pop();
@@ -1989,50 +1969,50 @@ dispatch_entry:
                 }
                 if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
                 ++pc;
-                DISPATCH();
-            }
+                goto lxor_done;
+            } lxor_done: DISPATCH(); }
 
-            case 0x85: op_i2l: {
+            op_i2l: { {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
                 frame.push(parsed.has_value() ? Value::ofLong(*parsed) : Value::named("<i2l:" + value.asText() + ">"));
                 ++pc;
-                DISPATCH();
-            }
+                goto i2l_done;
+            } i2l_done: DISPATCH(); }
 
-            case 0x88: op_l2i: {
+            op_l2i: { {
                 Value value = frame.pop();
                 std::optional<long long> parsed = parseLongValue(value);
                 frame.push(parsed.has_value() ? Value::ofInt(static_cast<int32_t>(*parsed)) : Value::named("<l2i:" + value.asText() + ">"));
                 ++pc;
-                DISPATCH();
-            }
+                goto l2i_done;
+            } l2i_done: DISPATCH(); }
 
-            case 0x91: op_i2b: {
+            op_i2b: { {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
                 frame.push(parsed.has_value() ? Value::ofInt(static_cast<int8_t>(*parsed)) : value);
                 ++pc;
-                DISPATCH();
-            }
+                goto i2b_done;
+            } i2b_done: DISPATCH(); }
 
-            case 0x92: op_i2c: {
+            op_i2c: { {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
                 frame.push(parsed.has_value() ? Value::ofInt(static_cast<uint16_t>(*parsed)) : value);
                 ++pc;
-                DISPATCH();
-            }
+                goto i2c_done;
+            } i2c_done: DISPATCH(); }
 
-            case 0x93: op_i2s: {
+            op_i2s: { {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
                 frame.push(parsed.has_value() ? Value::ofInt(static_cast<int16_t>(*parsed)) : value);
                 ++pc;
-                DISPATCH();
-            }
+                goto i2s_done;
+            } i2s_done: DISPATCH(); }
 
-            case 0x94: op_lcmp: {
+            op_lcmp: { {
                 Value rhs = frame.pop();
                 Value lhs = frame.pop();
                 std::optional<long long> left = parseLongValue(lhs);
@@ -2041,15 +2021,15 @@ dispatch_entry:
                     ? Value::ofInt(*left < *right ? -1 : *left > *right ? 1 : 0)
                     : Value::named("<lcmp:" + lhs.asText() + "," + rhs.asText() + ">"));
                 ++pc;
-                DISPATCH();
-            }
+                goto lcmp_done;
+            } lcmp_done: DISPATCH(); }
 
-            case 0x99: op_ifeq:
-            case 0x9a: op_ifne:
-            case 0x9b: op_iflt:
-            case 0x9c: op_ifge:
-            case 0x9d: op_ifgt:
-            case 0x9e: op_ifle: {
+            op_ifeq:
+            op_ifne:
+            op_iflt:
+            op_ifge:
+            op_ifgt:
+            op_ifle: { {
                 const uint32_t t0b=statNow();
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
@@ -2068,15 +2048,15 @@ dispatch_entry:
                 }
                 pc = taken ? target : pc + 3;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
-                DISPATCH();
-            }
+                goto ifle_done;
+            } ifle_done: DISPATCH(); }
 
-            case 0x9f: op_if_icmpeq:
-            case 0xa0: op_if_icmpne:
-            case 0xa1: op_if_icmplt:
-            case 0xa2: op_if_icmpge:
-            case 0xa3: op_if_icmpgt:
-            case 0xa4: op_if_icmple: {
+            op_if_icmpeq:
+            op_if_icmpne:
+            op_if_icmplt:
+            op_if_icmpge:
+            op_if_icmpgt:
+            op_if_icmple: { {
                 const uint32_t t0b=statNow();
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
@@ -2097,17 +2077,17 @@ dispatch_entry:
                 }
                 pc = taken ? target : pc + 3;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
-                DISPATCH();
-            }
+                goto if_icmple_done;
+            } if_icmple_done: DISPATCH(); }
 
-            case 0xa7: op_goto: {
+            op_goto: { {
                 const uint32_t t0b=statNow();
                 pc = branchTarget(pc, codeS2(code, pc + 1));
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
-                DISPATCH();
-            }
+                goto goto_done;
+            } goto_done: DISPATCH(); }
 
-            case 0xaa: op_tableswitch: {
+            op_tableswitch: { {
                 const uint32_t t0b=statNow();
                 Value keyValue = frame.pop();
                 const int32_t key = parseIntValue(keyValue).value_or(0);
@@ -2136,10 +2116,10 @@ dispatch_entry:
                 }
                 pc = target;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
-                DISPATCH();
-            }
+                goto tableswitch_done;
+            } tableswitch_done: DISPATCH(); }
 
-            case 0xab: op_lookupswitch: {
+            op_lookupswitch: { {
                 const uint32_t t0b=statNow();
                 Value keyValue = frame.pop();
                 const int32_t key = parseIntValue(keyValue).value_or(0);
@@ -2181,11 +2161,11 @@ dispatch_entry:
                 }
                 pc = target;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
-                DISPATCH();
-            }
+                goto lookupswitch_done;
+            } lookupswitch_done: DISPATCH(); }
 
-            case 0xc6: op_ifnull:
-            case 0xc7: op_ifnonnull: {
+            op_ifnull:
+            op_ifnonnull: { {
                 const uint32_t t0b=statNow();
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
@@ -2203,11 +2183,11 @@ dispatch_entry:
                 }
                 pc = taken ? target : pc + 3;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
-                DISPATCH();
-            }
+                goto ifnonnull_done;
+            } ifnonnull_done: DISPATCH(); }
 
-            case 0xb2: op_getstatic:
-            {
+            op_getstatic:
+            { {
                 const uint32_t t0m=statNow();
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 const uint64_t skey = callCacheKey(&cls, cpIdx);
@@ -2222,11 +2202,11 @@ dispatch_entry:
                 frame.push(it == rt.staticFields.end() ? Value::ofInt(0) : it->second);
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
-                DISPATCH();
-            }
+                goto getstatic_done;
+            } getstatic_done: DISPATCH(); }
 
-            case 0xb3: op_putstatic:
-            {
+            op_putstatic:
+            { {
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 const uint64_t skey = callCacheKey(&cls, cpIdx);
@@ -2241,11 +2221,11 @@ dispatch_entry:
                 rt.staticFields[key] = value;
                 if (rt.trace.recording) rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
                 pc += 3;
-                DISPATCH();
-            }
+                goto putstatic_done;
+            } putstatic_done: DISPATCH(); }
 
-            case 0xb4: op_getfield:
-            {
+            op_getfield:
+            { {
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 Value object = frame.pop();
                 std::optional<uint32_t> id = objectId(object);
@@ -2286,11 +2266,11 @@ dispatch_entry:
                 if(t0) rt.host->getfieldStats.record(nowUs() - t0);
                 frame.push(value);
                 pc += 3;
-                DISPATCH();
-            }
+                goto getfield_done;
+            } getfield_done: DISPATCH(); }
 
-            case 0xb5: op_putfield:
-            {
+            op_putfield:
+            { {
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 Value value = frame.pop();
@@ -2329,10 +2309,10 @@ dispatch_entry:
                     rt.trace.fieldWrites.push_back(FieldWrite{label, writePc, object, ref.className + "." + fieldName, value});
                 }
                 pc += 3;
-                DISPATCH();
-            }
+                goto putfield_done;
+            } putfield_done: DISPATCH(); }
 
-            case 0xb8: op_invokestatic: {
+            op_invokestatic: { {
                 const uint32_t t0inv = statNow();
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 const uint16_t cpIdx = codeU2(code, pc + 1);
@@ -2417,7 +2397,7 @@ dispatch_entry:
                         if (rt.pendingException.has_value()) {
                             if (catchPendingException(callPc)) {
                                 if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
-                                DISPATCH();
+                                goto invokestatic_done;
                             }
                             runtimeFrame.pc = callPc;
                             if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
@@ -2445,7 +2425,7 @@ dispatch_entry:
                         if (rt.pendingException.has_value()) {
                             if (catchPendingException(callPc)) {
                                 if(t0inv) rt.host->invokeStats.record(tDisp0);
-                                DISPATCH();
+                                goto invokestatic_done;
                             }
                             runtimeFrame.pc = callPc;
                             if(t0inv) rt.host->invokeStats.record(tDisp0);
@@ -2456,7 +2436,7 @@ dispatch_entry:
                         }
                         pc += 3;
                         if(t0inv) rt.host->invokeStats.record(tDisp0);
-                        DISPATCH();
+                        goto invokestatic_done;
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
@@ -2467,12 +2447,12 @@ dispatch_entry:
                 }
                 pc += 3;
                 if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
-                DISPATCH();
-            }
+                goto invokestatic_done;
+            } invokestatic_done: DISPATCH(); }
 
-            case 0xb6: op_invokevirtual:
-            case 0xb7: op_invokespecial:
-            case 0xb9: op_invokeinterface: {
+            op_invokevirtual:
+            op_invokespecial:
+            op_invokeinterface: { {
                 const uint32_t t0inv = statNow();
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 const bool isVirtualOp = (op == 0xb6 || op == 0xb9);
@@ -2609,7 +2589,7 @@ dispatch_entry:
                         if (rt.pendingException.has_value()) {
                             if (catchPendingException(static_cast<uint32_t>(pc))) {
                                 if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
-                                DISPATCH();
+                                goto invokeinterface_done;
                             }
                             runtimeFrame.pc = pc;
                             if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
@@ -2637,7 +2617,7 @@ dispatch_entry:
                         if (rt.pendingException.has_value()) {
                             if (catchPendingException(static_cast<uint32_t>(pc))) {
                                 if(t0inv) rt.host->invokeStats.record(tDisp0);
-                                DISPATCH();
+                                goto invokeinterface_done;
                             }
                             runtimeFrame.pc = pc;
                             if(t0inv) rt.host->invokeStats.record(tDisp0);
@@ -2648,7 +2628,7 @@ dispatch_entry:
                         }
                         pc += op == 0xb9 ? 5 : 3;
                         if(t0inv) rt.host->invokeStats.record(tDisp0);
-                        DISPATCH();
+                        goto invokeinterface_done;
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
@@ -2660,7 +2640,7 @@ dispatch_entry:
                         if (rt.pendingException.has_value()) {
                             if (catchPendingException(static_cast<uint32_t>(pc))) {
                                 if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
-                                DISPATCH();
+                                goto invokeinterface_done;
                             }
                             runtimeFrame.pc = pc;
                             if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
@@ -2679,22 +2659,22 @@ dispatch_entry:
                 }
                 pc += op == 0xb9 ? 5 : 3;
                 if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
-                DISPATCH();
-            }
+                goto invokeinterface_done;
+            } invokeinterface_done: DISPATCH(); }
 
-            case 0xbb: op_new:
-            {
+            op_new:
+            { {
                 const uint32_t t0m=statNow();
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
                 frame.push(allocateObject(rt, classes, label, allocPc, className));
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
-                DISPATCH();
-            }
+                goto new_done;
+            } new_done: DISPATCH(); }
 
-            case 0xbc: op_newarray:
-            {
+            op_newarray:
+            { {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 uint8_t atype = codeU1(code, pc + 1);
                 Value countValue = frame.pop();
@@ -2705,11 +2685,11 @@ dispatch_entry:
                     frame.push(Value::named("<array>"));
                 }
                 pc += 2;
-                DISPATCH();
-            }
+                goto newarray_done;
+            } newarray_done: DISPATCH(); }
 
-            case 0xbd: op_anewarray:
-            {
+            op_anewarray:
+            { {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
@@ -2719,11 +2699,11 @@ dispatch_entry:
                     frame.push(Value::named("<array>"));
                 }
                 pc += 3;
-                DISPATCH();
-            }
+                goto anewarray_done;
+            } anewarray_done: DISPATCH(); }
 
-            case 0xc5: op_multianewarray:
-            {
+            op_multianewarray:
+            { {
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 uint8_t dimensions = codeU1(code, pc + 3);
                 std::vector<int> counts(dimensions, -1);
@@ -2743,11 +2723,11 @@ dispatch_entry:
                     frame.push(Value::named("<array>"));
                 }
                 pc += 4;
-                DISPATCH();
-            }
+                goto multianewarray_done;
+            } multianewarray_done: DISPATCH(); }
 
-            case 0xbe: op_arraylength:
-            {
+            op_arraylength:
+            { {
                 const uint32_t t0m=statNow();
                 Value arrayValue = frame.pop();
                 std::optional<uint32_t> id = arrayId(arrayValue);
@@ -2757,23 +2737,23 @@ dispatch_entry:
                         frame.push(Value::ofInt(static_cast<int32_t>(primIt->second.size())));
                         ++pc;
                         if(t0m) rt.host->miscStats.record(nowUs()-t0m);
-                        DISPATCH();
+                        goto arraylength_done;
                     }
                     auto arrayIt = rt.arrays.find(*id);
                     if (arrayIt != rt.arrays.end()) {
                         frame.push(Value::ofInt(static_cast<int32_t>(arrayIt->second.size())));
                         ++pc;
                         if(t0m) rt.host->miscStats.record(nowUs()-t0m);
-                        DISPATCH();
+                        goto arraylength_done;
                     }
                 }
                 frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
                 ++pc;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
-                DISPATCH();
-            }
+                goto arraylength_done;
+            } arraylength_done: DISPATCH(); }
 
-            case 0xbf: op_athrow: {
+            op_athrow: { {
                 const uint32_t throwPc = static_cast<uint32_t>(pc);
                 Value exception = frame.pop();
                 if (exception.isNull()) {
@@ -2781,30 +2761,25 @@ dispatch_entry:
                 }
                 setPendingException(rt, std::move(exception), label, throwPc);
                 if (catchPendingException(throwPc)) {
-                    DISPATCH();
+                    goto athrow_done;
                 }
                 runtimeFrame.pc = throwPc;
                 return finish(std::nullopt);
-            }
+            } athrow_done: DISPATCH(); }
 
-            case 0xac: op_ireturn:
-            case 0xad: op_lreturn:
-            case 0xb0: op_areturn: {
+            op_ireturn:
+            op_lreturn:
+            op_areturn: {
                 const uint32_t t0m=statNow(); Value v=frame.pop(); runtimeFrame.pc=pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); return finish(v);
             }
-            case 0xb1: op_return: {
+            op_return: {
                 const uint32_t t0m=statNow(); runtimeFrame.pc=pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); return finish(std::nullopt);
             }
 
-            default: {
-                const uint32_t t0m=statNow();
-                pc += instructionLength(op);
-                if(t0m) rt.host->miscStats.record(nowUs()-t0m);
-                break;
-            }
-        }
-    }
-
+    // No textual fall-through reaches the scaffold labels below — every
+    // handler ends with DISPATCH() (goto) or `return finish(...)`. The
+    // explicit jump keeps the source-order layout sane and matches the
+    // pre-Step-4 guard.
     goto skip_scaffold_labels;
 
     // ---- Computed-goto scaffold labels (Step 1) ----
