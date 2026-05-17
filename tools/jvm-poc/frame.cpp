@@ -3,41 +3,44 @@
 
 namespace jvmpoc {
 
-Frame::Frame(size_t maxLocals, size_t maxStack) : locals_(maxLocals) {
-    stack_.reserve(maxStack);
-}
-
 void Frame::setLocal(uint16_t index, Value value) {
-    if (index < locals_.size()) {
+    if (index < maxLocals_) {
         locals_[index] = std::move(value);
     }
 }
 
 const Value& Frame::local(uint16_t index) const {
-    // Returns a ref into locals_ — callers that push() this will copy once, not twice.
-    // pop() already uses std::move so no copy there.
     static const Value kDefault = Value::ofInt(0);
-    if (index < locals_.size() && locals_[index].isInitialized()) {
+    if (index < maxLocals_ && locals_[index].isInitialized()) {
         return locals_[index];
     }
     return kDefault;
 }
 
 void Frame::push(Value value) {
-    stack_.push_back(std::move(value));
+    if (stackTop_ >= slotsEnd_) {
+        // Arena exhausted. Dropping silently produces garbage in subsequent
+        // pops but won't corrupt memory; the matching frame-allocation check
+        // in executeMethod returns a <frame-arena-overflow> sentinel for
+        // recoverable signaling.
+        return;
+    }
+    *stackTop_++ = std::move(value);
 }
 
 Value Frame::pop() {
-    if (stack_.empty()) {
+    if (stackTop_ <= stackBase_) {
         return Value::named("<stack-underflow>");
     }
-    Value value = std::move(stack_.back()); // move out to avoid string copy
-    stack_.pop_back();
-    return value;
+    --stackTop_;
+    return std::move(*stackTop_);
 }
 
 void Frame::clearStack() {
-    stack_.clear();
+    while (stackTop_ > stackBase_) {
+        --stackTop_;
+        *stackTop_ = Value{};
+    }
 }
 
 } // namespace jvmpoc

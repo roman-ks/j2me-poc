@@ -227,7 +227,32 @@ struct RuntimeFrame {
     const MethodInfo* method = nullptr;
     size_t pc = 0;
     Frame frame;
+    // Populated only while this RuntimeFrame lives in ThreadTask::suspendedFrames.
+    // Holds a copy of the [locals... stack...] slot range that was in the arena
+    // before yield; restored back into the arena on resume.
+    std::vector<Value> suspendedSlots;
 };
+
+// Shared bump-allocated frame slot buffer. Replaces the per-frame malloc that
+// std::vector<Value, SramAllocator> used to do. Sized once at Runtime
+// construction; never grows. Slots are default-constructed Values (kNone);
+// frame allocation just hands out a Value* pointing into the buffer.
+//
+// Allocation point: callStack.back().frame.stackEnd() — i.e., the actual
+// operand-stack top of the calling frame (not stackBase + maxStack). This
+// transparently handles cases where the interpreter pushes more than the
+// .class-declared max_stack.
+//
+// Pop is implicit: the next allocation reads stackEnd() of the new top frame.
+struct FrameArena {
+    std::vector<Value, SramAllocator<Value>> slots;
+    Value* begin() { return slots.data(); }
+    Value* end() { return slots.data() + slots.size(); }
+    const Value* begin() const { return slots.data(); }
+    const Value* end() const { return slots.data() + slots.size(); }
+};
+
+constexpr size_t kFrameArenaSlots = 2730; // ≈ 32 KB at sizeof(Value)=12 on ESP32
 
 struct ThreadTask {
     const ClassFile* cls = nullptr;
@@ -255,6 +280,11 @@ struct NamedProfileAccumulator {
 };
 
 struct Runtime {
+    Runtime() {
+        frameArena.slots.resize(kFrameArenaSlots);
+    }
+
+    FrameArena frameArena;
     const JvmHost* host = nullptr;
     MidletSession* session = nullptr;
     ThreadTask* currentTask = nullptr;
@@ -947,6 +977,55 @@ void restoreCallStackReserve(Runtime& rt) {
     }
 }
 
+// Yield: copy each callStack frame's [locals... stack...] slots out of the
+// arena into RuntimeFrame::suspendedSlots, then move the frames into the
+// task's suspendedFrames container. Arena is implicitly reusable as soon as
+// callStack becomes empty (allocations restart at arena.begin()).
+void suspendCallStackInto(Runtime& rt, ThreadTask& task) {
+    for (RuntimeFrame& rf : rt.callStack) {
+        const size_t total = rf.frame.localsSize() + rf.frame.stackSize();
+        rf.suspendedSlots.clear();
+        rf.suspendedSlots.reserve(total);
+        Value* begin = rf.frame.slotsBegin();
+        for (size_t i = 0; i < total; ++i) {
+            rf.suspendedSlots.emplace_back(std::move(begin[i]));
+        }
+    }
+    task.suspendedFrames = std::move(rt.callStack);
+    rt.callStack.clear();
+    restoreCallStackReserve(rt);
+}
+
+// Resume: rebuild rt.callStack from task.suspendedFrames, copying each
+// frame's suspendedSlots back into freshly-bumped arena regions and
+// rebinding the Frame view. Frames are restored in original order (caller
+// first) so each allocation derives its base from the just-restored top.
+// The total slot footprint matches what was previously live in the arena,
+// so a fresh arena (callStack empty between tasks) is guaranteed to fit.
+void resumeCallStackFrom(Runtime& rt, ThreadTask& task) {
+    std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> source = std::move(task.suspendedFrames);
+    task.suspendedFrames.clear();
+    rt.callStack.clear();
+    restoreCallStackReserve(rt);
+    Value* arenaEnd = rt.frameArena.end();
+    for (RuntimeFrame& rf : source) {
+        Value* base = rt.callStack.empty()
+            ? rt.frameArena.begin()
+            : rt.callStack.back().frame.stackEnd();
+        const uint16_t maxLocals = static_cast<uint16_t>(rf.frame.localsSize());
+        const uint16_t maxStack = rf.frame.maxStack();
+        const size_t total = rf.suspendedSlots.size();
+        const size_t stackUsed = total >= maxLocals ? total - maxLocals : 0;
+        for (size_t i = 0; i < total; ++i) {
+            base[i] = std::move(rf.suspendedSlots[i]);
+        }
+        rf.suspendedSlots.clear();
+        rf.suspendedSlots.shrink_to_fit();
+        rf.frame = Frame(base, arenaEnd, maxLocals, maxStack, stackUsed);
+        rt.callStack.push_back(std::move(rf));
+    }
+}
+
 Value internString(Runtime& rt, const std::string& text) {
     auto internIt = rt.internedStrings.find(text);
     if (internIt != rt.internedStrings.end() && rt.strings.find(internIt->second) != rt.strings.end()) {
@@ -1022,13 +1101,15 @@ void collectGarbage(Runtime& rt, std::string when) {
         addRoot(report, "pendingException", *rt.pendingException, rt, markedObjects, markedArrays);
     }
     for (const RuntimeFrame& runtimeFrame : rt.callStack) {
-        const Frame::ValueVec& locals = runtimeFrame.frame.locals();
-        for (size_t i = 0; i < locals.size(); ++i) {
+        const Value* locals = runtimeFrame.frame.localsData();
+        const size_t localsSize = runtimeFrame.frame.localsSize();
+        for (size_t i = 0; i < localsSize; ++i) {
             addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
         }
 
-        const Frame::ValueVec& stack = runtimeFrame.frame.stack();
-        for (size_t i = 0; i < stack.size(); ++i) {
+        const Value* stack = runtimeFrame.frame.stackData();
+        const size_t stackSize = runtimeFrame.frame.stackSize();
+        for (size_t i = 0; i < stackSize; ++i) {
             addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
     }
@@ -1038,13 +1119,17 @@ void collectGarbage(Runtime& rt, std::string when) {
                 addRoot(report, "task pendingException", *task.pendingException, rt, markedObjects, markedArrays);
             }
             for (const RuntimeFrame& runtimeFrame : task.suspendedFrames) {
-                const Frame::ValueVec& locals = runtimeFrame.frame.locals();
-                for (size_t i = 0; i < locals.size(); ++i) {
-                    addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
+                // Suspended frames' arena slots have been copied out; walk
+                // the side buffer instead. Layout: [locals..., stack...].
+                const std::vector<Value>& slots = runtimeFrame.suspendedSlots;
+                const size_t localsSize = runtimeFrame.frame.localsSize();
+                const size_t total = slots.size();
+                const size_t suspendedLocals = std::min(localsSize, total);
+                for (size_t i = 0; i < suspendedLocals; ++i) {
+                    addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", slots[i], rt, markedObjects, markedArrays);
                 }
-                const Frame::ValueVec& stack = runtimeFrame.frame.stack();
-                for (size_t i = 0; i < stack.size(); ++i) {
-                    addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+                for (size_t i = suspendedLocals; i < total; ++i) {
+                    addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i - suspendedLocals) + "]", slots[i], rt, markedObjects, markedArrays);
                 }
             }
         }
@@ -2552,9 +2637,24 @@ std::optional<Value> executeMethod(
         return Value::named("<call-depth-limit>");
     }
 
+    // Bump-allocate the frame's slot region in the arena. New frame starts at
+    // the calling frame's actual operand-stack top (or arena base if no
+    // caller). Overflow returns a sentinel — same shape as the depth limit.
+    Value* slabBase = rt.callStack.empty()
+        ? rt.frameArena.begin()
+        : rt.callStack.back().frame.stackEnd();
+    Value* arenaEnd = rt.frameArena.end();
+    const size_t needed = static_cast<size_t>(method.maxLocals) + static_cast<size_t>(method.maxStack);
+    if (slabBase + needed > arenaEnd) {
+        return Value::named("<frame-arena-overflow>");
+    }
+
     // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
     std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
-    RuntimeFrame runtimeFrame{std::move(label), &cls, &method, 0, Frame(method.maxLocals, method.maxStack)};
+    RuntimeFrame runtimeFrame{
+        std::move(label), &cls, &method, 0,
+        Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
+        {}};
     // Pass args to delegateMethodExecution BEFORE consuming them in the lambda so
     // the timing delegate can read args[1]/args[2] for make_buf logging.
     return delegateMethodExecution(cls, method, args, [&]() {
@@ -2784,8 +2884,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.stepLimitYieldEnabled = true;
         try {
             if (!task.suspendedFrames.empty()) {
-                rt.callStack = std::move(task.suspendedFrames);
-                task.suspendedFrames.clear();
+                resumeCallStackFrom(rt, task);
                 resumeTaskStack();
             } else if (task.cls != nullptr && task.method != nullptr) {
                 std::vector<Value> taskArgs = {task.receiver};
@@ -2809,9 +2908,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 task.wakeAtMillis = now + rt.yieldMillis;
                 if (!rt.callStack.empty()) {
                     const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
-                    task.suspendedFrames = std::move(rt.callStack);
-                    rt.callStack.clear();
-                    restoreCallStackReserve(rt);
+                    suspendCallStackInto(rt, task);
                     if (profileFrame) {
                         rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
                     }
@@ -2835,9 +2932,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             task.wakeAtMillis = now + request.millis;
             if (!rt.callStack.empty()) {
                 const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
-                task.suspendedFrames = std::move(rt.callStack);
-                rt.callStack.clear();
-                restoreCallStackReserve(rt);
+                suspendCallStackInto(rt, task);
                 if (profileFrame) {
                     rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
                 }
