@@ -1461,6 +1461,28 @@ std::optional<Value> resumeCurrentMethod(
         return kCollectStats ? nowUs() : 0u;
     };
 
+    // ---- Computed-goto dispatch scaffold (Step 1) ----
+    // Table is populated with op_unknown for every slot; per-opcode handler
+    // labels fill in during Step 2. The table is unused until Step 3 wires
+    // DISPATCH() into the main flow; switch() still drives execution today.
+    // Initialized at runtime because label-address values are not constant
+    // expressions in C++ (no designated/range initializers permitted).
+    const void* kDispatch[256];
+    for (auto& slot : kDispatch) slot = &&op_unknown;
+    uint8_t op = 0;
+    (void)kDispatch;
+    (void)op;
+
+#define DISPATCH()                                                              \
+    do {                                                                        \
+        if ((++rt.steps & 0xFFu) == 0 && rt.steps > kMaxSteps) {                \
+            goto step_limit_path;                                               \
+        }                                                                       \
+        op = code[pc];                                                          \
+        goto *kDispatch[op];                                                    \
+    } while (0)
+
+dispatch_entry:
     while (pc < codeSize) {
         // Batched step-limit check: increment every step, but only consult
         // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
@@ -2628,6 +2650,32 @@ std::optional<Value> resumeCurrentMethod(
         }
     }
 
+    goto skip_scaffold_labels;
+
+    // ---- Computed-goto scaffold labels (Step 1) ----
+    // Reachable only via computed-goto through kDispatch[] / DISPATCH(); both
+    // are inert in Step 1. Bodies mirror the current default-case and
+    // step-limit branches so handlers can wire to them in later steps.
+op_unknown: {
+        const uint32_t t0m = statNow();
+        pc += instructionLength(code[pc]);
+        if (t0m) rt.host->miscStats.record(nowUs() - t0m);
+        DISPATCH();
+    }
+step_limit_path: {
+        rt.trace.stepLimitHit = true;
+        if (!rt.stepLimitYieldEnabled) {
+            rt.steps = 0;
+            goto dispatch_entry;
+        }
+        runtimeFrame.pc = pc;
+        captureStackSnapshot(rt.trace, rt.callStack);
+        requestThreadYield(rt, 1);
+        return std::nullopt;
+    }
+
+skip_scaffold_labels:
+#undef DISPATCH
     runtimeFrame.pc = pc;
     return finish(std::nullopt);
 }
