@@ -1632,6 +1632,12 @@ std::optional<Value> resumeCurrentMethod(
     } while (0)
 
 dispatch_entry:
+    DISPATCH();
+    // ---- Step 3: dispatch table drives execution from here on. ----
+    // The while/switch block below is unreachable; it is retained so that
+    // the per-opcode `case 0xXX:` labels and the `default:` body remain
+    // present in source. Step 4 deletes the wrapper and the case labels;
+    // Step 5 polishes op_unknown and adds the debug pc-bounds assert.
     while (pc < codeSize) {
         // Batched step-limit check: increment every step, but only consult
         // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
@@ -2806,13 +2812,14 @@ dispatch_entry:
     // are inert in Step 1. Bodies mirror the current default-case and
     // step-limit branches so handlers can wire to them in later steps.
 op_unknown: {
-        // Transitional behavior for Steps 2-4: route back through the
-        // surviving switch via dispatch_entry, so chains that DISPATCH() into
-        // an opcode whose label/table-entry hasn't been added yet are still
-        // handled correctly by the original switch's case. Step 5 restores
-        // this label to the real default behavior (skip + record + DISPATCH)
-        // once the switch has been removed.
-        goto dispatch_entry;
+        // Step 3+: the dispatch table drives execution, so this label is the
+        // sole fallback for opcodes without a kDispatch entry. Mirrors the
+        // legacy switch `default:` body — skip the instruction and re-enter
+        // dispatch. Step 5 may add diagnostic recording.
+        const uint32_t t0m = statNow();
+        pc += instructionLength(op);
+        if (t0m) rt.host->miscStats.record(nowUs() - t0m);
+        DISPATCH();
     }
 step_limit_path: {
         rt.trace.stepLimitHit = true;
