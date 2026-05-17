@@ -72,6 +72,13 @@ struct NativeCallContext {
     // Scratch canvas written by graphicsCanvas() on each call; also used for the
     // framebuffer fallback path. Callers must not hold the pointer across calls.
     std::optional<port::Canvas> scratchCanvas = std::nullopt;
+    // Last source-image lookup cache. Consecutive drawImage calls almost always
+    // reuse the same source (e.g. multiple blits from the same sprite sheet),
+    // so a single uint32_t compare skips the ctx.images hash lookup on hit.
+    // Must be invalidated whenever ctx.images is mutated (unordered_map insert
+    // may rehash and dangle the cached pointer).
+    uint32_t lastSourceImageId = 0;
+    const port::Image* lastSourceImage = nullptr;
 };
 
 struct NativeCallResult {

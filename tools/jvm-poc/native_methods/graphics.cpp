@@ -100,19 +100,31 @@ NativeCallResult handleGraphics(
         constexpr uint32_t tSetup = 0;
 #endif
         std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
-        auto imageIt = image.has_value() ? ctx.images.find(*image) : ctx.images.end();
+        const port::Image* imagePtr = nullptr;
+        if (image.has_value()) {
+            if (*image == ctx.lastSourceImageId && ctx.lastSourceImage != nullptr) {
+                imagePtr = ctx.lastSourceImage;
+            } else {
+                auto imageIt = ctx.images.find(*image);
+                if (imageIt != ctx.images.end()) {
+                    imagePtr = &imageIt->second;
+                    ctx.lastSourceImageId = *image;
+                    ctx.lastSourceImage = imagePtr;
+                }
+            }
+        }
         port::Canvas* canvas = graphicsCanvas(ctx, receiver);
         const int diX = intArg(args, 2);
         const int diY = intArg(args, 3);
         const int diAnchor = intArg(args, 4);
-        if (canvas != nullptr && image.has_value() && imageIt != ctx.images.end()) {
+        if (canvas != nullptr && imagePtr != nullptr) {
 #if JVM_ENABLE_NATIVE_PROFILING
             const uint32_t t0 = nowUs();
             if (tSetup) ctx.host->drawImageSetupStats.record(t0 - tSetup);
-            canvas->drawImage(imageIt->second, diX, diY, diAnchor);
+            canvas->drawImage(*imagePtr, diX, diY, diAnchor);
             if (ctx.host != nullptr && ctx.host->profileNatives) ctx.host->drawImageStats.record(nowUs() - t0);
 #else
-            canvas->drawImage(imageIt->second, diX, diY, diAnchor);
+            canvas->drawImage(*imagePtr, diX, diY, diAnchor);
 #endif
         } else if (tSetup) {
             ctx.host->drawImageSetupStats.record(nowUs() - tSetup);

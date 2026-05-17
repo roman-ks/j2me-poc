@@ -8,6 +8,8 @@ namespace {
 Value storeImage(NativeCallContext& ctx, port::Image image) {
     uint32_t id = ctx.nextImageId++;
     ctx.images[id] = std::move(image);
+    ctx.lastSourceImage = nullptr;
+    ctx.lastSourceImageId = 0;
     return Value::ofInt(Value::kHandleImgTag | static_cast<int32_t>(id & 0xFFFFFF));
 }
 
