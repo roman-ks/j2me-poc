@@ -339,9 +339,9 @@ void Canvas::drawString(const char* text, int x, int y, int anchor) {
         return;
     }
 
-    constexpr int kGlyphWidth = 5;
-    constexpr int kGlyphHeight = 8;
-    constexpr int kGlyphAdvance = 6;
+    constexpr int kGlyphWidth = port::kBitmapFontGlyphWidth;
+    constexpr int kGlyphHeight = port::kBitmapFontHeight;
+    constexpr int kGlyphAdvance = port::kBitmapFontAdvance;
 
     const int textLen = static_cast<int>(std::strlen(text));
     int drawX = x;

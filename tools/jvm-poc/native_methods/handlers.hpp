@@ -16,6 +16,12 @@ NativeCallResult handleDisplay(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeCallResult handleFont(
+    NativeCallContext& ctx,
+    const std::string& methodLabel,
+    uint32_t pc,
+    const MethodRef& ref,
+    const std::vector<Value>& args);
 NativeCallResult handleGraphics(
     NativeCallContext& ctx,
     const std::string& methodLabel,

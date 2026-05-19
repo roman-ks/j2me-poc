@@ -4,6 +4,13 @@
 
 namespace port {
 
+// Glyph cell metrics for kBitmapFont5x7. Single source of truth for both the
+// Canvas renderer and the javax.microedition.lcdui.Font native handlers.
+static constexpr int kBitmapFontGlyphWidth = 5;   // bitmap columns per glyph
+static constexpr int kBitmapFontAdvance    = 6;   // x-step between glyphs (5 + 1px gap)
+static constexpr int kBitmapFontHeight     = 8;   // line height
+static constexpr int kBitmapFontBaseline   = 7;   // top → baseline distance
+
 static constexpr uint8_t kBitmapFont5x7[] = {
     0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x5F, 0x00, 0x00,

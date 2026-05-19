@@ -25,4 +25,8 @@ public final class Graphics {
     public native void drawString(String str, int x, int y, int anchor);
 
     public native void drawImage(Image img, int x, int y, int anchor);
+
+    public native void setFont(Font font);
+
+    public native Font getFont();
 }

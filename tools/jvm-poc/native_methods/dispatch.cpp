@@ -40,6 +40,10 @@ NativeCallResult handleNativeStaticCall(
         return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "javax/microedition/lcdui/Font") {
+        return native_methods::handleFont(ctx, methodLabel, pc, ref, args);
+    }
+
     if (ref.className == "java/lang/System") {
         return native_methods::handleSystem(ctx, methodLabel, pc, ref, args);
     }
@@ -62,6 +66,7 @@ NativeCallResult handleNativeStaticCall(
 NativeHandler resolveNativeStaticHandler(const std::string& className) {
     if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
     if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
+    if (className == "javax/microedition/lcdui/Font")    return &native_methods::handleFont;
     if (className == "java/lang/System")                 return &native_methods::handleSystem;
     if (className == "java/lang/Thread")                 return &native_methods::handleThread;
     if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
@@ -105,6 +110,10 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleImage(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "javax/microedition/lcdui/Font") {
+        return native_methods::handleFont(ctx, methodLabel, pc, ref, args);
+    }
+
     const bool receiverIsCanvas =
         ctx.classes != nullptr &&
         isClassOrSubclassOf(*ctx.classes, ctx.receiverClassName, "javax/microedition/lcdui/Canvas");
@@ -133,6 +142,7 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
     if (className == "javax/microedition/lcdui/Display")    return &native_methods::handleDisplay;
     if (className == "javax/microedition/lcdui/Graphics")   return &native_methods::handleGraphics;
     if (className == "javax/microedition/lcdui/Image")      return &native_methods::handleImage;
+    if (className == "javax/microedition/lcdui/Font")       return &native_methods::handleFont;
     if (className == "javax/microedition/lcdui/Canvas")     return &native_methods::handleCanvas;
     if (className == "java/lang/String")                    return &native_methods::handleString;
     if (className == "java/lang/Thread")                    return &native_methods::handleThread;

@@ -249,6 +249,14 @@ NativeCallResult handleGraphics(
         return handledVoid();
     }
 
+    if (ref.name == "setFont" && ref.descriptor == "(Ljavax/microedition/lcdui/Font;)V") {
+        // Only one physical font (port::kBitmapFont5x7). No-op.
+        return handledVoid();
+    }
+    if (ref.name == "getFont" && ref.descriptor == "()Ljavax/microedition/lcdui/Font;") {
+        return handledValue(Value::named("font:default"));
+    }
+
     if (ref.name == "drawString" && ref.descriptor == "(Ljava/lang/String;III)V") {
         std::string text = stringArg(ctx, args, 1);
         int x = intArg(args, 2);
