@@ -22,6 +22,7 @@ struct FileImpl {
     virtual size_t read(void* buf, size_t size) = 0;
     virtual size_t write(const void* buf, size_t size) = 0;
     virtual bool seek(uint32_t pos) = 0;
+    virtual size_t size() const = 0;
     virtual bool isOpen() const = 0;
     virtual void close() = 0;
 
@@ -117,6 +118,10 @@ public:
 
     bool seek(uint32_t pos){
         return impl ? impl->seek(pos) : false;
+    }
+
+    size_t size() const {
+        return impl ? impl->size() : 0;
     }
 
     bool isOpen() const { return impl && impl->isOpen(); }

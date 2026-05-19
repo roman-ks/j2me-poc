@@ -94,6 +94,29 @@ NativeCallResult handleString(
         return handledValue(Value::ofInt(-1));
     }
 
+    if (ref.name == "equals" && ref.descriptor == "(Ljava/lang/Object;)Z") {
+        // Content equality when both sides resolve to strings in ctx.strings;
+        // otherwise fall back to raw handle identity. This avoids needing the
+        // interpreter's instanceof/checkcast (0xc0/0xc1) opcodes — neither is
+        // implemented yet — at the cost of returning false for the
+        // non-String-arg case where real Java would also return false. Edge
+        // case where 'other' is null: receiver.equals(null) → false.
+        std::optional<uint32_t> leftId = objectId(receiver);
+        Value rhs = args.size() > 1 ? args[1] : Value::ofInt(0);
+        if (rhs.isNull()) {
+            return handledValue(Value::ofInt(0));
+        }
+        std::optional<uint32_t> rightId = objectId(rhs);
+        auto leftIt = leftId.has_value() ? ctx.strings.find(*leftId) : ctx.strings.end();
+        auto rightIt = rightId.has_value() ? ctx.strings.find(*rightId) : ctx.strings.end();
+        if (leftIt != ctx.strings.end() && rightIt != ctx.strings.end()) {
+            return handledValue(Value::ofInt(leftIt->second == rightIt->second ? 1 : 0));
+        }
+        // Handle identity fallback (matches Object.equals default semantics).
+        const bool same = leftId.has_value() && rightId.has_value() && *leftId == *rightId;
+        return handledValue(Value::ofInt(same ? 1 : 0));
+    }
+
     if (ref.name == "compareTo" && ref.descriptor == "(Ljava/lang/String;)I") {
         std::optional<uint32_t> leftId = objectId(receiver);
         std::optional<uint32_t> rightId = args.size() > 1 ? objectId(args[1]) : std::nullopt;

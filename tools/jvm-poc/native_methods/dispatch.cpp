@@ -134,6 +134,10 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleRecordStore(ctx, methodLabel, pc, ref, args);
     }
 
+    if (ref.className == "javax/microedition/media/Player") {
+        return native_methods::handlePlayer(ctx, methodLabel, pc, ref, args);
+    }
+
     return NativeCallResult{};
 }
 
@@ -147,6 +151,7 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
     if (className == "java/lang/String")                    return &native_methods::handleString;
     if (className == "java/lang/Thread")                    return &native_methods::handleThread;
     if (className == "javax/microedition/rms/RecordStore")  return &native_methods::handleRecordStore;
+    if (className == "javax/microedition/media/Player")     return &native_methods::handlePlayer;
     return nullptr;
 }
 
