@@ -9,7 +9,7 @@ COMMON_SRCS := class_file.cpp bytecode.cpp extracted_midlet.cpp frame.cpp value.
 	stb_image_decoder.cpp \
 	native_methods/helpers.cpp native_methods/native_runtime.cpp native_methods/display.cpp \
 	native_methods/midlet.cpp native_methods/canvas.cpp native_methods/image.cpp native_methods/graphics.cpp native_methods/system.cpp \
-	native_methods/string.cpp native_methods/thread.cpp native_methods/dispatch.cpp \
+	native_methods/string.cpp native_methods/thread.cpp native_methods/rms.cpp native_methods/dispatch.cpp \
 	j2me_port/Canvas.cpp j2me_port/J2MECompat.cpp
 COMMON_OBJS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(COMMON_SRCS))
 APP_OBJS := $(BUILD_DIR)/main.o $(COMMON_OBJS)

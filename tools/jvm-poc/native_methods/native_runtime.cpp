@@ -2,6 +2,8 @@
 
 #include "helpers.hpp"
 
+#include <optional>
+
 namespace jvmpoc::native_methods {
 
 NativeCallResult handleNativeRuntime(
@@ -11,10 +13,12 @@ NativeCallResult handleNativeRuntime(
     const MethodRef& ref,
     const std::vector<Value>& args) {
     if (ref.name == "printInt" && ref.descriptor == "(I)V") {
+        Value value = args.empty() ? Value::named("<missing-arg>") : args[0];
+        std::optional<int> parsed = parseIntValue(value);
         if (ctx.trace.recording) ctx.trace.runtimePrints.push_back(RuntimePrint{
             methodLabel,
             pc,
-            args.empty() ? Value::named("<missing-arg>") : args[0],
+            parsed.has_value() ? Value::ofLong(*parsed) : value,
         });
         return handledVoid();
     }

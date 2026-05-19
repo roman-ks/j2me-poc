@@ -9,4 +9,6 @@ public abstract class MIDlet {
     protected abstract void pauseApp();
 
     protected abstract void destroyApp(boolean unconditional);
+
+    public final native String getAppProperty(String key);
 }

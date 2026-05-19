@@ -4,13 +4,6 @@
 
 namespace jvmpoc::native_methods {
 
-bool nativeRuntimeClassMatches(const std::string& className) {
-    const std::string suffix = "/NativeRuntime";
-    return className == "NativeRuntime" ||
-           (className.size() >= suffix.size() &&
-            className.compare(className.size() - suffix.size(), suffix.size(), suffix) == 0);
-}
-
 bool returnsValue(const std::string& descriptor) {
     size_t close = descriptor.find(')');
     return close != std::string::npos && close + 1 < descriptor.size() && descriptor[close + 1] != 'V';
@@ -92,9 +85,9 @@ std::string stringArg(const NativeCallContext& ctx, const std::vector<Value>& ar
     if (index >= args.size()) {
         return "";
     }
-    std::optional<uint32_t> id = stringObjectId(ctx, args[index]);
+    std::optional<uint32_t> id = objectId(args[index]);
     auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
-    return id.has_value() && strIt != ctx.strings.end() ? strIt->second : args[index].asText();
+    return strIt != ctx.strings.end() ? strIt->second : args[index].asText();
 }
 
 } // namespace jvmpoc::native_methods

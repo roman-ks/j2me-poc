@@ -9,6 +9,7 @@ namespace jvmpoc {
 uint8_t codeU1(const std::vector<uint8_t>& code, size_t pc);
 int8_t codeS1(const std::vector<uint8_t>& code, size_t pc);
 int16_t codeS2(const std::vector<uint8_t>& code, size_t pc);
+int32_t codeS4(const std::vector<uint8_t>& code, size_t pc);
 uint16_t codeU2(const std::vector<uint8_t>& code, size_t pc);
 size_t instructionLength(uint8_t op);
 
@@ -24,6 +25,13 @@ inline int8_t codeS1(const uint8_t* code, size_t pc) {
 inline int16_t codeS2(const uint8_t* code, size_t pc) {
     return static_cast<int16_t>(
         (static_cast<uint16_t>(code[pc]) << 8) | static_cast<uint16_t>(code[pc + 1]));
+}
+inline int32_t codeS4(const uint8_t* code, size_t pc) {
+    return static_cast<int32_t>(
+        (static_cast<uint32_t>(code[pc]) << 24) |
+        (static_cast<uint32_t>(code[pc + 1]) << 16) |
+        (static_cast<uint32_t>(code[pc + 2]) << 8) |
+        static_cast<uint32_t>(code[pc + 3]));
 }
 inline uint16_t codeU2(const uint8_t* code, size_t pc) {
     return (static_cast<uint16_t>(code[pc]) << 8) | static_cast<uint16_t>(code[pc + 1]);

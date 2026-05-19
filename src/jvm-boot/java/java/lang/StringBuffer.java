@@ -47,6 +47,10 @@ public final class StringBuffer {
         return this;
     }
 
+    public StringBuffer append(boolean value) {
+        return append(value ? "true" : "false");
+    }
+
     public StringBuffer append(int value) {
         if (value == 0) {
             return append('0');

@@ -109,6 +109,8 @@ public:
         return drained;
     }
 
+    std::unordered_map<std::string, std::string> appProperties;
+
 protected:
     mutable std::vector<HostKeyEvent> inputEvents_;
 };

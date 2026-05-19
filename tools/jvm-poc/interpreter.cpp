@@ -11,6 +11,9 @@
 #ifdef ESP32_BUILD
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <Arduino.h>
 #endif
 
 #include <algorithm>
@@ -33,9 +36,8 @@ constexpr size_t kMaxSteps = 100000;
 constexpr size_t kMaxCallDepth = 64;
 constexpr uint16_t kAccNative = 0x0100;
 constexpr const char* kClassHandlePrefix = "class:";
-constexpr const char* kResourceStreamHandlePrefix = "resource-stream:";
 
-uint32_t branchTarget(size_t pc, int16_t offset) {
+uint32_t branchTarget(size_t pc, int32_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
 }
 
@@ -199,6 +201,11 @@ struct ResolvedCallEntry {
     const ClassFile* runtimeClassPtr = nullptr; // hot compare: pointer equality instead of string compare
     const ClassFile* targetClass;
     const MethodInfo* method;
+    // Option N(v1): resolved class-level native handler. Bypasses the
+    // string-compare cascade in handleNativeStaticCall/handleNativeInstanceCall.
+    // Set only for native calls whose className maps cleanly to a single
+    // handler; nullptr otherwise (slow cascade still runs).
+    NativeHandler nativeHandler = nullptr;
 };
 
 struct HeapObject {
@@ -209,6 +216,7 @@ struct HeapObject {
 
 using Heap = std::unordered_map<uint32_t, HeapObject>;
 using ArrayHeap = std::unordered_map<uint32_t, std::vector<Value>>;
+using CompactArrayHeap = std::unordered_map<uint32_t, std::vector<int32_t>>;
 using StringHeap = std::unordered_map<uint32_t, std::string>;
 using ImageHeap = std::unordered_map<uint32_t, port::Image>;
 using ResourceImageCache = std::map<std::string, uint32_t>;
@@ -219,15 +227,41 @@ struct RuntimeFrame {
     const MethodInfo* method = nullptr;
     size_t pc = 0;
     Frame frame;
+    // Populated only while this RuntimeFrame lives in ThreadTask::suspendedFrames.
+    // Holds a copy of the [locals... stack...] slot range that was in the arena
+    // before yield; restored back into the arena on resume.
+    std::vector<Value> suspendedSlots;
 };
+
+// Shared bump-allocated frame slot buffer. Replaces the per-frame malloc that
+// std::vector<Value, SramAllocator> used to do. Sized once at Runtime
+// construction; never grows. Slots are default-constructed Values (kNone);
+// frame allocation just hands out a Value* pointing into the buffer.
+//
+// Allocation point: callStack.back().frame.stackEnd() — i.e., the actual
+// operand-stack top of the calling frame (not stackBase + maxStack). This
+// transparently handles cases where the interpreter pushes more than the
+// .class-declared max_stack.
+//
+// Pop is implicit: the next allocation reads stackEnd() of the new top frame.
+struct FrameArena {
+    std::vector<Value, SramAllocator<Value>> slots;
+    Value* begin() { return slots.data(); }
+    Value* end() { return slots.data() + slots.size(); }
+    const Value* begin() const { return slots.data(); }
+    const Value* end() const { return slots.data() + slots.size(); }
+};
+
+constexpr size_t kFrameArenaSlots = 2730; // ≈ 32 KB at sizeof(Value)=12 on ESP32
 
 struct ThreadTask {
     const ClassFile* cls = nullptr;
     const MethodInfo* method = nullptr;
     Value receiver = Value::named("0");
-    std::optional<RuntimeFrame> suspendedFrame;
+    std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> suspendedFrames;
     uint32_t wakeAtMillis = 0;
     bool finished = false;
+    std::optional<Value> pendingException;
 };
 
 struct MethodProfileAccumulator {
@@ -246,12 +280,18 @@ struct NamedProfileAccumulator {
 };
 
 struct Runtime {
+    Runtime() {
+        frameArena.slots.resize(kFrameArenaSlots);
+    }
+
+    FrameArena frameArena;
     const JvmHost* host = nullptr;
     MidletSession* session = nullptr;
     ThreadTask* currentTask = nullptr;
     std::unordered_map<std::string, Value> staticFields;
     Heap heap;
     ArrayHeap arrays;
+    CompactArrayHeap primitiveArrays;
     StringHeap strings;
     ImageHeap images;
     ResourceImageCache resourceImages;
@@ -296,9 +336,13 @@ struct Runtime {
     ExecutionTrace trace;
     std::vector<MethodProfileAccumulator, SramAllocator<MethodProfileAccumulator>> taskMethodProfiles;
     std::vector<NamedProfileAccumulator, SramAllocator<NamedProfileAccumulator>> taskNativeProfiles;
+    std::optional<Value> pendingException;
+    std::string pendingExceptionMethodLabel;
+    uint32_t pendingExceptionPc = 0;
     uint32_t pendingYieldRethrowStartUs = 0;
     bool yieldRequested = false;
     uint32_t yieldMillis = 0;
+    bool stepLimitYieldEnabled = false;
     size_t steps = 0;
     bool repaintRequested = true;
 };
@@ -412,8 +456,9 @@ void captureSuspendedTasks(ExecutionTrace& trace, const MidletSession& session) 
             ? task.cls->thisClass + "." + task.method->name + task.method->descriptor
             : std::string("<unknown-task>");
         state += " wake=" + std::to_string(task.wakeAtMillis);
-        if (task.suspendedFrame.has_value()) {
-            state += " suspended=" + task.suspendedFrame->label + " pc=" + std::to_string(task.suspendedFrame->pc);
+        if (!task.suspendedFrames.empty()) {
+            const RuntimeFrame& top = task.suspendedFrames.back();
+            state += " suspended=" + top.label + " pc=" + std::to_string(top.pc);
         }
         trace.suspendedTasks.push_back(std::move(state));
     }
@@ -475,8 +520,81 @@ Value allocateArray(Runtime& rt, const std::string& label, uint32_t pc, size_t l
     return ref;
 }
 
+Value allocatePrimitiveArray(Runtime& rt, const std::string& label, uint32_t pc, size_t length) {
+    uint32_t id = 0;
+    if (!rt.freeArrayIds.empty()) {
+        id = rt.freeArrayIds.back();
+        rt.freeArrayIds.pop_back();
+    } else {
+        id = rt.nextArrayId++;
+    }
+    rt.primitiveArrays[id] = std::vector<int32_t>(length, 0);
+    Value ref = arrayRef(id);
+    if (rt.trace.recording) rt.trace.arrayAllocs.push_back(ArrayAlloc{label, pc, ref, length});
+    return ref;
+}
+
 std::optional<uint32_t> objectId(const Value& value);
 std::optional<uint32_t> arrayId(const Value& value);
+
+bool writeFieldValue(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const Value& object,
+    const std::string& fieldName,
+    Value value) {
+    std::optional<uint32_t> id = objectId(object);
+    if (!id.has_value()) {
+        return false;
+    }
+    auto objectIt = rt.heap.find(*id);
+    if (objectIt == rt.heap.end() || objectIt->second.cls == nullptr) {
+        return false;
+    }
+
+    HeapObject& obj = objectIt->second;
+    buildFieldSlots(rt, classes, *obj.cls);
+    auto slotCacheIt = rt.fieldSlotCache.find(obj.cls);
+    if (slotCacheIt == rt.fieldSlotCache.end()) {
+        return false;
+    }
+    auto nameIt = slotCacheIt->second.find(fieldName);
+    if (nameIt == slotCacheIt->second.end()) {
+        return false;
+    }
+
+    const uint16_t slot = nameIt->second;
+    if (slot >= obj.fields.size()) {
+        obj.fields.resize(slot + 1);
+    }
+    obj.fields[slot] = std::move(value);
+    return true;
+}
+
+Value allocateByteArrayInputStream(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const std::string& label,
+    uint32_t pc,
+    const std::vector<uint8_t>& data) {
+    Value buffer = allocatePrimitiveArray(rt, label, pc, data.size());
+    std::optional<uint32_t> bufferId = arrayId(buffer);
+    if (bufferId.has_value()) {
+        auto primIt = rt.primitiveArrays.find(*bufferId);
+        if (primIt != rt.primitiveArrays.end()) {
+            for (size_t i = 0; i < data.size(); ++i) {
+                primIt->second[i] = static_cast<int32_t>(static_cast<int8_t>(data[i]));
+            }
+        }
+    }
+
+    Value stream = allocateObject(rt, classes, label, pc, "java/io/ByteArrayInputStream");
+    writeFieldValue(rt, classes, stream, "buf", buffer);
+    writeFieldValue(rt, classes, stream, "pos", Value::ofInt(0));
+    writeFieldValue(rt, classes, stream, "mark", Value::ofInt(0));
+    writeFieldValue(rt, classes, stream, "count", Value::ofInt(static_cast<int32_t>(data.size())));
+    return stream;
+}
 
 Value allocateMultiArray(
     Runtime& rt,
@@ -514,17 +632,20 @@ std::optional<std::string> runtimeString(const Runtime& rt, const Value& value) 
 }
 
 Value loadArrayElement(Runtime& rt, const Value& arrayValue, const Value& indexValue) {
-    Value loaded = Value::ofInt(0);
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
-    if (id.has_value() && index.has_value()) {
+    if (id.has_value() && index.has_value() && *index >= 0) {
+        const size_t idx = static_cast<size_t>(*index);
+        auto primIt = rt.primitiveArrays.find(*id);
+        if (primIt != rt.primitiveArrays.end()) {
+            return idx < primIt->second.size() ? Value::ofInt(primIt->second[idx]) : Value::ofInt(0);
+        }
         auto arrayIt = rt.arrays.find(*id);
-        if (arrayIt != rt.arrays.end() && *index >= 0 &&
-            static_cast<size_t>(*index) < arrayIt->second.size()) {
-            loaded = arrayIt->second[static_cast<size_t>(*index)];
+        if (arrayIt != rt.arrays.end() && idx < arrayIt->second.size()) {
+            return arrayIt->second[idx];
         }
     }
-    return loaded;
+    return Value::ofInt(0);
 }
 
 Value normalizeByteValue(const Value& value) {
@@ -546,17 +667,28 @@ void storeArrayElement(
     Value value = normalizeByte ? normalizeByteValue(rawValue) : rawValue;
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
-    if (id.has_value() && index.has_value()) {
-        auto arrayIt = rt.arrays.find(*id);
-        if (arrayIt != rt.arrays.end() && *index >= 0 &&
-            static_cast<size_t>(*index) < arrayIt->second.size()) {
-            arrayIt->second[static_cast<size_t>(*index)] = value;
+    if (id.has_value() && index.has_value() && *index >= 0) {
+        const size_t idx = static_cast<size_t>(*index);
+        auto primIt = rt.primitiveArrays.find(*id);
+        if (primIt != rt.primitiveArrays.end()) {
+            if (idx < primIt->second.size()) {
+                primIt->second[idx] = parseIntValue(value).value_or(0);
+            }
+        } else {
+            auto arrayIt = rt.arrays.find(*id);
+            if (arrayIt != rt.arrays.end() && idx < arrayIt->second.size()) {
+                arrayIt->second[idx] = value;
+            }
         }
     }
     if (rt.trace.recording) rt.trace.arrayWrites.push_back(ArrayWrite{label, pc, arrayValue, indexValue, value});
 }
 
-NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, const std::vector<Value>& args) {
+NativeCallResult handleBuiltInInstanceCall(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const MethodRef& ref,
+    const std::vector<Value>& args) {
     if (ref.className == "java/lang/Object" && ref.name == "getClass" &&
         ref.descriptor == "()Ljava/lang/Class;") {
         std::string className = ref.className;
@@ -573,34 +705,14 @@ NativeCallResult handleBuiltInInstanceCall(Runtime& rt, const MethodRef& ref, co
     if (ref.className == "java/lang/Class" && ref.name == "getResourceAsStream" &&
         ref.descriptor == "(Ljava/lang/String;)Ljava/io/InputStream;") {
         std::string path = args.size() > 1 ? runtimeString(rt, args[1]).value_or(args[1].asText()) : "";
-        return NativeCallResult{true, path.empty()
-            ? std::optional<Value>(Value::named("0"))
-            : std::optional<Value>(Value::named(std::string(kResourceStreamHandlePrefix) + path))};
-    }
-
-    if (ref.className == "java/io/InputStream" && ref.name == "read" && ref.descriptor == "([B)I") {
-        if (args.size() < 2) {
+        if (path.empty()) {
             return NativeCallResult{true, Value::named("0")};
         }
-
-        std::optional<std::string> path = parseTextHandle(args[0], kResourceStreamHandlePrefix);
-        std::optional<uint32_t> id = arrayId(args[1]);
-        auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
-        if (!path.has_value() || !id.has_value() || arrayIt == rt.arrays.end()) {
-            return NativeCallResult{true, Value::named("0")};
-        }
-
         std::vector<uint8_t> data;
-        if (!port::readResourceAll(*path, data) || data.empty()) {
+        if (!port::readResourceAll(path, data)) {
             return NativeCallResult{true, Value::named("0")};
         }
-
-        const int count = std::min(static_cast<int>(arrayIt->second.size()), static_cast<int>(data.size()));
-        for (int i = 0; i < count; ++i) {
-            arrayIt->second[static_cast<size_t>(i)] =
-                Value::named(std::to_string(static_cast<int>(static_cast<int8_t>(data[static_cast<size_t>(i)]))));
-        }
-        return NativeCallResult{true, Value::named(std::to_string(count))};
+        return NativeCallResult{true, allocateByteArrayInputStream(rt, classes, "<resource>", 0, data)};
     }
 
     return NativeCallResult{};
@@ -618,8 +730,15 @@ std::optional<Value> recordUnknownCall(
     }
 
     bool nooped = ref.name == "<init>" || !returnsValue(ref.descriptor);
+    std::string caller = label;
+    if (caller.empty() && !rt.callStack.empty()) {
+        const RuntimeFrame& frame = rt.callStack.back();
+        if (frame.cls != nullptr && frame.method != nullptr) {
+            caller = methodLabel(*frame.cls, *frame.method);
+        }
+    }
     rt.trace.unknownMethodCalls.push_back(UnknownMethodCall{
-        label,
+        caller,
         pc,
         callName(ref),
         args,
@@ -660,6 +779,97 @@ bool isReference(const Value& value) {
     return t == Value::kHandleObjTag || t == Value::kHandleArrTag;
 }
 
+std::string exceptionClassName(const Runtime& rt, const Value& exception) {
+    std::optional<uint32_t> id = objectId(exception);
+    if (!id.has_value()) {
+        return exception.asText();
+    }
+    auto objectIt = rt.heap.find(*id);
+    return objectIt == rt.heap.end() ? exception.asText() : objectIt->second.className;
+}
+
+void setPendingException(Runtime& rt, Value exception, const std::string& methodLabel, uint32_t pc) {
+    rt.pendingException = std::move(exception);
+    rt.pendingExceptionMethodLabel = methodLabel;
+    rt.pendingExceptionPc = pc;
+}
+
+void clearPendingException(Runtime& rt) {
+    rt.pendingException.reset();
+    rt.pendingExceptionMethodLabel.clear();
+    rt.pendingExceptionPc = 0;
+}
+
+const MethodInfo::ExceptionHandler* findExceptionHandler(
+    const Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const MethodInfo& method,
+    uint32_t throwPc) {
+    if (!rt.pendingException.has_value()) {
+        return nullptr;
+    }
+    const std::string thrownClass = exceptionClassName(rt, *rt.pendingException);
+    for (const MethodInfo::ExceptionHandler& handler : method.exceptionHandlers) {
+        if (throwPc < handler.startPc || throwPc >= handler.endPc) {
+            continue;
+        }
+        if (handler.catchType == 0 ||
+            isClassOrSubclassOf(classes, thrownClass, handler.catchClass)) {
+            return &handler;
+        }
+    }
+    return nullptr;
+}
+
+bool handlePendingExceptionAt(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const MethodInfo& method,
+    Frame& frame,
+    uint32_t throwPc,
+    size_t& pc) {
+    const MethodInfo::ExceptionHandler* handler =
+        findExceptionHandler(rt, classes, method, throwPc);
+    if (handler == nullptr) {
+        return false;
+    }
+    rt.trace.caughtExceptions.push_back(CaughtExceptionTrace{
+        rt.pendingExceptionMethodLabel,
+        rt.pendingExceptionPc,
+        methodLabel(*rt.callStack.back().cls, method),
+        handler->handlerPc,
+        exceptionClassName(rt, *rt.pendingException),
+    });
+    Value exception = *rt.pendingException;
+    clearPendingException(rt);
+    frame.clearStack();
+    frame.push(std::move(exception));
+    pc = handler->handlerPc;
+    return true;
+}
+
+void recordUncaughtException(Runtime& rt, const std::string& threadLabel) {
+    if (!rt.trace.recording || !rt.pendingException.has_value()) {
+        return;
+    }
+    rt.trace.uncaughtExceptions.push_back(UncaughtExceptionTrace{
+        threadLabel,
+        rt.pendingExceptionMethodLabel,
+        rt.pendingExceptionPc,
+        exceptionClassName(rt, *rt.pendingException),
+    });
+}
+
+void recordThreadDeath(Runtime& rt, const std::string& threadLabel) {
+    if (!rt.trace.recording || !rt.pendingException.has_value()) {
+        return;
+    }
+    rt.trace.threadDeaths.push_back(ThreadDeathTrace{
+        threadLabel,
+        exceptionClassName(rt, *rt.pendingException),
+    });
+}
+
 std::string debugValueText(const Runtime& rt, const Value& value) {
     std::optional<uint32_t> id = objectId(value);
     if (id.has_value()) {
@@ -669,38 +879,6 @@ std::string debugValueText(const Runtime& rt, const Value& value) {
         }
     }
     return value.asText();
-}
-
-void captureDisplayableFields(ExecutionTrace& trace, const Runtime& rt, const HeapObject& object) {
-    static const char* kInterestingFields[] = {
-        "screen",
-        "state",
-        "ani_step",
-        "p_mode",
-        "m_mode",
-        "game_on",
-        "t_game_on",
-        "msg",
-        "h_x",
-        "h_y",
-        "h_dir",
-        "auto_move",
-        "w_dir",
-        "stage",
-        "chap",
-    };
-
-    trace.currentDisplayableFields.clear();
-    for (const char* fieldName : kInterestingFields) {
-        auto slotCacheIt = rt.fieldSlotCache.find(object.cls);
-        if (slotCacheIt == rt.fieldSlotCache.end()) continue;
-        auto nameIt = slotCacheIt->second.find(fieldName);
-        if (nameIt == slotCacheIt->second.end()) continue;
-        uint16_t slot = nameIt->second;
-        if (slot >= object.fields.size() || !object.fields[slot].isInitialized()) continue;
-        trace.currentDisplayableFields.push_back(
-            std::string(fieldName) + "=" + debugValueText(rt, object.fields[slot]));
-    }
 }
 
 void recordTaskMethodProfile(
@@ -793,6 +971,61 @@ void requestThreadYield(Runtime& rt, uint32_t millis) {
     rt.yieldMillis = millis;
 }
 
+void restoreCallStackReserve(Runtime& rt) {
+    if (rt.callStack.capacity() < kMaxCallDepth + 1) {
+        rt.callStack.reserve(kMaxCallDepth + 1);
+    }
+}
+
+// Yield: copy each callStack frame's [locals... stack...] slots out of the
+// arena into RuntimeFrame::suspendedSlots, then move the frames into the
+// task's suspendedFrames container. Arena is implicitly reusable as soon as
+// callStack becomes empty (allocations restart at arena.begin()).
+void suspendCallStackInto(Runtime& rt, ThreadTask& task) {
+    for (RuntimeFrame& rf : rt.callStack) {
+        const size_t total = rf.frame.localsSize() + rf.frame.stackSize();
+        rf.suspendedSlots.clear();
+        rf.suspendedSlots.reserve(total);
+        Value* begin = rf.frame.slotsBegin();
+        for (size_t i = 0; i < total; ++i) {
+            rf.suspendedSlots.emplace_back(std::move(begin[i]));
+        }
+    }
+    task.suspendedFrames = std::move(rt.callStack);
+    rt.callStack.clear();
+    restoreCallStackReserve(rt);
+}
+
+// Resume: rebuild rt.callStack from task.suspendedFrames, copying each
+// frame's suspendedSlots back into freshly-bumped arena regions and
+// rebinding the Frame view. Frames are restored in original order (caller
+// first) so each allocation derives its base from the just-restored top.
+// The total slot footprint matches what was previously live in the arena,
+// so a fresh arena (callStack empty between tasks) is guaranteed to fit.
+void resumeCallStackFrom(Runtime& rt, ThreadTask& task) {
+    std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>> source = std::move(task.suspendedFrames);
+    task.suspendedFrames.clear();
+    rt.callStack.clear();
+    restoreCallStackReserve(rt);
+    Value* arenaEnd = rt.frameArena.end();
+    for (RuntimeFrame& rf : source) {
+        Value* base = rt.callStack.empty()
+            ? rt.frameArena.begin()
+            : rt.callStack.back().frame.stackEnd();
+        const uint16_t maxLocals = static_cast<uint16_t>(rf.frame.localsSize());
+        const uint16_t maxStack = rf.frame.maxStack();
+        const size_t total = rf.suspendedSlots.size();
+        const size_t stackUsed = total >= maxLocals ? total - maxLocals : 0;
+        for (size_t i = 0; i < total; ++i) {
+            base[i] = std::move(rf.suspendedSlots[i]);
+        }
+        rf.suspendedSlots.clear();
+        rf.suspendedSlots.shrink_to_fit();
+        rf.frame = Frame(base, arenaEnd, maxLocals, maxStack, stackUsed);
+        rt.callStack.push_back(std::move(rf));
+    }
+}
+
 Value internString(Runtime& rt, const std::string& text) {
     auto internIt = rt.internedStrings.find(text);
     if (internIt != rt.internedStrings.end() && rt.strings.find(internIt->second) != rt.strings.end()) {
@@ -864,29 +1097,40 @@ void collectGarbage(Runtime& rt, std::string when) {
     for (const auto& field : rt.staticFields) {
         addRoot(report, "static " + field.first, field.second, rt, markedObjects, markedArrays);
     }
+    if (rt.pendingException.has_value()) {
+        addRoot(report, "pendingException", *rt.pendingException, rt, markedObjects, markedArrays);
+    }
     for (const RuntimeFrame& runtimeFrame : rt.callStack) {
-        const Frame::ValueVec& locals = runtimeFrame.frame.locals();
-        for (size_t i = 0; i < locals.size(); ++i) {
+        const Value* locals = runtimeFrame.frame.localsData();
+        const size_t localsSize = runtimeFrame.frame.localsSize();
+        for (size_t i = 0; i < localsSize; ++i) {
             addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
         }
 
-        const Frame::ValueVec& stack = runtimeFrame.frame.stack();
-        for (size_t i = 0; i < stack.size(); ++i) {
+        const Value* stack = runtimeFrame.frame.stackData();
+        const size_t stackSize = runtimeFrame.frame.stackSize();
+        for (size_t i = 0; i < stackSize; ++i) {
             addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
     }
     if (rt.session != nullptr) {
         for (const ThreadTask& task : rt.session->tasks()) {
-            if (!task.suspendedFrame.has_value()) {
-                continue;
+            if (task.pendingException.has_value()) {
+                addRoot(report, "task pendingException", *task.pendingException, rt, markedObjects, markedArrays);
             }
-            const Frame::ValueVec& locals = task.suspendedFrame->frame.locals();
-            for (size_t i = 0; i < locals.size(); ++i) {
-                addRoot(report, task.suspendedFrame->label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
-            }
-            const Frame::ValueVec& stack = task.suspendedFrame->frame.stack();
-            for (size_t i = 0; i < stack.size(); ++i) {
-                addRoot(report, task.suspendedFrame->label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+            for (const RuntimeFrame& runtimeFrame : task.suspendedFrames) {
+                // Suspended frames' arena slots have been copied out; walk
+                // the side buffer instead. Layout: [locals..., stack...].
+                const std::vector<Value>& slots = runtimeFrame.suspendedSlots;
+                const size_t localsSize = runtimeFrame.frame.localsSize();
+                const size_t total = slots.size();
+                const size_t suspendedLocals = std::min(localsSize, total);
+                for (size_t i = 0; i < suspendedLocals; ++i) {
+                    addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", slots[i], rt, markedObjects, markedArrays);
+                }
+                for (size_t i = suspendedLocals; i < total; ++i) {
+                    addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i - suspendedLocals) + "]", slots[i], rt, markedObjects, markedArrays);
+                }
             }
         }
     }
@@ -904,6 +1148,12 @@ void collectGarbage(Runtime& rt, std::string when) {
     }
     std::vector<uint32_t> arraysToFree;
     for (const auto& array : rt.arrays) {
+        if (markedArrays.find(array.first) == markedArrays.end()) {
+            report.unreachableArrays.push_back(arrayRef(array.first));
+            arraysToFree.push_back(array.first);
+        }
+    }
+    for (const auto& array : rt.primitiveArrays) {
         if (markedArrays.find(array.first) == markedArrays.end()) {
             report.unreachableArrays.push_back(arrayRef(array.first));
             arraysToFree.push_back(array.first);
@@ -927,7 +1177,9 @@ void collectGarbage(Runtime& rt, std::string when) {
         }
     }
     for (uint32_t id : arraysToFree) {
-        rt.arrays.erase(id);
+        if (rt.primitiveArrays.erase(id) == 0) {
+            rt.arrays.erase(id);
+        }
         rt.freeArrayIds.push_back(id);
         report.freedArrays.push_back(arrayRef(id));
     }
@@ -975,7 +1227,11 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         return;
     }
     if (rt.session != nullptr) {
-        rt.session->tasks().push_back(ThreadTask{owner, run, runnable, std::nullopt, 0, false});
+        ThreadTask task;
+        task.cls = owner;
+        task.method = run;
+        task.receiver = runnable;
+        rt.session->tasks().push_back(std::move(task));
         return;
     }
     std::vector<Value> runArgs = {runnable};
@@ -1062,6 +1318,41 @@ std::optional<Value> resumeCurrentMethod(
         recordLocal(index, writePc, value, "store");
     };
 
+    auto catchPendingException = [&](uint32_t throwPc) {
+        if (!handlePendingExceptionAt(rt, classes, method, frame, throwPc, pc)) {
+            return false;
+        }
+        runtimeFrame.pc = pc;
+        return true;
+    };
+
+    auto invokeLength = [&](uint8_t invokeOp) -> size_t {
+        return invokeOp == 0xb9 ? 5u : 3u;
+    };
+
+    auto invokeDisplayableNotify = [&](const Value& displayable, const char* methodName) {
+        std::optional<uint32_t> id = objectId(displayable);
+        if (!id.has_value()) {
+            return;
+        }
+        auto objectIt = rt.heap.find(*id);
+        if (objectIt == rt.heap.end()) {
+            return;
+        }
+        const ClassFile* owner = nullptr;
+        const MethodInfo* notify = findMethodInHierarchy(
+            classes,
+            objectIt->second.className,
+            methodName,
+            "()V",
+            &owner);
+        if (owner == nullptr || notify == nullptr) {
+            return;
+        }
+        std::vector<Value> notifyArgs = {displayable};
+        (void)executeMethod(classes, *owner, *notify, notifyArgs, rt, depth + 1);
+    };
+
     auto makeNativeContext = [&]() {
         return NativeCallContext{
             rt.host,
@@ -1085,8 +1376,20 @@ std::optional<Value> resumeCurrentMethod(
             [&]() {
                 rt.repaintRequested = true;
             },
+            [&](const Value& oldDisplayable, const Value& newDisplayable) {
+                if (oldDisplayable.asText() == newDisplayable.asText()) {
+                    return;
+                }
+                invokeDisplayableNotify(oldDisplayable, "hideNotify");
+                if (rt.pendingException.has_value()) {
+                    return;
+                }
+                invokeDisplayableNotify(newDisplayable, "showNotify");
+                rt.repaintRequested = true;
+            },
             rt.strings,
             rt.arrays,
+            rt.primitiveArrays,
             rt.images,
             rt.resourceImages,
             rt.nextImageId,
@@ -1159,11 +1462,22 @@ std::optional<Value> resumeCurrentMethod(
     };
 
     while (pc < codeSize) {
-        if (++rt.steps > kMaxSteps) {
+        // Batched step-limit check: increment every step, but only consult
+        // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
+        // (currently 100000), so ±256 drift is irrelevant. The hot path
+        // pays one increment + a single low-byte test; the (rt.steps & 0xFF)
+        // == 0 branch is taken 255 of every 256 steps, so the branch
+        // predictor learns it cleanly and the slow body stays cold.
+        if ((++rt.steps & 0xFFu) == 0 && rt.steps > kMaxSteps) {
             rt.trace.stepLimitHit = true;
+            if (!rt.stepLimitYieldEnabled) {
+                rt.steps = 0;
+                continue;
+            }
             runtimeFrame.pc = pc;
             captureStackSnapshot(rt.trace, rt.callStack);
-            return finish(std::nullopt);
+            requestThreadYield(rt, 1);
+            return std::nullopt;
         }
 #if JVM_ENABLE_BYTECODE_PROFILING
         if (rt.host != nullptr && rt.host->collectBytecodeStats) ++rt.host->bytecodeSteps;
@@ -1429,9 +1743,117 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
-            case 0x92:
+            case 0x78:
+            case 0x7a:
+            case 0x7c:
+            case 0x7e:
+            case 0x80:
+            case 0x82: {
+                const uint32_t t0arith = statNow();
+                Value rhsValue = frame.pop();
+                Value lhsValue = frame.pop();
+                std::optional<int> rhs = parseIntValue(rhsValue);
+                std::optional<int> lhs = parseIntValue(lhsValue);
+                if (lhs.has_value() && rhs.has_value()) {
+                    switch (op) {
+                        case 0x78: frame.push(Value::ofInt(*lhs << (*rhs & 0x1f))); break;
+                        case 0x7a: frame.push(Value::ofInt(*lhs >> (*rhs & 0x1f))); break;
+                        case 0x7c: frame.push(Value::ofInt(static_cast<int32_t>(static_cast<uint32_t>(*lhs) >> (*rhs & 0x1f)))); break;
+                        case 0x7e: frame.push(Value::ofInt(*lhs & *rhs)); break;
+                        case 0x80: frame.push(Value::ofInt(*lhs | *rhs)); break;
+                        case 0x82: frame.push(Value::ofInt(*lhs ^ *rhs)); break;
+                    }
+                } else {
+                    frame.push(Value::named("<int-bitop>"));
+                }
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
                 ++pc;
                 break;
+            }
+
+            case 0x79:
+            case 0x7b:
+            case 0x7d: {
+                const uint32_t t0arith = statNow();
+                Value rhsValue = frame.pop();
+                Value lhsValue = frame.pop();
+                std::optional<int> rhs = parseIntValue(rhsValue);
+                std::optional<long long> lhs = parseLongValue(lhsValue);
+                if (lhs.has_value() && rhs.has_value()) {
+                    switch (op) {
+                        case 0x79: frame.push(Value::ofLong(*lhs << (*rhs & 0x3f))); break;
+                        case 0x7b: frame.push(Value::ofLong(*lhs >> (*rhs & 0x3f))); break;
+                        case 0x7d: frame.push(Value::ofLong(static_cast<int64_t>(static_cast<uint64_t>(*lhs) >> (*rhs & 0x3f)))); break;
+                    }
+                } else {
+                    frame.push(Value::named("<long-shift>"));
+                }
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
+                ++pc;
+                break;
+            }
+
+            case 0x7f:
+            case 0x81:
+            case 0x83: {
+                const uint32_t t0arith = statNow();
+                Value rhsValue = frame.pop();
+                Value lhsValue = frame.pop();
+                std::optional<long long> rhs = parseLongValue(rhsValue);
+                std::optional<long long> lhs = parseLongValue(lhsValue);
+                if (lhs.has_value() && rhs.has_value()) {
+                    switch (op) {
+                        case 0x7f: frame.push(Value::ofLong(*lhs & *rhs)); break;
+                        case 0x81: frame.push(Value::ofLong(*lhs | *rhs)); break;
+                        case 0x83: frame.push(Value::ofLong(*lhs ^ *rhs)); break;
+                    }
+                } else {
+                    frame.push(Value::named("<long-bitop>"));
+                }
+                if(t0arith) rt.host->arithStats.record(nowUs() - t0arith);
+                ++pc;
+                break;
+            }
+
+            case 0x85: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofLong(*parsed) : Value::named("<i2l:" + value.asText() + ">"));
+                ++pc;
+                break;
+            }
+
+            case 0x88: {
+                Value value = frame.pop();
+                std::optional<long long> parsed = parseLongValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<int32_t>(*parsed)) : Value::named("<l2i:" + value.asText() + ">"));
+                ++pc;
+                break;
+            }
+
+            case 0x91: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<int8_t>(*parsed)) : value);
+                ++pc;
+                break;
+            }
+
+            case 0x92: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<uint16_t>(*parsed)) : value);
+                ++pc;
+                break;
+            }
+
+            case 0x93: {
+                Value value = frame.pop();
+                std::optional<int> parsed = parseIntValue(value);
+                frame.push(parsed.has_value() ? Value::ofInt(static_cast<int16_t>(*parsed)) : value);
+                ++pc;
+                break;
+            }
 
             case 0x94: {
                 Value rhs = frame.pop();
@@ -1504,6 +1926,83 @@ std::optional<Value> resumeCurrentMethod(
             case 0xa7: {
                 const uint32_t t0b=statNow();
                 pc = branchTarget(pc, codeS2(code, pc + 1));
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
+                break;
+            }
+
+            case 0xaa: {
+                const uint32_t t0b=statNow();
+                Value keyValue = frame.pop();
+                const int32_t key = parseIntValue(keyValue).value_or(0);
+                size_t table = pc + 1;
+                while ((table & 3u) != 0u) {
+                    ++table;
+                }
+                const int32_t defaultOffset = codeS4(code, table);
+                const int32_t low = codeS4(code, table + 4);
+                const int32_t high = codeS4(code, table + 8);
+                int32_t offset = defaultOffset;
+                if (key >= low && key <= high) {
+                    const size_t index = static_cast<size_t>(key - low);
+                    offset = codeS4(code, table + 12 + index * 4);
+                }
+                const uint32_t target = branchTarget(pc, offset);
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        "tableswitch " + keyValue.asText(),
+                        true,
+                        offset != defaultOffset || (key >= low && key <= high),
+                        target,
+                    });
+                }
+                pc = target;
+                if(t0b) rt.host->branchStats.record(nowUs()-t0b);
+                break;
+            }
+
+            case 0xab: {
+                const uint32_t t0b=statNow();
+                Value keyValue = frame.pop();
+                const int32_t key = parseIntValue(keyValue).value_or(0);
+                size_t table = pc + 1;
+                while ((table & 3u) != 0u) {
+                    ++table;
+                }
+                const int32_t defaultOffset = codeS4(code, table);
+                const int32_t pairs = codeS4(code, table + 4);
+                const size_t pairsStart = table + 8;
+                int32_t offset = defaultOffset;
+                bool matched = false;
+                int32_t lo = 0;
+                int32_t hi = pairs - 1;
+                while (lo <= hi) {
+                    const int32_t mid = lo + ((hi - lo) >> 1);
+                    const size_t pair = pairsStart + static_cast<size_t>(mid) * 8;
+                    const int32_t match = codeS4(code, pair);
+                    if (key < match) {
+                        hi = mid - 1;
+                    } else if (key > match) {
+                        lo = mid + 1;
+                    } else {
+                        offset = codeS4(code, pair + 4);
+                        matched = true;
+                        break;
+                    }
+                }
+                const uint32_t target = branchTarget(pc, offset);
+                if (rt.trace.recording) {
+                    rt.trace.branches.push_back(BranchTrace{
+                        label,
+                        static_cast<uint32_t>(pc),
+                        "lookupswitch " + keyValue.asText(),
+                        true,
+                        matched,
+                        target,
+                    });
+                }
+                pc = target;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
                 break;
             }
@@ -1669,12 +2168,14 @@ std::optional<Value> resumeCurrentMethod(
                 MethodRef ref;
                 bool haveRef = false;
 
+                NativeHandler cachedNativeHandler = nullptr;
                 auto cit = rt.callCache.find(ckey);
                 if (cit != rt.callCache.end()) {
                     argSlots = cit->second.argSlots;
                     targetClass = cit->second.targetClass;
                     targetMethod = cit->second.method;
                     isNativeCall = cit->second.isNative;
+                    cachedNativeHandler = cit->second.nativeHandler;
                 } else {
                     ref = resolveMethodRef(cls, cpIdx);
                     haveRef = true;
@@ -1683,7 +2184,10 @@ std::optional<Value> resumeCurrentMethod(
                         classes, ref.className, ref.name, ref.descriptor, &targetClass);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         isNativeCall = hasAccess(targetMethod->access, kAccNative);
-                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod};
+                        cachedNativeHandler = isNativeCall
+                            ? resolveNativeStaticHandler(targetClass->thisClass)
+                            : nullptr;
+                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeHandler};
                     }
                 }
 
@@ -1706,8 +2210,9 @@ std::optional<Value> resumeCurrentMethod(
                         const uint32_t tTaskNative =
                             (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
                         try {
-                            nativeResult = handleNativeStaticCall(
-                                sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
+                            nativeResult = cachedNativeHandler != nullptr
+                                ? cachedNativeHandler(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf)
+                                : handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
@@ -1729,6 +2234,18 @@ std::optional<Value> resumeCurrentMethod(
                             runtimeFrame.pc = pc;
                             return std::nullopt;
                         }
+                        if (nativeResult.exception.has_value()) {
+                            setPendingException(rt, *nativeResult.exception, label, callPc);
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(callPc)) {
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            }
+                            runtimeFrame.pc = callPc;
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            return finish(std::nullopt);
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1741,12 +2258,21 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
-                        runtimeFrame.pc = pc;
+                        runtimeFrame.pc = pc + 3;
                         const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
                         if (rt.yieldRequested) {
                             return std::nullopt;
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(callPc)) {
+                                if(t0inv) rt.host->invokeStats.record(tDisp0);
+                                break;
+                            }
+                            runtimeFrame.pc = callPc;
+                            if(t0inv) rt.host->invokeStats.record(tDisp0);
+                            return finish(std::nullopt);
                         }
                         if (result.has_value()) {
                             frame.push(*result);
@@ -1831,10 +2357,12 @@ std::optional<Value> resumeCurrentMethod(
                     lookupClassFromCache ||
                     (lookupClassPtr && cit->second.runtimeClassPtr == lookupClassPtr) ||
                     (!lookupClassPtr && cit->second.runtimeClass == lookupClassName));
+                NativeHandler cachedNativeHandler = nullptr;
                 if (cacheClassMatch) {
                     targetClass = cit->second.targetClass;
                     targetMethod = cit->second.method;
                     isNativeCall = cit->second.isNative;
+                    cachedNativeHandler = cit->second.nativeHandler;
                 } else {
                     const std::string& lookupName = haveRef ? ref.name : cit->second.method->name;
                     const std::string& lookupDesc = haveRef ? ref.descriptor : cit->second.method->descriptor;
@@ -1842,9 +2370,12 @@ std::optional<Value> resumeCurrentMethod(
                         classes, lookupClassName, lookupName, lookupDesc, &targetClass);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         isNativeCall = hasAccess(targetMethod->access, kAccNative);
+                        cachedNativeHandler = isNativeCall
+                            ? resolveNativeInstanceHandler(targetClass->thisClass)
+                            : nullptr;
                         rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall,
                                               lookupClassName, findClass(classes, lookupClassName),
-                                              targetClass, targetMethod};
+                                              targetClass, targetMethod, cachedNativeHandler};
                     }
                 }
 
@@ -1871,8 +2402,9 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.tProfT0 = tN;
                         sharedNativeCtx.tProfTEntry = 0;
                         try {
-                            nativeResult = handleNativeInstanceCall(
-                                sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
+                            nativeResult = cachedNativeHandler != nullptr
+                                ? cachedNativeHandler(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf)
+                                : handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
@@ -1894,6 +2426,18 @@ std::optional<Value> resumeCurrentMethod(
                             runtimeFrame.pc = pc;
                             return std::nullopt;
                         }
+                        if (nativeResult.exception.has_value()) {
+                            setPendingException(rt, *nativeResult.exception, label, static_cast<uint32_t>(pc));
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            }
+                            runtimeFrame.pc = pc;
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            return finish(std::nullopt);
+                        }
                         if (nativeResult.handled) {
                             if (nativeResult.returnValue.has_value()) {
                                 frame.push(*nativeResult.returnValue);
@@ -1906,12 +2450,21 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
-                        runtimeFrame.pc = pc;
+                        runtimeFrame.pc = pc + invokeLength(op);
                         const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
                         std::optional<Value> result = executeMethod(
                             classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
                         if (rt.yieldRequested) {
                             return std::nullopt;
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                if(t0inv) rt.host->invokeStats.record(tDisp0);
+                                break;
+                            }
+                            runtimeFrame.pc = pc;
+                            if(t0inv) rt.host->invokeStats.record(tDisp0);
+                            return finish(std::nullopt);
                         }
                         if (result.has_value()) {
                             frame.push(*result);
@@ -1922,8 +2475,20 @@ std::optional<Value> resumeCurrentMethod(
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
-                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, ref, rt.callArgsBuf);
+                    NativeCallResult builtInResult = handleBuiltInInstanceCall(rt, classes, ref, rt.callArgsBuf);
                     if (builtInResult.handled) {
+                        if (builtInResult.exception.has_value()) {
+                            setPendingException(rt, *builtInResult.exception, label, static_cast<uint32_t>(pc));
+                        }
+                        if (rt.pendingException.has_value()) {
+                            if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            }
+                            runtimeFrame.pc = pc;
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            return finish(std::nullopt);
+                        }
                         if (builtInResult.returnValue.has_value()) {
                             frame.push(*builtInResult.returnValue);
                         }
@@ -1957,8 +2522,8 @@ std::optional<Value> resumeCurrentMethod(
                 uint8_t atype = codeU1(code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
-                if ((atype == 4 || atype == 5 || atype == 8 || atype == 10) && count.has_value() && *count >= 0) {
-                    frame.push(allocateArray(rt, label, allocPc, static_cast<size_t>(*count)));
+                if ((atype == 4 || atype == 5 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
+                    frame.push(allocatePrimitiveArray(rt, label, allocPc, static_cast<size_t>(*count)));
                 } else {
                     frame.push(Value::named("<array>"));
                 }
@@ -2009,15 +2574,40 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow();
                 Value arrayValue = frame.pop();
                 std::optional<uint32_t> id = arrayId(arrayValue);
-                auto arrayIt = id.has_value() ? rt.arrays.find(*id) : rt.arrays.end();
-                if (id.has_value() && arrayIt != rt.arrays.end()) {
-                    frame.push(Value::ofInt(static_cast<int32_t>(arrayIt->second.size())));
-                } else {
-                    frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
+                if (id.has_value()) {
+                    auto primIt = rt.primitiveArrays.find(*id);
+                    if (primIt != rt.primitiveArrays.end()) {
+                        frame.push(Value::ofInt(static_cast<int32_t>(primIt->second.size())));
+                        ++pc;
+                        if(t0m) rt.host->miscStats.record(nowUs()-t0m);
+                        break;
+                    }
+                    auto arrayIt = rt.arrays.find(*id);
+                    if (arrayIt != rt.arrays.end()) {
+                        frame.push(Value::ofInt(static_cast<int32_t>(arrayIt->second.size())));
+                        ++pc;
+                        if(t0m) rt.host->miscStats.record(nowUs()-t0m);
+                        break;
+                    }
                 }
+                frame.push(Value::named("<arraylength:" + arrayValue.asText() + ">"));
                 ++pc;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
                 break;
+            }
+
+            case 0xbf: {
+                const uint32_t throwPc = static_cast<uint32_t>(pc);
+                Value exception = frame.pop();
+                if (exception.isNull()) {
+                    exception = allocateObject(rt, classes, label, throwPc, "java/lang/NullPointerException");
+                }
+                setPendingException(rt, std::move(exception), label, throwPc);
+                if (catchPendingException(throwPc)) {
+                    break;
+                }
+                runtimeFrame.pc = throwPc;
+                return finish(std::nullopt);
             }
 
             case 0xac:
@@ -2053,9 +2643,24 @@ std::optional<Value> executeMethod(
         return Value::named("<call-depth-limit>");
     }
 
+    // Bump-allocate the frame's slot region in the arena. New frame starts at
+    // the calling frame's actual operand-stack top (or arena base if no
+    // caller). Overflow returns a sentinel — same shape as the depth limit.
+    Value* slabBase = rt.callStack.empty()
+        ? rt.frameArena.begin()
+        : rt.callStack.back().frame.stackEnd();
+    Value* arenaEnd = rt.frameArena.end();
+    const size_t needed = static_cast<size_t>(method.maxLocals) + static_cast<size_t>(method.maxStack);
+    if (slabBase + needed > arenaEnd) {
+        return Value::named("<frame-arena-overflow>");
+    }
+
     // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
     std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
-    RuntimeFrame runtimeFrame{std::move(label), &cls, &method, 0, Frame(method.maxLocals, method.maxStack)};
+    RuntimeFrame runtimeFrame{
+        std::move(label), &cls, &method, 0,
+        Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
+        {}};
     // Pass args to delegateMethodExecution BEFORE consuming them in the lambda so
     // the timing delegate can read args[1]/args[2] for make_buf logging.
     return delegateMethodExecution(cls, method, args, [&]() {
@@ -2071,11 +2676,13 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.trace.recording = recording;
     rt.taskMethodProfiles.clear();
     rt.taskNativeProfiles.clear();
+    clearPendingException(rt);
     rt.pendingYieldRethrowStartUs = 0;
     rt.yieldRequested = false;
     rt.yieldMillis = 0;
     rt.steps = 0;
     rt.callStack.clear();
+    restoreCallStackReserve(rt);
     rt.graphicsFramebuffer = nullptr;
     rt.graphicsWidth = 0;
     rt.graphicsHeight = 0;
@@ -2119,6 +2726,11 @@ ExecutionTrace startSession(MidletSession& session) {
     if (init != nullptr) {
         std::vector<Value> initArgs = {session.midletRef()};
         (void)executeMethod(classes, *midletClass, *init, initArgs, rt, 0);
+        if (rt.pendingException.has_value()) {
+            recordUncaughtException(rt, "<midlet-init>");
+            clearPendingException(rt);
+            return rt.trace;
+        }
     } else {
         MethodRef ref{midletClass->thisClass, "<init>", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
@@ -2129,6 +2741,10 @@ ExecutionTrace startSession(MidletSession& session) {
     if (startOwner != nullptr && startApp != nullptr) {
         std::vector<Value> startArgs = {session.midletRef()};
         (void)executeMethod(classes, *startOwner, *startApp, startArgs, rt, 0);
+        if (rt.pendingException.has_value()) {
+            recordUncaughtException(rt, "<midlet-start>");
+            clearPendingException(rt);
+        }
     } else {
         MethodRef ref{midletClass->thisClass, "startApp", "()V"};
         (void)recordUnknownCall(rt, "<midlet>", 0, ref, {session.midletRef()});
@@ -2175,6 +2791,10 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         keyArgs,
         rt,
         0);
+    if (rt.pendingException.has_value()) {
+        recordUncaughtException(rt, "<input>");
+        clearPendingException(rt);
+    }
     rt.repaintRequested = true;
 }
 
@@ -2233,6 +2853,17 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
 
     const uint32_t tasksStartUs = profileFrame ? nowUs() : 0;
     const uint32_t now = rt.host != nullptr ? rt.host->millis() : 0;
+    auto resumeTaskStack = [&]() {
+        while (!rt.callStack.empty()) {
+            std::optional<Value> result = resumeCurrentMethod(session.classes(), rt, 0);
+            if (rt.yieldRequested || rt.pendingException.has_value()) {
+                return;
+            }
+            if (result.has_value() && !rt.callStack.empty()) {
+                rt.callStack.back().frame.push(*result);
+            }
+        }
+    };
     for (ThreadTask& task : session.tasks()) {
         if (task.finished) {
             continue;
@@ -2248,18 +2879,31 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             ++rt.trace.frameProfile.taskRuns;
         }
         rt.currentTask = &task;
+        rt.pendingException = task.pendingException;
+        task.pendingException.reset();
+        std::string taskLabel = task.method != nullptr
+            ? task.cls->thisClass + "." + task.method->name + task.method->descriptor
+            : std::string("<task>");
         const uint32_t taskInvokeStartUs = profileFrame ? nowUs() : 0;
         bool taskYielded = false;
+        const bool previousStepLimitYieldEnabled = rt.stepLimitYieldEnabled;
+        rt.stepLimitYieldEnabled = true;
         try {
-            if (task.suspendedFrame.has_value()) {
-                rt.callStack.push_back(std::move(*task.suspendedFrame));
-                task.suspendedFrame.reset();
-                (void)resumeCurrentMethod(session.classes(), rt, 0);
+            if (!task.suspendedFrames.empty()) {
+                resumeCallStackFrom(rt, task);
+                resumeTaskStack();
             } else if (task.cls != nullptr && task.method != nullptr) {
                 std::vector<Value> taskArgs = {task.receiver};
                 (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
             }
-            if (rt.yieldRequested) {
+            if (rt.pendingException.has_value()) {
+                recordUncaughtException(rt, taskLabel);
+                recordThreadDeath(rt, taskLabel);
+                task.finished = true;
+                clearPendingException(rt);
+                rt.yieldRequested = false;
+                rt.yieldMillis = 0;
+            } else if (rt.yieldRequested) {
                 const uint32_t yieldStartUs = profileFrame ? nowUs() : 0;
                 if (profileFrame) {
                     rt.trace.frameProfile.taskInvokeUs += yieldStartUs - taskInvokeStartUs;
@@ -2270,8 +2914,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 task.wakeAtMillis = now + rt.yieldMillis;
                 if (!rt.callStack.empty()) {
                     const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
-                    task.suspendedFrame = std::move(rt.callStack.back());
-                    rt.callStack.pop_back();
+                    suspendCallStackInto(rt, task);
                     if (profileFrame) {
                         rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
                     }
@@ -2295,8 +2938,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             task.wakeAtMillis = now + request.millis;
             if (!rt.callStack.empty()) {
                 const uint32_t suspendSaveStartUs = profileFrame ? nowUs() : 0;
-                task.suspendedFrame = std::move(rt.callStack.back());
-                rt.callStack.pop_back();
+                suspendCallStackInto(rt, task);
                 if (profileFrame) {
                     rt.trace.frameProfile.taskSuspendSaveUs += nowUs() - suspendSaveStartUs;
                 }
@@ -2305,9 +2947,14 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 rt.trace.frameProfile.taskCatchUs += nowUs() - catchStartUs;
             }
         }
+        rt.stepLimitYieldEnabled = previousStepLimitYieldEnabled;
         if (profileFrame && !taskYielded) {
             rt.trace.frameProfile.taskInvokeUs += nowUs() - taskInvokeStartUs;
         }
+        if (taskYielded) {
+            task.pendingException = rt.pendingException;
+        }
+        clearPendingException(rt);
         rt.currentTask = nullptr;
         const uint32_t clearStartUs = profileFrame ? nowUs() : 0;
         rt.callStack.clear();
@@ -2344,14 +2991,6 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
     }
 
-    if (captureTraceDetails) {
-        const uint32_t displayTraceStartUs = profileFrame ? nowUs() : 0;
-        captureDisplayableFields(rt.trace, rt, displayableIt->second);
-        if (profileFrame) {
-            rt.trace.frameProfile.displayTraceUs = nowUs() - displayTraceStartUs;
-        }
-    }
-
     const std::vector<ClassFile>& classes = session.classes();
     const uint32_t paintLookupStartUs = profileFrame ? nowUs() : 0;
     const ClassFile* paintOwner = nullptr;
@@ -2377,6 +3016,10 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         }
         std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
         (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);
+        if (rt.pendingException.has_value()) {
+            recordUncaughtException(rt, "<paint>");
+            clearPendingException(rt);
+        }
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)});
@@ -2421,6 +3064,10 @@ ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const 
     rt.callStack.reserve(kMaxCallDepth + 1);
     std::vector<Value> emptyArgs;
     (void)executeMethod(classes, cls, method, emptyArgs, rt, 0);
+    if (rt.pendingException.has_value()) {
+        recordUncaughtException(rt, "<main>");
+        clearPendingException(rt);
+    }
     return rt.trace;
 }
 

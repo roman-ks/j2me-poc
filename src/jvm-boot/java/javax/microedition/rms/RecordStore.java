@@ -1,19 +1,83 @@
 package javax.microedition.rms;
 
 public class RecordStore {
-    public static RecordStore openRecordStore(String recordStoreName, boolean createIfNecessary) throws RecordStoreException {
-        return new RecordStore();
+    private String name;
+    private boolean closed;
+
+    private RecordStore(String name) {
+        this.name = name;
+        this.closed = false;
     }
 
-    public void addRecord(byte[] data, int offset, int numBytes) throws RecordStoreException {
-        // Placeholder implementation
+    public static RecordStore openRecordStore(String recordStoreName, boolean createIfNecessary) throws RecordStoreException {
+        if (recordStoreName == null) {
+            throw new NullPointerException();
+        }
+        if (!open0(recordStoreName, createIfNecessary)) {
+            throw new RecordStoreException();
+        }
+        return new RecordStore(recordStoreName);
+    }
+
+    public static void deleteRecordStore(String recordStoreName) throws RecordStoreException {
+        if (recordStoreName == null) {
+            throw new NullPointerException();
+        }
+        if (!delete0(recordStoreName)) {
+            throw new RecordStoreException();
+        }
+    }
+
+    public int addRecord(byte[] data, int offset, int numBytes) throws RecordStoreException {
+        checkOpen();
+        int recordId = addRecord0(data, offset, numBytes);
+        if (recordId <= 0) {
+            throw new RecordStoreException();
+        }
+        return recordId;
     }
 
     public void closeRecordStore() throws RecordStoreException {
-        // Placeholder implementation
+        closed = true;
     }
+
     public int getNumRecords() throws RecordStoreException {
-        // Placeholder implementation
-        return 0;
+        checkOpen();
+        return getNumRecords0();
     }
+
+    public void setRecord(int recordId, byte[] newData,
+                          int offset, int numBytes) throws RecordStoreException {
+        checkOpen();
+        if (!setRecord0(recordId, newData, offset, numBytes)) {
+            throw new RecordStoreException();
+        }
+    }
+
+    public byte[] getRecord(int recordId) throws RecordStoreException {
+        checkOpen();
+        int size = getRecordSize0(recordId);
+        if (size < 0) {
+            throw new RecordStoreException();
+        }
+        byte[] data = new byte[size];
+        if (!getRecord0(recordId, data, 0, size)) {
+            throw new RecordStoreException();
+        }
+        return data;
+    }
+
+    private void checkOpen() throws RecordStoreException {
+        if (closed) {
+            throw new RecordStoreException();
+        }
+    }
+
+    private static native boolean open0(String recordStoreName, boolean createIfNecessary);
+    private static native boolean delete0(String recordStoreName);
+    private native int addRecord0(byte[] data, int offset, int numBytes);
+    private native int getNumRecords0();
+    private native boolean setRecord0(int recordId, byte[] newData, int offset, int numBytes);
+    private native int getRecordSize0(int recordId);
+    private native boolean getRecord0(int recordId, byte[] data, int offset, int numBytes);
 }

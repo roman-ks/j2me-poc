@@ -18,6 +18,10 @@ public final class Graphics {
 
     public native void fillRect(int x, int y, int width, int height);
 
+    public native void setClip(int x, int y, int width, int height);
+
+    public native void drawLine(int x1, int y1, int x2, int y2);
+
     public native void drawString(String str, int x, int y, int anchor);
 
     public native void drawImage(Image img, int x, int y, int anchor);

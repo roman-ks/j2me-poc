@@ -4,7 +4,7 @@ import java.util.Random;
 
 public class RandomBoot {
     public static void main(String[] args) {
-        Random random = new Random();
+        Random random = new Random(12345);
         NativeRuntime.printInt(random.nextInt());
         NativeRuntime.printInt(random.nextInt());
     }

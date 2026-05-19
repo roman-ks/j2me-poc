@@ -21,6 +21,14 @@ int16_t codeS2(const std::vector<uint8_t>& code, size_t pc) {
     return static_cast<int16_t>((hi << 8) | lo);
 }
 
+int32_t codeS4(const std::vector<uint8_t>& code, size_t pc) {
+    uint32_t b0 = codeU1(code, pc);
+    uint32_t b1 = codeU1(code, pc + 1);
+    uint32_t b2 = codeU1(code, pc + 2);
+    uint32_t b3 = codeU1(code, pc + 3);
+    return static_cast<int32_t>((b0 << 24) | (b1 << 16) | (b2 << 8) | b3);
+}
+
 uint16_t codeU2(const std::vector<uint8_t>& code, size_t pc) {
     uint16_t hi = codeU1(code, pc);
     uint16_t lo = codeU1(code, pc + 1);

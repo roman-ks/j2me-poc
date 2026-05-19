@@ -29,7 +29,7 @@ NativeCallResult handleCanvas(
             methodName(ref),
             value,
         });
-        return handledValue(Value::named(std::to_string(value)));
+        return handledValue(Value::ofInt(static_cast<int32_t>(value)));
     }
 
     if (ref.name == "setFullScreenMode" && ref.descriptor == "(Z)V") {

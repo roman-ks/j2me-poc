@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
-#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -157,13 +156,6 @@ void printSuspiciousFrame(const jvmpoc::ExecutionTrace& trace, int blankFrames) 
     if (trace.stepLimitHit) {
         std::cout << "  step limit hit\n";
     }
-    if (!trace.currentDisplayableFields.empty()) {
-        std::cout << "  displayable fields:";
-        for (const std::string& field : trace.currentDisplayableFields) {
-            std::cout << " " << field;
-        }
-        std::cout << "\n";
-    }
     if (!trace.stackSnapshot.empty()) {
         std::cout << "  stack snapshot:\n";
         for (const std::string& frame : trace.stackSnapshot) {
@@ -190,33 +182,8 @@ bool shouldPrintSuspiciousFrame(const jvmpoc::ExecutionTrace& trace, int blankFr
     return blankFrames == 30 || blankFrames % 120 == 0;
 }
 
-std::map<std::string, std::string> fieldMap(const jvmpoc::ExecutionTrace& trace) {
-    std::map<std::string, std::string> fields;
-    for (const std::string& field : trace.currentDisplayableFields) {
-        size_t split = field.find('=');
-        if (split == std::string::npos) {
-            continue;
-        }
-        fields[field.substr(0, split)] = field.substr(split + 1);
-    }
-    return fields;
-}
-
-std::string fieldOrMissing(const std::map<std::string, std::string>& fields, const std::string& name) {
-    auto it = fields.find(name);
-    return it == fields.end() ? "<unset>" : it->second;
-}
-
 std::string trackedStateKey(const jvmpoc::ExecutionTrace& trace) {
-    std::map<std::string, std::string> fields = fieldMap(trace);
-    return trace.currentDisplayableClass +
-        " screen=" + fieldOrMissing(fields, "screen") +
-        " state=" + fieldOrMissing(fields, "state") +
-        " ani_step=" + fieldOrMissing(fields, "ani_step") +
-        " m_mode=" + fieldOrMissing(fields, "m_mode") +
-        " p_mode=" + fieldOrMissing(fields, "p_mode") +
-        " game_on=" + fieldOrMissing(fields, "game_on") +
-        " msg=" + fieldOrMissing(fields, "msg");
+    return trace.currentDisplayableClass;
 }
 
 void printStateTransition(const jvmpoc::ExecutionTrace& trace) {
@@ -289,16 +256,7 @@ void printStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) 
 }
 
 bool shouldPrintStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) {
-    if (trace.currentDisplayableClass != "GameScreen") {
-        return false;
-    }
-
-    std::map<std::string, std::string> fields = fieldMap(trace);
-    auto screenIt = fields.find("screen");
-    if (screenIt == fields.end() || screenIt->second != "333") {
-        return false;
-    }
-
+    (void)trace;
     return repeatedFrames == 30 || repeatedFrames % 120 == 0;
 }
 

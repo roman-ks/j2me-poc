@@ -23,14 +23,16 @@ struct TestCase {
     std::vector<std::string> expectedDisplayCurrents;
     std::vector<std::string> expectedRenderGraphicsOps;
     bool midlet = false;
-    std::vector<std::pair<size_t, uint16_t>> expectedPixels;
+    std::vector<std::pair<size_t, uint16_t>> expectedPixels = {};
+    std::vector<std::string> expectedUncaughtExceptions = {};
+    std::vector<std::string> expectedThreadDeaths = {};
 };
 
 class TestHost final : public jvmpoc::JvmHost {
 public:
     int screenWidth() const override { return 240; }
     int screenHeight() const override { return 320; }
-    uint32_t millis() const override { return 123; }
+    uint32_t millis() const override { return nowMillis; }
     void present(const uint16_t* pixels, int width, int height) override {
         lastPresentWidth = width;
         lastPresentHeight = height;
@@ -43,6 +45,7 @@ public:
     int lastPresentWidth = 0;
     int lastPresentHeight = 0;
     int presentCount = 0;
+    uint32_t nowMillis = 123;
     std::vector<uint16_t> lastPixels;
 };
 
@@ -99,6 +102,22 @@ std::vector<std::string> graphicsOps(const jvmpoc::ExecutionTrace& trace) {
         ops.push_back(op.op);
     }
     return ops;
+}
+
+std::vector<std::string> uncaughtExceptions(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> exceptions;
+    for (const jvmpoc::UncaughtExceptionTrace& exception : trace.uncaughtExceptions) {
+        exceptions.push_back(exception.threadLabel + ":" + exception.exceptionClass);
+    }
+    return exceptions;
+}
+
+std::vector<std::string> threadDeaths(const jvmpoc::ExecutionTrace& trace) {
+    std::vector<std::string> deaths;
+    for (const jvmpoc::ThreadDeathTrace& death : trace.threadDeaths) {
+        deaths.push_back(death.threadLabel + ":" + death.exceptionClass);
+    }
+    return deaths;
 }
 
 std::vector<std::string> appendAll(
@@ -242,6 +261,16 @@ bool runCase(const std::string& root, const TestCase& test) {
     ok = expectList(test.name, "freed strings", lastFreedStrings(trace), test.expectedFreedStrings) && ok;
     ok = expectList(test.name, "unknown calls", unknownCalls(trace), test.expectedUnknownCalls) && ok;
     ok = expectList(test.name, "display currents", displayCurrents(trace), test.expectedDisplayCurrents) && ok;
+    std::vector<std::string> allUncaught = appendAll(
+        uncaughtExceptions(trace),
+        uncaughtExceptions(renderTrace),
+        appendAll(uncaughtExceptions(pressTrace), uncaughtExceptions(releaseTrace), {}));
+    std::vector<std::string> allThreadDeaths = appendAll(
+        threadDeaths(trace),
+        threadDeaths(renderTrace),
+        appendAll(threadDeaths(pressTrace), threadDeaths(releaseTrace), {}));
+    ok = expectList(test.name, "uncaught exceptions", allUncaught, test.expectedUncaughtExceptions) && ok;
+    ok = expectList(test.name, "thread deaths", allThreadDeaths, test.expectedThreadDeaths) && ok;
     if (test.midlet) {
         ok = expectList(test.name, "render unknown calls", unknownCalls(renderTrace), test.expectedUnknownCalls) && ok;
         ok = expectList(test.name, "render graphics ops", graphicsOps(renderTrace), test.expectedRenderGraphicsOps) && ok;
@@ -259,6 +288,72 @@ bool runCase(const std::string& root, const TestCase& test) {
 
     if (ok) {
         std::cout << "PASS " << test.name << "\n";
+    }
+    return ok;
+}
+
+bool runStepLimitPreemptionCase(const std::string& root) {
+    const std::string testName = "step limit preempts task";
+    port::setResourceRoot(root + "/target/classes");
+
+    std::vector<jvmpoc::ClassFile> classes;
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/StepLimitMidlet")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/StepLimitTask")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/StepLimitCanvas")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NativeRuntime")));
+    jvmpoc::appendDefaultBootClasses(classes);
+
+    TestHost host;
+    jvmpoc::JvmMidletApp app(host);
+    app.setClasses(classes);
+    (void)app.start("dev/roman/hello/StepLimitMidlet");
+
+    jvmpoc::ExecutionTrace first = app.render();
+    host.nowMillis += 2;
+    jvmpoc::ExecutionTrace second = app.render();
+
+    bool ok = true;
+    if (!first.stepLimitHit || !second.stepLimitHit) {
+        std::cout << "FAIL " << testName << ": expected both render passes to hit step limit\n";
+        ok = false;
+    }
+    if (first.suspendedTasks.empty() || second.suspendedTasks.empty()) {
+        std::cout << "FAIL " << testName << ": expected spinning task to remain suspended\n";
+        ok = false;
+    }
+    if (!first.threadDeaths.empty() || !second.threadDeaths.empty()) {
+        std::cout << "FAIL " << testName << ": spinning task was marked dead\n";
+        ok = false;
+    }
+    if (ok) {
+        std::cout << "PASS " << testName << "\n";
+    }
+    return ok;
+}
+
+bool runNestedTaskSleepCase(const std::string& root) {
+    const std::string testName = "nested task sleep resumes stack";
+    port::setResourceRoot(root + "/target/classes");
+
+    std::vector<jvmpoc::ClassFile> classes;
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NestedSleepMidlet")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NestedSleepTask")));
+    classes.push_back(jvmpoc::parseClassFile(classPath(root, "dev/roman/hello/NativeRuntime")));
+    jvmpoc::appendDefaultBootClasses(classes);
+
+    TestHost host;
+    jvmpoc::JvmMidletApp app(host);
+    app.setClasses(classes);
+    (void)app.start("dev/roman/hello/NestedSleepMidlet");
+
+    jvmpoc::ExecutionTrace first = app.render();
+    host.nowMillis += 2;
+    jvmpoc::ExecutionTrace second = app.render();
+
+    const std::vector<std::string> stdout = appendAll(stdoutValues(first), stdoutValues(second), {});
+    const bool ok = expectList(testName, "stdout", stdout, {"before", "after"});
+    if (ok) {
+        std::cout << "PASS " << testName << "\n";
     }
     return ok;
 }
@@ -332,7 +427,7 @@ int main(int argc, char** argv) {
             "boot StringBuffer",
             "dev/roman/hello/StringBufferBoot",
             {"dev/roman/hello/StringBufferBoot"},
-            {"enemy[2]10.png", "14", "16"},
+            {"enemy[2]10.pngtrue", "18", "34"},
             {},
             {},
             {},
@@ -392,7 +487,7 @@ int main(int argc, char** argv) {
             "boot String indexOf",
             "dev/roman/hello/StringIndexOf",
             {"dev/roman/hello/StringIndexOf"},
-            {"3", "16", "-1"},
+            {"3", "16", "-1", "16", "-1", "87", "0", "-1", "1"},
             {},
             {},
             {},
@@ -449,6 +544,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "switch bytecodes",
+            "dev/roman/hello/SwitchBoot",
+            {"dev/roman/hello/SwitchBoot"},
+            {"7", "9", "11", "1", "2", "4"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "boot Thread",
             "dev/roman/hello/ThreadBoot",
             {"dev/roman/hello/ThreadBoot", "dev/roman/hello/ThreadBootTask"},
@@ -459,6 +566,81 @@ int main(int argc, char** argv) {
             {},
             {},
             {},
+        },
+        TestCase{
+            "boot DataInputStream",
+            "dev/roman/hello/DataInputStreamBoot",
+            {"dev/roman/hello/DataInputStreamBoot"},
+            {"16909060", "5", "test", "98", "eof"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            "boot RecordStore",
+            "dev/roman/hello/RecordStoreBoot",
+            {"dev/roman/hello/RecordStoreBoot"},
+            {"1", "4", "3", "98", "deleted"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            "exception handling",
+            "dev/roman/hello/ExceptionHandling",
+            {
+                "dev/roman/hello/ExceptionHandling",
+                "dev/roman/hello/MarkerException",
+                "dev/roman/hello/ChildMarkerException",
+            },
+            {"exact", "parent", "miss-parent", "propagated", "finally-return", "3", "finally-throw", "finally-caught", "4"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            "uncaught exception",
+            "dev/roman/hello/ExceptionUncaught",
+            {"dev/roman/hello/ExceptionUncaught"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            false,
+            {},
+            {"<main>:java/lang/RuntimeException"},
+            {},
+        },
+        TestCase{
+            "uncaught thread exception",
+            "dev/roman/hello/ExceptionThreadMidlet",
+            {
+                "dev/roman/hello/ExceptionThreadMidlet",
+                "dev/roman/hello/ExceptionThreadTask",
+            },
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+            true,
+            {{0, 0x39e7}},
+            {"dev/roman/hello/ExceptionThreadTask.run()V:java/lang/RuntimeException"},
+            {"dev/roman/hello/ExceptionThreadTask.run()V:java/lang/RuntimeException"},
         },
         TestCase{
             "long arithmetic",
@@ -476,7 +658,7 @@ int main(int argc, char** argv) {
             "canvas key events",
             "dev/roman/hello/InputMidlet",
             {"dev/roman/hello/InputMidlet", "dev/roman/hello/InputCanvas"},
-            {"pressed:-3", "released:-3"},
+            {"pressed:-3", "left-code:-3", "released:-3"},
             {},
             {},
             {},
@@ -558,6 +740,25 @@ int main(int argc, char** argv) {
             },
             true,
         },
+        TestCase{
+            "display notify lifecycle",
+            "dev/roman/hello/DisplayNotifyMidlet",
+            {"dev/roman/hello/DisplayNotifyMidlet", "dev/roman/hello/DisplayNotifyCanvas"},
+            {"first:show", "first:hide", "second:show"},
+            {},
+            {},
+            {},
+            {},
+            {"display#1.setCurrent(obj#2)", "display#1.setCurrent(obj#4)"},
+            {
+                "setColor(16777215)",
+                "fillRect(0,0,240,320)",
+                "setColor(0)",
+                "fillRect(0,0,1,1)",
+            },
+            true,
+            {{0, 0x0000}, {1, 0xffff}},
+        },
     };
 
     try {
@@ -566,6 +767,12 @@ int main(int argc, char** argv) {
             if (!runCase(root, test)) {
                 ++failed;
             }
+        }
+        if (!runStepLimitPreemptionCase(root)) {
+            ++failed;
+        }
+        if (!runNestedTaskSleepCase(root)) {
+            ++failed;
         }
 
         if (failed != 0) {

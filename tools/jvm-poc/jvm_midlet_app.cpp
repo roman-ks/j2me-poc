@@ -17,12 +17,14 @@ void JvmMidletApp::loadClasses(const std::vector<std::string>& classFiles) {
 
 void JvmMidletApp::setClasses(std::vector<ClassFile> classes) {
     classes_ = std::move(classes);
-    appendDefaultBootClasses(classes_);
 }
 
 const ExecutionTrace& JvmMidletApp::start(const std::string& className) {
     midletClassName_ = className;
     session_ = createMidletSession(classes_, className, &host_);
+#ifdef ESP32_BUILD
+    jvmpoc::setTraceRecording(*session_, false);
+#endif
     lastTrace_ = startMidletSession(*session_);
     return lastTrace_;
 }
