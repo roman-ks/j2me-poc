@@ -20,6 +20,10 @@ NativeCallResult handleThread(
         return handledVoid();
     }
 
+    if (ref.name == "yield" && ref.descriptor == "()V") {
+        return handledVoid();
+    }
+
     if ((ref.name == "sleep" && ref.descriptor == "(I)V") ||
         (ref.name == "sleep" && ref.descriptor == "(J)V")) {
         std::optional<long long> millis = !args.empty() ? parseLongValue(args[0]) : std::nullopt;
