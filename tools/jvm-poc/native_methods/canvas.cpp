@@ -20,14 +20,6 @@ NativeCallResult handleCanvas(
     }
 
     if ((ref.name == "getWidth" || ref.name == "getHeight") && ref.descriptor == "()I") {
-        // A kStr-tagged receiver is a non-heap sentinel (e.g. font:default mistyped
-        // as Canvas by a decompiler). Return font metrics rather than screen dims.
-        if (!args.empty() && args[0].tag == Value::Tag::kStr) {
-            const int value = ref.name == "getHeight"
-                ? port::kBitmapFontHeight
-                : port::kBitmapFontAdvance;
-            return handledValue(Value::ofInt(static_cast<int32_t>(value)));
-        }
         const int value = ref.name == "getWidth"
             ? (ctx.host != nullptr ? ctx.host->screenWidth() : 240)
             : (ctx.host != nullptr ? ctx.host->screenHeight() : 320);

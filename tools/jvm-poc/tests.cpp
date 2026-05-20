@@ -253,6 +253,12 @@ bool runCase(const std::string& root, const TestCase& test) {
                  "stdout",
                  appendAll(stdoutValues(trace), stdoutValues(pressTrace), stdoutValues(releaseTrace)),
                  test.expectedStdout) && ok;
+    } else if (test.midlet) {
+        ok = expectList(
+                 test.name,
+                 "stdout",
+                 appendAll(stdoutValues(trace), stdoutValues(renderTrace), {}),
+                 test.expectedStdout) && ok;
     } else {
         ok = expectList(test.name, "stdout", stdoutValues(trace), test.expectedStdout) && ok;
     }
@@ -739,6 +745,13 @@ int main(int argc, char** argv) {
                 "drawString(\"Hello World!\",120,160,65)",
             },
             true,
+        },
+        TestCase{
+            "font dispatch",
+            "dev/roman/hello/VirtualDispatchTest",
+            {"dev/roman/hello/VirtualDispatchTest"},
+            {"8", "29"},
+            {}, {}, {}, {}, {}, {},
         },
         TestCase{
             "display notify lifecycle",
