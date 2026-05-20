@@ -134,9 +134,9 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleRecordStore(ctx, methodLabel, pc, ref, args);
     }
 
-    if (ref.className == "javax/microedition/media/Player") {
-        return native_methods::handlePlayer(ctx, methodLabel, pc, ref, args);
-    }
+    // if (ref.className == "javax/microedition/media/Player") {
+    //     return native_methods::handlePlayer(ctx, methodLabel, pc, ref, args);
+    // }
 
     return NativeCallResult{};
 }

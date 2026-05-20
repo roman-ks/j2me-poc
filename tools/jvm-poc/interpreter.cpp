@@ -324,9 +324,18 @@ struct Runtime {
     std::unordered_map<uint64_t, uint16_t,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, uint16_t>>> fieldIndexCache;
-    // Build-time maps: cls* → {fieldName → slot} and cls* → total slot count.
+    // Build-time maps: cls* → {fieldKey → slot} and cls* → total slot count.
+    // fieldKey is "name|descriptor" composite; see fieldSlotKey(). The same
+    // map also holds bare-name entries that point to the first slot assigned
+    // for that name, so native handlers that call ctx.readField(name) without
+    // a descriptor still resolve correctly when there is exactly one field
+    // with that name (true for every class accessed by current natives).
     std::unordered_map<const ClassFile*, std::unordered_map<std::string, uint16_t>> fieldSlotCache;
     std::unordered_map<const ClassFile*, uint16_t> fieldSlotCount;
+    // Cache (cls*, cpIdx) → "name|descriptor" composite. Strings owned here.
+    std::unordered_map<uint64_t, std::string,
+        std::hash<uint64_t>, std::equal_to<uint64_t>,
+        SramAllocator<std::pair<const uint64_t, std::string>>> fieldKeyCache;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
@@ -375,6 +384,52 @@ inline const std::string& resolveFieldName(Runtime& rt, const ClassFile& cls, ui
     return fallback;
 }
 
+// Composite "name|descriptor" key for the slot map. Required to disambiguate
+// JVM-legal overloaded instance fields (same name, different descriptor) — e.g.
+// Sonic's MainCanvasDraw has both `long a` and `boolean a`. Java forbids this
+// at source level but the bytecode is valid. Using name alone would collide
+// both onto slot 0 and corrupt every read of the boolean.
+inline std::string fieldSlotKey(const std::string& name, const std::string& descriptor) {
+    std::string key;
+    key.reserve(name.size() + 1 + descriptor.size());
+    key.append(name);
+    key.push_back('|');
+    key.append(descriptor);
+    return key;
+}
+
+// Resolve full name+descriptor composite for a Fieldref CP entry. Cached per
+// (cls, cpIdx). Returns pointer into a thread-local cache string owned by
+// fieldKeyCache (stored as std::string by value to keep the lifetime).
+inline const std::string& resolveFieldKey(Runtime& rt, const ClassFile& cls, uint16_t cpIdx) {
+    const uint64_t fkey = callCacheKey(&cls, cpIdx);
+    auto it = rt.fieldKeyCache.find(fkey);
+    if (it != rt.fieldKeyCache.end()) {
+        return it->second;
+    }
+    const auto& cp = cls.cp;
+    std::string name, descriptor;
+    if (cpIdx > 0 && cpIdx < cp.size() && cp[cpIdx].tag == CpFieldref) {
+        const uint16_t natIdx = cp[cpIdx].b;
+        if (natIdx > 0 && natIdx < cp.size() && cp[natIdx].tag == CpNameAndType) {
+            const uint16_t nameIdx = cp[natIdx].a;
+            const uint16_t descIdx = cp[natIdx].b;
+            if (nameIdx > 0 && nameIdx < cp.size() && cp[nameIdx].tag == CpUtf8) {
+                name = cp[nameIdx].utf8;
+            }
+            if (descIdx > 0 && descIdx < cp.size() && cp[descIdx].tag == CpUtf8) {
+                descriptor = cp[descIdx].utf8;
+            }
+        }
+    }
+    if (name.empty()) {
+        const FieldRef ref = resolveFieldRef(cls, cpIdx);
+        name = ref.name;
+        descriptor = ref.descriptor;
+    }
+    return rt.fieldKeyCache.emplace(fkey, fieldSlotKey(name, descriptor)).first->second;
+}
+
 // Assign stable slot indices to instance fields of cls (and its superclass chain).
 // Superclass fields get lower indices so the layout is consistent across subclasses.
 // Returns total slot count (= required size of HeapObject::fields for instances of cls).
@@ -397,7 +452,16 @@ uint16_t buildFieldSlots(Runtime& rt, const std::vector<ClassFile>& classes, con
     auto& mySlots = rt.fieldSlotCache[&cls];
     for (const FieldInfo& f : cls.fields) {
         if (f.access & 0x0008) continue; // static — not stored on heap object
-        if (mySlots.count(f.name) == 0) mySlots[f.name] = nextSlot++;
+        const std::string key = fieldSlotKey(f.name, f.descriptor);
+        if (mySlots.count(key) != 0) continue;
+        const uint16_t slot = nextSlot++;
+        mySlots[key] = slot;
+        // Bare-name fallback for ctx.readField(name) callers that don't know
+        // the descriptor. First-wins when a name is overloaded; native
+        // handlers only read uniquely-named fields, so this is safe.
+        if (mySlots.count(f.name) == 0) {
+            mySlots[f.name] = slot;
+        }
     }
     rt.fieldSlotCount[&cls] = nextSlot;
     return nextSlot;
@@ -2088,12 +2152,12 @@ std::optional<Value> resumeCurrentMethod(
                                 if (sv.isInitialized()) value = sv;
                             }
                         } else {
-                            // Cold path: resolve field name, find slot, populate cache.
-                            const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
+                            // Cold path: resolve name|descriptor key, find slot, populate cache.
+                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
                             if (obj.cls != nullptr) {
                                 buildFieldSlots(rt, classes, *obj.cls);
                                 const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                                auto nameIt = slotMap.find(fieldName);
+                                auto nameIt = slotMap.find(fieldKey);
                                 if (nameIt != slotMap.end()) {
                                     const uint16_t slot = nameIt->second;
                                     rt.fieldIndexCache[fidxKey] = slot;
@@ -2130,12 +2194,12 @@ std::optional<Value> resumeCurrentMethod(
                         if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
                         obj.fields[slot] = value;
                     } else {
-                        // Cold path: resolve field name, find slot, populate cache.
-                        const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
+                        // Cold path: resolve name|descriptor key, find slot, populate cache.
+                        const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
                         if (obj.cls != nullptr) {
                             buildFieldSlots(rt, classes, *obj.cls);
                             const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                            auto nameIt = slotMap.find(fieldName);
+                            auto nameIt = slotMap.find(fieldKey);
                             if (nameIt != slotMap.end()) {
                                 const uint16_t slot = nameIt->second;
                                 rt.fieldIndexCache[fidxKey] = slot;
