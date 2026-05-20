@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -354,6 +355,7 @@ struct Runtime {
     bool stepLimitYieldEnabled = false;
     size_t steps = 0;
     bool repaintRequested = true;
+    std::unordered_set<std::string> initializedClasses;
 };
 
 // Resolve field name from CP without copying strings. Returns pointer into cls.cp (stable).
@@ -1276,6 +1278,20 @@ std::optional<Value> executeMethod(
     Runtime& rt,
     size_t depth);
 
+void ensureClassInitialized(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    Runtime& rt,
+    size_t depth) {
+    if (!rt.initializedClasses.insert(className).second) return;
+    const ClassFile* cls = findClass(classes, className);
+    if (cls == nullptr) return;
+    const MethodInfo* clinit = findDeclaredMethod(*cls, "<clinit>", "()V");
+    if (clinit == nullptr) return;
+    std::vector<Value> noArgs;
+    (void)executeMethod(classes, *cls, *clinit, noArgs, rt, depth + 1);
+}
+
 void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const Value& runnable) {
     std::optional<uint32_t> id = objectId(runnable);
     if (!id.has_value()) {
@@ -2105,6 +2121,7 @@ std::optional<Value> resumeCurrentMethod(
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
                         return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
+                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt, depth);
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::ofInt(0) : it->second);
                 pc += 3;
@@ -2124,6 +2141,7 @@ std::optional<Value> resumeCurrentMethod(
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
                         return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
+                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt, depth);
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
                 if (rt.trace.recording) rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
@@ -2253,6 +2271,12 @@ std::optional<Value> resumeCurrentMethod(
                             : nullptr;
                         rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeHandler};
                     }
+                }
+
+                if (targetClass != nullptr) {
+                    ensureClassInitialized(classes, targetClass->thisClass, rt, depth);
+                } else if (haveRef) {
+                    ensureClassInitialized(classes, ref.className, rt, depth);
                 }
 
                 rt.callArgsBuf.resize(argSlots);
@@ -2575,6 +2599,7 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow();
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
+                ensureClassInitialized(classes, className, rt, depth);
                 frame.push(allocateObject(rt, classes, label, allocPc, className));
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
