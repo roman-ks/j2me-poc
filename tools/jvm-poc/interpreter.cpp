@@ -2103,7 +2103,7 @@ std::optional<Value> resumeCurrentMethod(
                     ? skit->second
                     : [&]() -> const std::string& {
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
-                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
+                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::ofInt(0) : it->second);
@@ -2122,7 +2122,7 @@ std::optional<Value> resumeCurrentMethod(
                     ? skit->second
                     : [&]() -> const std::string& {
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
-                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
+                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
@@ -2406,8 +2406,9 @@ std::optional<Value> resumeCurrentMethod(
                             lookupClassFromCache = true;
                         }
                     } else if (!haveRef) {
-                        lookupClassName = cit->second.runtimeClass;
-                        lookupClassFromCache = true;
+                        ref = resolveMethodRef(cls, cpIdx);
+                        haveRef = true;
+                        lookupClassName = ref.className;
                     }
                 } else if (!haveRef) {
                     // invokespecial on cache hit: use stored ref.className

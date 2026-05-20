@@ -228,7 +228,7 @@ void printStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) 
         std::cout << "  field writes:\n";
         for (const jvmpoc::FieldWrite& write : trace.fieldWrites) {
             std::cout << "    " << write.methodLabel << " pc=" << write.pc
-                      << " " << write.fieldName << "=" << write.value.text << "\n";
+                      << " " << write.fieldName << "=" << write.value.asText() << "\n";
         }
     }
     if (!trace.imageLoads.empty()) {
