@@ -2744,6 +2744,8 @@ std::optional<Value> resumeCurrentMethod(
 
             case 0xac:
             case 0xad:
+            case 0xae:  // freturn
+            case 0xaf:  // dreturn
             case 0xb0: {
                 const uint32_t t0m=statNow(); Value v=frame.pop(); runtimeFrame.pc=pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); return finish(v);
             }
@@ -3094,6 +3096,8 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             rt.trace.frameProfile.taskClearUs += nowUs() - clearStartUs;
         }
     }
+
+    
     if (profileFrame) {
         rt.trace.frameProfile.tasksUs = nowUs() - tasksStartUs;
     }
