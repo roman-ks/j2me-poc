@@ -2790,10 +2790,11 @@ std::optional<Value> resumeCurrentMethod(
                 uint8_t atype = codeU1(code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
-                if ((atype == 4 || atype == 5 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
+                if ((atype == 4 || atype == 5 || atype == 6 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
+                    // 4=bool 5=char 6=float 8=byte 9=short 10=int — all fit in CompactArrayHeap (int32_t/element)
                     frame.push(allocatePrimitiveArray(rt, label, allocPc, static_cast<size_t>(*count)));
-                } else if (atype == 11 && count.has_value() && *count >= 0) {
-                    // long array: store as Value::ofLong in the object array heap
+                } else if ((atype == 7 || atype == 11) && count.has_value() && *count >= 0) {
+                    // 7=double 11=long — store as Value::ofLong in the object array heap
                     Value arr = allocateArray(rt, label, allocPc, static_cast<size_t>(*count));
                     std::optional<uint32_t> arrId = arrayId(arr);
                     if (arrId.has_value()) {
