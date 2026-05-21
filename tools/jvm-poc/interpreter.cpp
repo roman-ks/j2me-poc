@@ -1623,6 +1623,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0x2d: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
 
             case 0x2e:
+            case 0x2f:
             case 0x32:
             case 0x33:
             case 0x34: {
