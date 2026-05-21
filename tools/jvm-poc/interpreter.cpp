@@ -1652,6 +1652,7 @@ std::optional<Value> resumeCurrentMethod(
             case 0x4e: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
 
             case 0x4f:
+            case 0x50:
             case 0x53:
             case 0x54:
             case 0x55: {
@@ -2614,6 +2615,17 @@ std::optional<Value> resumeCurrentMethod(
                 std::optional<int> count = parseIntValue(countValue);
                 if ((atype == 4 || atype == 5 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
                     frame.push(allocatePrimitiveArray(rt, label, allocPc, static_cast<size_t>(*count)));
+                } else if (atype == 11 && count.has_value() && *count >= 0) {
+                    // long array: store as Value::ofLong in the object array heap
+                    Value arr = allocateArray(rt, label, allocPc, static_cast<size_t>(*count));
+                    std::optional<uint32_t> arrId = arrayId(arr);
+                    if (arrId.has_value()) {
+                        auto it = rt.arrays.find(*arrId);
+                        if (it != rt.arrays.end()) {
+                            for (Value& v : it->second) v = Value::ofLong(0);
+                        }
+                    }
+                    frame.push(arr);
                 } else {
                     frame.push(Value::named("<array>"));
                 }
