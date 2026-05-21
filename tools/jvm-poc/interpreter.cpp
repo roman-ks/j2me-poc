@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+// #include <iostream>
 
 namespace jvmpoc {
 namespace {
@@ -2889,6 +2890,7 @@ ExecutionTrace startSession(MidletSession& session) {
 }
 
 void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
+    // std::cout << "dispatchCanvasKeyEvent: " << (event.type == HostKeyEventType::Press ? "Press" : "Release") << " code=" << event.keyCode << std::endl;
     Runtime& rt = session.runtime();
 
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
@@ -2929,6 +2931,26 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         recordUncaughtException(rt, "<input>");
         clearPendingException(rt);
     }
+    // std::cout << "dispatchCanvasKeyEvent: executed " << displayableIt->second.className << "::" << methodName << std::endl;
+    // {
+    //     // Debug: print key-gating fields from the displayable object
+    //     HeapObject& dbgObj = displayableIt->second;
+    //     if (dbgObj.cls != nullptr) {
+    //         buildFieldSlots(rt, classes, *dbgObj.cls);
+    //         auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
+    //         auto printField = [&](const char* name) {
+    //             auto it = slotMap.find(name);
+    //             if (it != slotMap.end() && it->second < dbgObj.fields.size()) {
+    //                 std::cout << "  field " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
+    //             } else {
+    //                 std::cout << "  field " << name << "=<missing>\n";
+    //             }
+    //         };
+    //         printField("ap");
+    //         printField("I");
+    //         printField("au");
+    //     }
+    // }
     rt.repaintRequested = true;
 }
 
@@ -3096,11 +3118,32 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             rt.trace.frameProfile.taskClearUs += nowUs() - clearStartUs;
         }
     }
-
-    
     if (profileFrame) {
         rt.trace.frameProfile.tasksUs = nowUs() - tasksStartUs;
     }
+
+    // {
+    //     std::optional<uint32_t> dbgId = objectId(rt.currentDisplayable);
+    //     if (dbgId.has_value()) {
+    //         auto dbgIt = rt.heap.find(*dbgId);
+    //         if (dbgIt != rt.heap.end()) {
+    //             HeapObject& dbgObj = dbgIt->second;
+    //             if (dbgObj.cls != nullptr) {
+    //                 buildFieldSlots(rt, session.classes(), *dbgObj.cls);
+    //                 auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
+    //                 auto dumpField = [&](const char* name) {
+    //                     auto it = slotMap.find(name);
+    //                     if (it != slotMap.end() && it->second < dbgObj.fields.size() && dbgObj.fields[it->second].isInitialized()) {
+    //                         std::cout << "  post-task " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
+    //                     }
+    //                 };
+    //                 dumpField("ap");
+    //                 dumpField("au");
+    //                 dumpField("I");
+    //             }
+    //         }
+    //     }
+    // }
 
     const uint32_t displayLookupStartUs = profileFrame ? nowUs() : 0;
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);

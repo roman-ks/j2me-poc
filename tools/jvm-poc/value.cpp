@@ -46,9 +46,9 @@ std::string Value::asText() const {
         else if (tag32 == kHandleGfxTag) return "graphics:image#" + std::to_string(id);
         return std::to_string(i32);
     }
-    if (tag == Tag::kLong)  return std::to_string(i64);
-    if (tag == Tag::kStr)   return *str;
-    return {};  // kNone / uninitialized
+    if (tag == Tag::kLong)  return "long#" + std::to_string(i64);
+    if (tag == Tag::kStr)   return "str#" + *str;
+    return "none";  // kNone / uninitialized
 }
 
 // ---------- parseLongValue -----------------------------------------------
