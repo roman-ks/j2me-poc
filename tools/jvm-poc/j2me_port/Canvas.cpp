@@ -162,11 +162,16 @@ void Canvas::setColor(uint8_t r, uint8_t g, uint8_t b) {
     m_color = rgbToRgb565(r, g, b);
 }
 
+void Canvas::translate(int x, int y) {
+    m_translateX += x;
+    m_translateY += y;
+}
+
 void Canvas::setClip(int x, int y, int w, int h) {
-    const int x0 = std::max(0, x);
-    const int y0 = std::max(0, y);
-    const int x1 = std::min(m_width, x + std::max(0, w));
-    const int y1 = std::min(m_height, y + std::max(0, h));
+    const int x0 = std::max(0, x + m_translateX);
+    const int y0 = std::max(0, y + m_translateY);
+    const int x1 = std::min(m_width, x + m_translateX + std::max(0, w));
+    const int y1 = std::min(m_height, y + m_translateY + std::max(0, h));
 
     if (x0 >= x1 || y0 >= y1) {
         m_clipX = 0;
@@ -198,6 +203,7 @@ void Canvas::drawPixel(int x, int y) {
 }
 
 void Canvas::drawLine(int x1, int y1, int x2, int y2) {
+    x1 += m_translateX; y1 += m_translateY; x2 += m_translateX; y2 += m_translateY;
     int dx = std::abs(x2 - x1);
     int sx = x1 < x2 ? 1 : -1;
     int dy = -std::abs(y2 - y1);
@@ -226,7 +232,7 @@ void Canvas::fillRect(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) {
         return;
     }
-
+    x += m_translateX; y += m_translateY;
     int x0 = std::max(m_clipX, x);
     int y0 = std::max(m_clipY, y);
     int x1 = std::min(m_clipX + m_clipW, x + w);
@@ -247,7 +253,7 @@ void Canvas::drawRect(int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) {
         return;
     }
-
+    x += m_translateX; y += m_translateY;
     for (int px = x; px < x + w; ++px) {
         drawPixel(px, y);
         drawPixel(px, y + h - 1);
@@ -264,8 +270,8 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
         return;
     }
 
-    int drawX = x;
-    int drawY = y;
+    int drawX = x + m_translateX;
+    int drawY = y + m_translateY;
     if ((anchor & 1) != 0) {
         drawX -= image.width / 2;
     } else if ((anchor & 8) != 0) {
@@ -334,6 +340,87 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
     }
 }
 
+void Canvas::drawRegion(const Image& image, int xSrc, int ySrc, int w, int h,
+                        int transform, int xDest, int yDest, int anchor) {
+    if (image.pixels.empty() || w <= 0 || h <= 0) return;
+    if (xSrc < 0 || ySrc < 0 || xSrc + w > image.width || ySrc + h > image.height) return;
+
+    // Rotations swap dest width/height
+    const bool swapDims = (transform == 4 || transform == 5 || transform == 6 || transform == 7);
+    const int destW = swapDims ? h : w;
+    const int destH = swapDims ? w : h;
+
+    int drawX = xDest + m_translateX;
+    int drawY = yDest + m_translateY;
+    if ((anchor & 1) != 0)       drawX -= destW / 2;
+    else if ((anchor & 8) != 0)  drawX -= destW;
+    if ((anchor & 2) != 0)       drawY -= destH / 2;
+    else if ((anchor & 32) != 0 || (anchor & 64) != 0) drawY -= destH;
+
+    const int clipX1 = m_clipX + m_clipW;
+    const int clipY1 = m_clipY + m_clipH;
+
+    // Fast path: TRANS_NONE, no alpha
+    if (transform == 0 && image.alphaRowStart.empty()) {
+        const int srcX0 = std::max(0, m_clipX - drawX);
+        const int srcY0 = std::max(0, m_clipY - drawY);
+        const int srcX1 = std::min(w, clipX1 - drawX);
+        const int srcY1 = std::min(h, clipY1 - drawY);
+        if (srcX0 >= srcX1 || srcY0 >= srcY1) return;
+        uint16_t* fb = activeFramebuffer();
+        for (int py = srcY0; py < srcY1; ++py) {
+            const int dstY = drawY + py;
+            const size_t srcOff = static_cast<size_t>((ySrc + py) * image.width + xSrc + srcX0);
+            const size_t dstOff = static_cast<size_t>(dstY * m_width + drawX + srcX0);
+            std::memcpy(&fb[dstOff], &image.pixels[srcOff],
+                        static_cast<size_t>(srcX1 - srcX0) * sizeof(uint16_t));
+        }
+        return;
+    }
+
+    // General path: transforms and/or alpha, pixel by pixel
+    uint16_t* fb = activeFramebuffer();
+    const bool hasAlpha = !image.alphaRowStart.empty();
+    for (int dy = 0; dy < destH; ++dy) {
+        const int dstY = drawY + dy;
+        if (dstY < m_clipY || dstY >= clipY1) continue;
+        for (int dx = 0; dx < destW; ++dx) {
+            const int dstX = drawX + dx;
+            if (dstX < m_clipX || dstX >= clipX1) continue;
+
+            int sx, sy;
+            switch (transform) {
+                case 0: sx = dx;         sy = dy;         break;
+                case 1: sx = dx;         sy = h - 1 - dy; break; // MIRROR_ROT180 = flip vertical
+                case 2: sx = w - 1 - dx; sy = dy;         break; // MIRROR = flip horizontal
+                case 3: sx = w - 1 - dx; sy = h - 1 - dy; break; // ROT180
+                case 4: sx = dy;         sy = dx;         break; // MIRROR_ROT270
+                case 5: sx = h - 1 - dy; sy = dx;         break; // ROT90
+                case 6: sx = dy;         sy = w - 1 - dx; break; // ROT270
+                case 7: sx = h - 1 - dy; sy = w - 1 - dx; break; // MIRROR_ROT90
+                default: sx = dx;        sy = dy;         break;
+            }
+
+            if (hasAlpha) {
+                const int imgRow = ySrc + sy;
+                const size_t runBase = image.alphaRowStart[static_cast<size_t>(imgRow)];
+                const size_t runEnd  = image.alphaRowStart[static_cast<size_t>(imgRow) + 1];
+                bool opaque = false;
+                const int col = xSrc + sx;
+                for (size_t ri = runBase; ri < runEnd; ++ri) {
+                    const int rS = static_cast<int>(image.alphaRuns[ri].start);
+                    if (col < rS) break;
+                    if (col < rS + static_cast<int>(image.alphaRuns[ri].length)) { opaque = true; break; }
+                }
+                if (!opaque) continue;
+            }
+
+            fb[static_cast<size_t>(dstY * m_width + dstX)] =
+                image.pixels[static_cast<size_t>((ySrc + sy) * image.width + (xSrc + sx))];
+        }
+    }
+}
+
 void Canvas::drawString(const char* text, int x, int y, int anchor) {
     if (text == nullptr || text[0] == '\0') {
         return;
@@ -344,8 +431,8 @@ void Canvas::drawString(const char* text, int x, int y, int anchor) {
     constexpr int kGlyphAdvance = port::kBitmapFontAdvance;
 
     const int textLen = static_cast<int>(std::strlen(text));
-    int drawX = x;
-    int drawY = y;
+    int drawX = x + m_translateX;
+    int drawY = y + m_translateY;
     const int textWidth = textLen * kGlyphAdvance - 1;
     const int textHeight = kGlyphHeight;
 

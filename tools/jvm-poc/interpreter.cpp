@@ -31,7 +31,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-// #include <iostream>
+#include <iostream>
 
 namespace jvmpoc {
 namespace {
@@ -3282,28 +3282,50 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.trace.frameProfile.tasksUs = nowUs() - tasksStartUs;
     }
 
-    // {
-    //     std::optional<uint32_t> dbgId = objectId(rt.currentDisplayable);
-    //     if (dbgId.has_value()) {
-    //         auto dbgIt = rt.heap.find(*dbgId);
-    //         if (dbgIt != rt.heap.end()) {
-    //             HeapObject& dbgObj = dbgIt->second;
-    //             if (dbgObj.cls != nullptr) {
-    //                 buildFieldSlots(rt, session.classes(), *dbgObj.cls);
-    //                 auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
-    //                 auto dumpField = [&](const char* name) {
-    //                     auto it = slotMap.find(name);
-    //                     if (it != slotMap.end() && it->second < dbgObj.fields.size() && dbgObj.fields[it->second].isInitialized()) {
-    //                         std::cout << "  post-task " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
-    //                     }
-    //                 };
-    //                 dumpField("ap");
-    //                 dumpField("au");
-    //                 dumpField("I");
-    //             }
-    //         }
-    //     }
-    // }
+    {
+        std::optional<uint32_t> dbgId = objectId(rt.currentDisplayable);
+        if (dbgId.has_value()) {
+            auto dbgIt = rt.heap.find(*dbgId);
+            if (dbgIt != rt.heap.end()) {
+                HeapObject& dbgObj = dbgIt->second;
+                if (dbgObj.cls != nullptr) {
+                    buildFieldSlots(rt, session.classes(), *dbgObj.cls);
+                    auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
+                    auto dumpField = [&](const char* name) {
+                        auto it = slotMap.find(name);
+                        if (it != slotMap.end() && it->second < dbgObj.fields.size() && dbgObj.fields[it->second].isInitialized()) {
+                            std::cout << "  post-task " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
+                        }
+                    };
+                    auto dumpStatic = [&](const char* key) {
+                        auto it = rt.staticFields.find(key);
+                        if (it != rt.staticFields.end()) {
+                            std::cout << "  static " << key << "=" << it->second.asText() << "\n";
+                        }
+                    };
+                    auto dumpArrayLen = [&](const char* name) {
+                        auto it = slotMap.find(name);
+                        if (it == slotMap.end() || it->second >= dbgObj.fields.size()) return;
+                        const Value& v = dbgObj.fields[it->second];
+                        std::optional<uint32_t> arrId = arrayId(v);
+                        if (!arrId.has_value()) { std::cout << "  post-task " << name << "=null\n"; return; }
+                        auto primIt = rt.primitiveArrays.find(*arrId);
+                        if (primIt != rt.primitiveArrays.end()) { std::cout << "  post-task " << name << ".len=" << primIt->second.size() << "\n"; return; }
+                        auto arrIt = rt.arrays.find(*arrId);
+                        if (arrIt != rt.arrays.end()) { std::cout << "  post-task " << name << ".len=" << arrIt->second.size() << "\n"; }
+                    };
+                    // dumpStatic("MainCanvas.aq|I");
+                    // dumpStatic("MainCanvas.ar|I");
+                    // dumpStatic("MainCanvas.aE|I");
+                    // dumpStatic("MainCanvas.aF|I");
+                    // dumpField("ap");
+                    // dumpField("as");
+                    // dumpField("at");
+                    // dumpArrayLen("h"); // tile data byte[] - null means aY() failed
+                }
+            }
+        }
+    }
 
     const uint32_t displayLookupStartUs = profileFrame ? nowUs() : 0;
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);

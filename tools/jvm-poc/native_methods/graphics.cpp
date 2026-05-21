@@ -138,6 +138,51 @@ NativeCallResult handleGraphics(
         return handledVoid();
     }
 
+    if (ref.name == "drawRegion" &&
+        ref.descriptor == "(Ljavax/microedition/lcdui/Image;IIIIIIII)V") {
+        std::optional<uint32_t> image = args.size() > 1 ? imageId(args[1]) : std::optional<uint32_t>{};
+        const port::Image* imagePtr = nullptr;
+        if (image.has_value()) {
+            auto imageIt = ctx.images.find(*image);
+            if (imageIt != ctx.images.end()) imagePtr = &imageIt->second;
+        }
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        if (canvas != nullptr && imagePtr != nullptr) {
+            canvas->drawRegion(*imagePtr,
+                intArg(args, 2), intArg(args, 3),  // xSrc, ySrc
+                intArg(args, 4), intArg(args, 5),  // width, height
+                intArg(args, 6),                    // transform
+                intArg(args, 7), intArg(args, 8),  // xDest, yDest
+                intArg(args, 9));                   // anchor
+        }
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
+            methodLabel, pc,
+            "drawRegion(" + argText(args, 1) + "," + argText(args, 2) + "," +
+                argText(args, 3) + "," + argText(args, 4) + "," + argText(args, 5) + ",...)",
+        });
+        return handledVoid();
+    }
+
+    if (ref.name == "translate" && ref.descriptor == "(II)V") {
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        if (canvas != nullptr) canvas->translate(intArg(args, 1), intArg(args, 2));
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{methodLabel, pc,
+            "translate(" + argText(args, 1) + "," + argText(args, 2) + ")"});
+        return handledVoid();
+    }
+
+    if (ref.name == "getColor" && ref.descriptor == "()I") {
+        return handledValue(Value::ofInt(ctx.graphicsColorRgb));
+    }
+
+    if (ref.name == "drawRect" && ref.descriptor == "(IIII)V") {
+        port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        if (canvas != nullptr) canvas->drawRect(intArg(args, 1), intArg(args, 2), intArg(args, 3), intArg(args, 4));
+        if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{methodLabel, pc,
+            "drawRect(" + argText(args, 1) + "," + argText(args, 2) + "," + argText(args, 3) + "," + argText(args, 4) + ")"});
+        return handledVoid();
+    }
+
     if (ref.name == "setColor" && ref.descriptor == "(I)V") {
         ctx.graphicsColorRgb = intArg(args, 1);
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{

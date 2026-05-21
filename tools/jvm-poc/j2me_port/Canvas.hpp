@@ -22,6 +22,8 @@ public:
     void fillRect(int x, int y, int w, int h);
     void drawRect(int x, int y, int w, int h);
     void drawImage(const Image& image, int x, int y, int anchor = 0);
+    void drawRegion(const Image& image, int xSrc, int ySrc, int w, int h, int transform, int xDest, int yDest, int anchor);
+    void translate(int x, int y);
     void drawString(const char* text, int x, int y, int anchor = 0);
     void drawString(const std::string& text, int x, int y, int anchor = 0) { drawString(text.c_str(), x, y, anchor); }
 
@@ -35,6 +37,8 @@ private:
     bool isInsideClip(int x, int y) const;
     int m_width;
     int m_height;
+    int m_translateX = 0;
+    int m_translateY = 0;
     int m_clipX = 0;
     int m_clipY = 0;
     int m_clipW = 0;
