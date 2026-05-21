@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -41,6 +43,14 @@ constexpr const char* kClassHandlePrefix = "class:";
 
 uint32_t branchTarget(size_t pc, int32_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
+}
+
+template<typename To, typename From>
+To bitCast(From f) {
+    static_assert(sizeof(To) == sizeof(From), "bitCast size mismatch");
+    To t;
+    std::memcpy(&t, &f, sizeof(t));
+    return t;
 }
 
 inline uint32_t nowUs() {
@@ -1644,7 +1654,8 @@ std::optional<Value> resumeCurrentMethod(
             case 0x31:  // daload
             case 0x32:
             case 0x33:
-            case 0x34: {
+            case 0x34:
+            case 0x35: {  // saload
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
                 const uint32_t t0 = statNow();
@@ -1686,7 +1697,8 @@ std::optional<Value> resumeCurrentMethod(
             case 0x52:  // dastore
             case 0x53:
             case 0x54:
-            case 0x55: {
+            case 0x55:
+            case 0x56: {  // sastore
                 const uint32_t t0=statNow();
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 Value value = frame.pop();
@@ -1779,6 +1791,9 @@ std::optional<Value> resumeCurrentMethod(
             case 0x57: {
                 const uint32_t t0m=statNow(); (void)frame.pop(); ++pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); break;
             }
+            case 0x58: {
+                (void)frame.pop(); (void)frame.pop(); ++pc; break;  // pop2
+            }
 
             case 0x84: {
                 const uint32_t t0arith = statNow();
@@ -1853,6 +1868,53 @@ std::optional<Value> resumeCurrentMethod(
                     : Value::named("(-" + value.asText() + ")"));
                 ++pc;
                 break;
+            }
+
+            case 0x76: {  // fneg
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(-bitCast<float>(v.value_or(0)))));
+                ++pc; break;
+            }
+            case 0x77: {  // dneg
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(-bitCast<double>(v.value_or(0)))));
+                ++pc; break;
+            }
+
+            case 0x62: case 0x63: case 0x66: case 0x67:
+            case 0x6a: case 0x6b: case 0x6e: case 0x6f:
+            case 0x72: case 0x73: {
+                Value rhsV = frame.pop(), lhsV = frame.pop();
+                if (op & 1) {  // double ops: 0x63 dadd, 0x67 dsub, 0x6b dmul, 0x6f ddiv, 0x73 drem
+                    auto r = parseLongValue(rhsV), l = parseLongValue(lhsV);
+                    if (l && r) {
+                        double a = bitCast<double>(*l), b = bitCast<double>(*r), res;
+                        switch (op) {
+                            case 0x63: res = a + b; break;
+                            case 0x67: res = a - b; break;
+                            case 0x6b: res = a * b; break;
+                            case 0x6f: res = a / b; break;
+                            case 0x73: res = std::fmod(a, b); break;
+                            default:   res = 0.0; break;
+                        }
+                        frame.push(Value::ofLong(bitCast<int64_t>(res)));
+                    } else { frame.push(Value::named("<darith>")); }
+                } else {  // float ops: 0x62 fadd, 0x66 fsub, 0x6a fmul, 0x6e fdiv, 0x72 frem
+                    auto r = parseIntValue(rhsV), l = parseIntValue(lhsV);
+                    if (l && r) {
+                        float a = bitCast<float>(*l), b = bitCast<float>(*r), res;
+                        switch (op) {
+                            case 0x62: res = a + b; break;
+                            case 0x66: res = a - b; break;
+                            case 0x6a: res = a * b; break;
+                            case 0x6e: res = a / b; break;
+                            case 0x72: res = std::fmod(a, b); break;
+                            default:   res = 0.0f; break;
+                        }
+                        frame.push(Value::ofInt(bitCast<int32_t>(res)));
+                    } else { frame.push(Value::named("<farith>")); }
+                }
+                ++pc; break;
             }
 
             case 0x78:
@@ -1943,6 +2005,57 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
+            case 0x86: {  // i2f
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(v ? static_cast<float>(*v) : 0.0f)));
+                ++pc; break;
+            }
+            case 0x87: {  // i2d
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(v ? static_cast<double>(*v) : 0.0)));
+                ++pc; break;
+            }
+            case 0x89: {  // l2f
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(v ? static_cast<float>(*v) : 0.0f)));
+                ++pc; break;
+            }
+            case 0x8a: {  // l2d
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(v ? static_cast<double>(*v) : 0.0)));
+                ++pc; break;
+            }
+            case 0x8b: {  // f2i
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofInt(v ? static_cast<int32_t>(bitCast<float>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x8c: {  // f2l
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofLong(v ? static_cast<int64_t>(bitCast<float>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x8d: {  // f2d
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(v ? static_cast<double>(bitCast<float>(*v)) : 0.0)));
+                ++pc; break;
+            }
+            case 0x8e: {  // d2i
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofInt(v ? static_cast<int32_t>(bitCast<double>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x8f: {  // d2l
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofLong(v ? static_cast<int64_t>(bitCast<double>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x90: {  // d2f
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(v ? static_cast<float>(bitCast<double>(*v)) : 0.0f)));
+                ++pc; break;
+            }
+
             case 0x91: {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
@@ -1977,6 +2090,28 @@ std::optional<Value> resumeCurrentMethod(
                     : Value::named("<lcmp:" + lhs.asText() + "," + rhs.asText() + ">"));
                 ++pc;
                 break;
+            }
+
+            case 0x95: case 0x96: case 0x97: case 0x98: {  // fcmpl fcmpg dcmpl dcmpg
+                Value rhsV = frame.pop(), lhsV = frame.pop();
+                int32_t cmp;
+                if (op >= 0x97) {  // dcmpl / dcmpg
+                    auto r = parseLongValue(rhsV), l = parseLongValue(lhsV);
+                    if (l && r) {
+                        double a = bitCast<double>(*l), b = bitCast<double>(*r);
+                        cmp = (std::isnan(a) || std::isnan(b)) ? (op == 0x97 ? -1 : 1)
+                                                                : (a < b ? -1 : a > b ? 1 : 0);
+                    } else { cmp = 0; }
+                } else {  // fcmpl / fcmpg
+                    auto r = parseIntValue(rhsV), l = parseIntValue(lhsV);
+                    if (l && r) {
+                        float a = bitCast<float>(*l), b = bitCast<float>(*r);
+                        cmp = (std::isnan(a) || std::isnan(b)) ? (op == 0x95 ? -1 : 1)
+                                                                : (a < b ? -1 : a > b ? 1 : 0);
+                    } else { cmp = 0; }
+                }
+                frame.push(Value::ofInt(cmp));
+                ++pc; break;
             }
 
             case 0x99:
@@ -2032,6 +2167,17 @@ std::optional<Value> resumeCurrentMethod(
                 }
                 pc = taken ? target : pc + 3;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
+                break;
+            }
+
+            case 0xa5:
+            case 0xa6: {  // if_acmpeq / if_acmpne
+                int16_t offset = codeS2(code, pc + 1);
+                uint32_t target = branchTarget(pc, offset);
+                Value rhs = frame.pop(), lhs = frame.pop();
+                auto l = parseIntValue(lhs), r = parseIntValue(rhs);
+                bool equal = l.has_value() && r.has_value() && *l == *r;
+                pc = ((op == 0xa5) ? equal : !equal) ? target : pc + 3;
                 break;
             }
 
@@ -2741,6 +2887,19 @@ std::optional<Value> resumeCurrentMethod(
                 }
                 runtimeFrame.pc = throwPc;
                 return finish(std::nullopt);
+            }
+
+            case 0xc1: {  // instanceof — no type info; conservatively push 0
+                (void)frame.pop();
+                frame.push(Value::ofInt(0));
+                pc += 3;
+                break;
+            }
+            case 0xc2:
+            case 0xc3: {  // monitorenter / monitorexit — single-threaded; pop ref and ignore
+                (void)frame.pop();
+                ++pc;
+                break;
             }
 
             case 0xac:
