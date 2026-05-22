@@ -354,6 +354,9 @@ struct Runtime {
     int graphicsWidth = 0;
     int graphicsHeight = 0;
     int graphicsColorRgb = 0x000000;
+    // Persistent main-framebuffer Canvas. Shared across all executeMethod() depths
+    // so translate/clip state set in paint() persists into Java sub-method calls.
+    std::optional<port::Canvas> mainFbCanvas;
     ExecutionTrace trace;
     std::vector<MethodProfileAccumulator, SramAllocator<MethodProfileAccumulator>> taskMethodProfiles;
     std::vector<NamedProfileAccumulator, SramAllocator<NamedProfileAccumulator>> taskNativeProfiles;
@@ -1527,15 +1530,9 @@ std::optional<Value> resumeCurrentMethod(
     // native dispatch rather than constructing it (and its std::function members)
     // anew for each bytecode instruction.
     NativeCallContext sharedNativeCtx = makeNativeContext();
-    // Build the cached main-framebuffer Canvas once here rather than
-    // constructing a new one on every Graphics native call.
-    if (sharedNativeCtx.graphicsFramebuffer != nullptr &&
-        sharedNativeCtx.graphicsWidth > 0 && sharedNativeCtx.graphicsHeight > 0) {
-        sharedNativeCtx.mainFbCanvas.emplace(
-            sharedNativeCtx.graphicsWidth,
-            sharedNativeCtx.graphicsHeight,
-            sharedNativeCtx.graphicsFramebuffer);
-    }
+    // Point to the Runtime-owned main-framebuffer Canvas so translate/clip state
+    // persists across nested executeMethod() calls within the same paint() frame.
+    sharedNativeCtx.mainFbCanvas = rt.mainFbCanvas.has_value() ? &rt.mainFbCanvas.value() : nullptr;
 
     // When no host is attached (or host has no stats to collect) skip all
     // per-bytecode nowUs() calls: each costs ~6µs and there are ~13 000/frame.
@@ -2982,6 +2979,7 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.graphicsWidth = 0;
     rt.graphicsHeight = 0;
     rt.graphicsColorRgb = 0x000000;
+    rt.mainFbCanvas.reset();
 }
 
 class ScopedResourceReadTrace final {
@@ -3124,6 +3122,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     rt.graphicsFramebuffer = pixels;
     rt.graphicsWidth = width;
     rt.graphicsHeight = height;
+    rt.mainFbCanvas.emplace(width, height, pixels);
     auto finishProfile = [&]() -> ExecutionTrace {
         if (profileFrame && rt.host != nullptr) {
             rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
@@ -3374,6 +3373,10 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     if (paintOwner != nullptr && paint != nullptr) {
         if (profileFrame) {
             rt.trace.frameProfile.paintCalled = true;
+        }
+        // J2ME spec: Graphics object starts each paint() with translate=(0,0) and full clip.
+        if (rt.mainFbCanvas.has_value()) {
+            rt.mainFbCanvas.emplace(rt.graphicsWidth, rt.graphicsHeight, rt.graphicsFramebuffer);
         }
         std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
         (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);

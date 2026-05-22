@@ -1,6 +1,7 @@
 #include "handlers.hpp"
 
 #include "helpers.hpp"
+#include <cstdio>
 
 namespace jvmpoc::native_methods {
 namespace {
@@ -63,6 +64,7 @@ NativeCallResult handleImage(
     if (ref.name == "createImage" && ref.descriptor == "(II)Ljavax/microedition/lcdui/Image;") {
         int width = intArg(args, 0);
         int height = intArg(args, 1);
+        printf("[DBG-createImage] %dx%d called from %s\n", width, height, methodLabel.c_str());
         port::Image image = port::Image::createImage(width, height);
         Value imageRef = storeImage(ctx, image);
         ctx.trace.imageLoads.push_back(ImageLoad{

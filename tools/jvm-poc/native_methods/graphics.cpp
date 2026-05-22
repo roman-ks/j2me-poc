@@ -10,6 +10,12 @@
 #else
 #include <chrono>
 #endif
+#include <string>
+#include <vector>
+
+// DBG: per-frame event log (remove after diagnosis)
+int g_dbgRenderFrame = 0;
+std::vector<std::string> g_dbgEventLog;
 
 namespace jvmpoc::native_methods {
 namespace {
@@ -58,9 +64,9 @@ port::Canvas* graphicsCanvas(NativeCallContext& ctx, const Value& receiver) {
             return &ctx.scratchCanvas.value();
         }
         // targetImage == 0: main framebuffer sentinel (kHandleGfxTag | 0) — use cached canvas.
-        if (ctx.mainFbCanvas.has_value()) {
+        if (ctx.mainFbCanvas != nullptr) {
             ctx.mainFbCanvas->setColor(ctx.graphicsColorRgb);
-            return &ctx.mainFbCanvas.value();
+            return ctx.mainFbCanvas;
         }
         // Fallback if canvas wasn't pre-built (e.g. no framebuffer at ctx creation time).
     }
@@ -117,6 +123,11 @@ NativeCallResult handleGraphics(
         const int diX = intArg(args, 2);
         const int diY = intArg(args, 3);
         const int diAnchor = intArg(args, 4);
+        { char _b[128]; snprintf(_b, sizeof(_b), "drawImage x=%d y=%d anch=%d imgSize=%dx%d",
+              diX, diY, diAnchor,
+              imagePtr ? imagePtr->width : -1,
+              imagePtr ? imagePtr->height : -1);
+          g_dbgEventLog.push_back(_b); }
         if (canvas != nullptr && imagePtr != nullptr) {
 #if JVM_ENABLE_NATIVE_PROFILING
             const uint32_t t0 = nowUs();
@@ -147,6 +158,16 @@ NativeCallResult handleGraphics(
             if (imageIt != ctx.images.end()) imagePtr = &imageIt->second;
         }
         port::Canvas* canvas = graphicsCanvas(ctx, receiver);
+        { const int xd = intArg(args,7), yd = intArg(args,8);
+          const int tx = canvas ? canvas->translateX() : -999;
+          const int ty = canvas ? canvas->translateY() : -999;
+          char _b[160]; snprintf(_b, sizeof(_b),
+              "drawRegion xSrc=%d ySrc=%d w=%d h=%d tr=%d xDst=%d yDst=%d anch=%d scrX=%d scrY=%d clip=%d+%d",
+              intArg(args,2), intArg(args,3), intArg(args,4), intArg(args,5),
+              intArg(args,6), xd, yd, intArg(args,9),
+              xd+tx, yd+ty,
+              canvas ? canvas->clipX() : -1, canvas ? canvas->clipW() : -1);
+          g_dbgEventLog.push_back(_b); }
         if (canvas != nullptr && imagePtr != nullptr) {
             canvas->drawRegion(*imagePtr,
                 intArg(args, 2), intArg(args, 3),  // xSrc, ySrc
@@ -166,6 +187,10 @@ NativeCallResult handleGraphics(
     if (ref.name == "translate" && ref.descriptor == "(II)V") {
         port::Canvas* canvas = graphicsCanvas(ctx, receiver);
         if (canvas != nullptr) canvas->translate(intArg(args, 1), intArg(args, 2));
+        { char _b[96]; snprintf(_b, sizeof(_b), "translate dx=%d dy=%d => txX=%d txY=%d",
+              intArg(args,1), intArg(args,2),
+              canvas ? canvas->translateX() : -999, canvas ? canvas->translateY() : -999);
+          g_dbgEventLog.push_back(_b); }
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{methodLabel, pc,
             "translate(" + argText(args, 1) + "," + argText(args, 2) + ")"});
         return handledVoid();
@@ -185,6 +210,8 @@ NativeCallResult handleGraphics(
 
     if (ref.name == "setColor" && ref.descriptor == "(I)V") {
         ctx.graphicsColorRgb = intArg(args, 1);
+        { char _b[32]; snprintf(_b, sizeof(_b), "setColor 0x%06x", intArg(args,1));
+          g_dbgEventLog.push_back(_b); }
         if (ctx.trace.recording) ctx.trace.graphicsOps.push_back(GraphicsOp{
             methodLabel,
             pc,
@@ -208,6 +235,8 @@ NativeCallResult handleGraphics(
         int y = intArg(args, 2);
         int width = intArg(args, 3);
         int height = intArg(args, 4);
+        { char _b[64]; snprintf(_b, sizeof(_b), "fillRect x=%d y=%d w=%d h=%d", x, y, width, height);
+          g_dbgEventLog.push_back(_b); }
         port::Canvas* canvas = graphicsCanvas(ctx, receiver);
         if (canvas != nullptr) {
 #if JVM_ENABLE_NATIVE_PROFILING
@@ -233,8 +262,15 @@ NativeCallResult handleGraphics(
         int width = intArg(args, 3);
         int height = intArg(args, 4);
         std::optional<uint32_t> targetImage = imageGraphicsId(receiver);
-        if (targetImage.has_value() && *targetImage == 0 && ctx.mainFbCanvas.has_value()) {
+        if (targetImage.has_value() && *targetImage == 0 && ctx.mainFbCanvas != nullptr) {
             ctx.mainFbCanvas->setClip(x, y, width, height);
+            { char _b[128]; snprintf(_b, sizeof(_b),
+                  "setClip in=%d,%d,%d,%d => clipX=%d clipY=%d clipW=%d clipH=%d (txX=%d)",
+                  x, y, width, height,
+                  ctx.mainFbCanvas->clipX(), ctx.mainFbCanvas->clipY(),
+                  ctx.mainFbCanvas->clipW(), ctx.mainFbCanvas->clipH(),
+                  ctx.mainFbCanvas->translateX());
+              g_dbgEventLog.push_back(_b); }
         } else if (targetImage.has_value() && *targetImage != 0) {
             // Find or create entry; persist clip fields directly — no Canvas construction.
             ImageCanvasEntry* entry = nullptr;

@@ -402,7 +402,16 @@ int main(int argc, char** argv) {
             }
 
             const jvmpoc::ExecutionTrace& renderTrace = app.render();
+            { extern int g_dbgRenderFrame;
+              extern std::vector<std::string> g_dbgEventLog;
+              printf("[DBG] === RENDER FRAME %d (%zu events) ===\n",
+                  g_dbgRenderFrame, g_dbgEventLog.size());
+              for (size_t i = 0; i < g_dbgEventLog.size(); ++i)
+                  printf("[DBG] #%zu %s\n", i, g_dbgEventLog[i].c_str());
+              g_dbgEventLog.clear(); }
             std::string stateKey = trackedStateKey(renderTrace);
+            printMeaningfulUnknownCalls(renderTrace);
+
             if (!stateKey.empty()) {
                 if (stateKey != lastStateKey) {
                     // printStateTransition(renderTrace);

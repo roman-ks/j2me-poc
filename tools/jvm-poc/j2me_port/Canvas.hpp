@@ -29,6 +29,12 @@ public:
 
     int width() const { return m_width; }
     int height() const { return m_height; }
+    int translateX() const { return m_translateX; }
+    int translateY() const { return m_translateY; }
+    int clipX() const { return m_clipX; }
+    int clipY() const { return m_clipY; }
+    int clipW() const { return m_clipW; }
+    int clipH() const { return m_clipH; }
 
     const uint16_t* framebuffer() const;
     uint16_t* framebuffer();
