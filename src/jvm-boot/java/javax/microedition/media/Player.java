@@ -30,5 +30,17 @@ public class Player {
         return 100; // UNREALIZED
     }
 
+    public void realize() {
+        // No-op
+    }
+
+    public void prefetch() {
+        // No-op
+    }
+
+    public void addPlayerListener(PlayerListener listener) {
+        // No-op
+    }
+
 
 }
