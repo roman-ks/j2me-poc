@@ -28,6 +28,10 @@ public class RecordStore {
         return openRecordStore(recordStoreName, createIfNecessary);
     }
 
+    public static RecordStore openRecordStore(String recordStoreName, String vendorName, String suiteName) throws RecordStoreException {
+        return openRecordStore(recordStoreName, true);
+    }
+
     public static void deleteRecordStore(String recordStoreName) throws RecordStoreException {
         if (recordStoreName == null) {
             throw new NullPointerException();
