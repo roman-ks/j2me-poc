@@ -320,6 +320,8 @@ void Canvas::drawImage(const Image& image, int x, int y, int anchor) {
             const int dstY = drawY + py;
             const size_t srcRow = static_cast<size_t>(py * image.width);
             const size_t dstRow = static_cast<size_t>(dstY * m_width);
+            if (static_cast<size_t>(py) + 1 >= image.alphaRowStart.size()) break;
+            if (srcRow + static_cast<size_t>(srcX1) > image.pixels.size()) break;
             const size_t runBase = image.alphaRowStart[static_cast<size_t>(py)];
             const size_t runEnd  = image.alphaRowStart[static_cast<size_t>(py) + 1];
             for (size_t ri = runBase; ri < runEnd; ++ri) {
@@ -401,6 +403,8 @@ void Canvas::drawRegion(const Image& image, int xSrc, int ySrc, int w, int h,
                 default: sx = dx;        sy = dy;         break;
             }
 
+            if (ySrc + sy < 0 || ySrc + sy >= image.height ||
+                xSrc + sx < 0 || xSrc + sx >= image.width) continue;
             if (hasAlpha) {
                 const int imgRow = ySrc + sy;
                 const size_t runBase = image.alphaRowStart[static_cast<size_t>(imgRow)];

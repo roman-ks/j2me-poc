@@ -375,8 +375,8 @@ int main(int argc, char** argv) {
         std::string lastStateKey = trackedStateKey(firstRenderTrace);
         int repeatedStateFrames = 0;
         if (!lastStateKey.empty()) {
-            // printStateTransition(firstRenderTrace);
-            // printTraceTimings(firstRenderTrace, 1);
+            printStateTransition(firstRenderTrace);
+            printTraceTimings(firstRenderTrace, 1);
         }
 
         bool running = true;
@@ -402,26 +402,19 @@ int main(int argc, char** argv) {
             }
 
             const jvmpoc::ExecutionTrace& renderTrace = app.render();
-            { extern int g_dbgRenderFrame;
-              extern std::vector<std::string> g_dbgEventLog;
-              printf("[DBG] === RENDER FRAME %d (%zu events) ===\n",
-                  g_dbgRenderFrame, g_dbgEventLog.size());
-              for (size_t i = 0; i < g_dbgEventLog.size(); ++i)
-                  printf("[DBG] #%zu %s\n", i, g_dbgEventLog[i].c_str());
-              g_dbgEventLog.clear(); }
             std::string stateKey = trackedStateKey(renderTrace);
             printMeaningfulUnknownCalls(renderTrace);
 
             if (!stateKey.empty()) {
                 if (stateKey != lastStateKey) {
-                    // printStateTransition(renderTrace);
-                    // printTraceTimings(renderTrace, 1);
+                    printStateTransition(renderTrace);
+                    printTraceTimings(renderTrace, 1);
                     lastStateKey = stateKey;
                     repeatedStateFrames = 0;
                 } else {
                     ++repeatedStateFrames;
                     if (shouldPrintStalledState(renderTrace, repeatedStateFrames)) {
-                        // printStalledState(renderTrace, repeatedStateFrames);
+                        printStalledState(renderTrace, repeatedStateFrames);
                     }
                 }
             } else {
@@ -435,12 +428,15 @@ int main(int argc, char** argv) {
             if (suspiciousFrame) {
                 ++blankFrames;
                 if (shouldPrintSuspiciousFrame(renderTrace, blankFrames)) {
-                    // printSuspiciousFrame(renderTrace, blankFrames);
+                    printSuspiciousFrame(renderTrace, blankFrames);
                 }
             } else {
                 blankFrames = 0;
             }
-            SDL_Delay(16);
+            // Step-limit yields happen mid-logic and only need 1ms; full
+            // frame-boundary yields (serviceRepaints, Thread.sleep) use 16ms
+            // to honour the game's 60fps timing.
+            SDL_Delay(renderTrace.stepLimitHit ? 1 : 16);
         }
     } catch (const std::exception& e) {
         std::cerr << "jvm-poc-sdl-demo: " << e.what() << "\n";
