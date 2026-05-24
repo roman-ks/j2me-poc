@@ -95,6 +95,24 @@ void Image::setDecoder(Decoder decoder) {
     g_imageDecoder = decoder;
 }
 
+Image Image::createImage(const std::vector<uint8_t>& encoded) {
+    Image image;
+    if (g_imageDecoder == nullptr) {
+        LOGF_W("No image decoder installed for createImage(byte[])");
+        return image;
+    }
+    if (encoded.empty()) {
+        LOGF_W("createImage(byte[]): empty data");
+        return image;
+    }
+    if (!g_imageDecoder(encoded, image)) {
+        LOGF_W("createImage(byte[]): decode failed");
+        return image;
+    }
+    image.buildAlphaRle();
+    return image;
+}
+
 Image Image::createImage(int width, int height) {
     Image image;
     image.width = std::max(0, width);

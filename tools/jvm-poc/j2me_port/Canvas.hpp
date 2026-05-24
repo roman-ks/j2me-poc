@@ -89,6 +89,7 @@ public:
 
     static Image createImage(const std::string& path);
     static Image createImage(int width, int height);
+    static Image createImage(const std::vector<uint8_t>& encoded);
     static void setDecoder(Decoder decoder);
 
     Canvas getGraphics();

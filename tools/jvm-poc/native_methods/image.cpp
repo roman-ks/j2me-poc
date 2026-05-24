@@ -1,7 +1,6 @@
 #include "handlers.hpp"
 
 #include "helpers.hpp"
-#include <cstdio>
 
 namespace jvmpoc::native_methods {
 namespace {
@@ -61,10 +60,33 @@ NativeCallResult handleImage(
         return handledValue(imageRef);
     }
 
+    if (ref.name == "createImage" && ref.descriptor == "([BII)Ljavax/microedition/lcdui/Image;") {
+        std::optional<uint32_t> arrId = arrayId(args[0]);
+        int offset = intArg(args, 1);
+        int length = intArg(args, 2);
+        if (arrId.has_value()) {
+            auto primIt = ctx.primitiveArrays.find(*arrId);
+            if (primIt != ctx.primitiveArrays.end()) {
+                const auto& raw = primIt->second;
+                if (offset >= 0 && length >= 0 &&
+                        static_cast<size_t>(offset) + static_cast<size_t>(length) <= raw.size()) {
+                    std::vector<uint8_t> encoded(static_cast<size_t>(length));
+                    for (int i = 0; i < length; ++i)
+                        encoded[static_cast<size_t>(i)] = static_cast<uint8_t>(raw[static_cast<size_t>(offset + i)]);
+                    port::Image image = port::Image::createImage(encoded);
+                    Value imageRef = storeImage(ctx, image);
+                    ctx.trace.imageLoads.push_back(ImageLoad{
+                        methodLabel, pc, imageRef, "<byte[]>", image.width, image.height});
+                    return handledValue(imageRef);
+                }
+            }
+        }
+        return handledValue(Value::named("image:<invalid-byte-array>"));
+    }
+
     if (ref.name == "createImage" && ref.descriptor == "(II)Ljavax/microedition/lcdui/Image;") {
         int width = intArg(args, 0);
         int height = intArg(args, 1);
-        printf("[DBG-createImage] %dx%d called from %s\n", width, height, methodLabel.c_str());
         port::Image image = port::Image::createImage(width, height);
         Value imageRef = storeImage(ctx, image);
         ctx.trace.imageLoads.push_back(ImageLoad{
