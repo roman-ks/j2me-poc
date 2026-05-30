@@ -3,6 +3,7 @@
 #include "helpers.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace jvmpoc::native_methods {
 
@@ -174,6 +175,29 @@ NativeCallResult handleString(
             }
         }
         return handledVoid();
+    }
+
+    auto caseConvert = [&](bool lower) -> NativeCallResult {
+        std::optional<uint32_t> id = objectId(receiver);
+        auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
+        if (strIt == ctx.strings.end()) {
+            return handledValue(receiver);
+        }
+        std::string s = strIt->second;
+        for (char& c : s) {
+            c = static_cast<char>(lower
+                ? std::tolower(static_cast<unsigned char>(c))
+                : std::toupper(static_cast<unsigned char>(c)));
+        }
+        return handledValue(ctx.internString(s));
+    };
+
+    if (ref.name == "toLowerCase" && ref.descriptor == "()Ljava/lang/String;") {
+        return caseConvert(true);
+    }
+
+    if (ref.name == "toUpperCase" && ref.descriptor == "()Ljava/lang/String;") {
+        return caseConvert(false);
     }
 
     if (ctx.trace.recording) ctx.trace.unsupportedStringCalls.push_back(UnsupportedStringCall{

@@ -2614,6 +2614,20 @@ std::optional<Value> resumeCurrentMethod(
                 rt.callArgsBuf[0] = frame.pop(); // 'this'
                 const Value& object = rt.callArgsBuf[0]; // ref into callArgsBuf (no copy)
 
+                if (object.isNull()) {
+                    const uint32_t npe_pc = static_cast<uint32_t>(pc);
+                    setPendingException(rt,
+                        allocateObject(rt, classes, label, npe_pc, "java/lang/NullPointerException"),
+                        label, npe_pc);
+                    if (catchPendingException(npe_pc)) {
+                        if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                        break;
+                    }
+                    runtimeFrame.pc = npe_pc;
+                    if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                    return finish(std::nullopt);
+                }
+
                 // Phase 3: determine lookupClassName + lookupClassPtr for cache hit check
                 std::string lookupClassName = haveRef ? ref.className : "";
                 const ClassFile* lookupClassPtr = nullptr;

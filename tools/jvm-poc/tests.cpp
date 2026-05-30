@@ -754,6 +754,18 @@ int main(int argc, char** argv) {
             {}, {}, {}, {}, {}, {},
         },
         TestCase{
+            "string null indexOf",
+            "dev/roman/hello/StringNullIndexOf",
+            {"dev/roman/hello/StringNullIndexOf"},
+            {"long#-1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "display notify lifecycle",
             "dev/roman/hello/DisplayNotifyMidlet",
             {"dev/roman/hello/DisplayNotifyMidlet", "dev/roman/hello/DisplayNotifyCanvas"},

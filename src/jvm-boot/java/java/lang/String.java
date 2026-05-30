@@ -218,6 +218,10 @@ public final class String {
         return -1;
     }
 
+    public native String toLowerCase();
+
+    public native String toUpperCase();
+
     public native char charAt(int index);
 
     public native int indexOf(int ch, int fromIndex);
