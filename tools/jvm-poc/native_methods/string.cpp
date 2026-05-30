@@ -60,7 +60,7 @@ NativeCallResult handleString(
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         return handledValue(strIt != ctx.strings.end()
             ? Value::ofInt(static_cast<int32_t>(strIt->second.size()))
-            : Value::named("<string-length:" + receiver.asText() + ">"));
+            : Value::ofInt(0));
     }
 
     if (ref.name == "charAt" && ref.descriptor == "(I)C") {
@@ -181,7 +181,7 @@ NativeCallResult handleString(
         std::optional<uint32_t> id = objectId(receiver);
         auto strIt = id.has_value() ? ctx.strings.find(*id) : ctx.strings.end();
         if (strIt == ctx.strings.end()) {
-            return handledValue(receiver);
+            return handledValue(Value::ofInt(0));
         }
         std::string s = strIt->second;
         for (char& c : s) {
