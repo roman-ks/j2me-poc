@@ -766,6 +766,13 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "ByteArrayInputStream read",
+            "dev/roman/hello/ByteArrayInputStreamTest",
+            {"dev/roman/hello/ByteArrayInputStreamTest"},
+            {"long#10", "long#20", "long#200", "long#255", "long#-1", "long#-1"},
+            {}, {}, {}, {}, {}, {},
+        },
+        TestCase{
             "display notify lifecycle",
             "dev/roman/hello/DisplayNotifyMidlet",
             {"dev/roman/hello/DisplayNotifyMidlet", "dev/roman/hello/DisplayNotifyCanvas"},

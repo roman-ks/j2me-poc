@@ -146,6 +146,19 @@ void printMeaningfulUnknownCalls(const jvmpoc::ExecutionTrace& trace) {
     }
 }
 
+void printExceptions(const jvmpoc::ExecutionTrace& trace) {
+    for (const jvmpoc::CaughtExceptionTrace& ex : trace.caughtExceptions) {
+        std::cout << "caught " << ex.exceptionClass
+                  << " thrown at " << ex.throwMethodLabel << " pc=" << ex.throwPc
+                  << " caught at " << ex.catchMethodLabel << " pc=" << ex.catchPc << "\n";
+    }
+    for (const jvmpoc::UncaughtExceptionTrace& ex : trace.uncaughtExceptions) {
+        std::cout << "uncaught " << ex.exceptionClass
+                  << " thrown at " << ex.methodLabel << " pc=" << ex.pc
+                  << " task=" << ex.threadLabel << "\n";
+    }
+}
+
 void printSuspiciousFrame(const jvmpoc::ExecutionTrace& trace, int blankFrames) {
     std::cout << "suspicious frame: blankFrames=" << blankFrames;
     if (!trace.currentDisplayableClass.empty()) {
@@ -349,6 +362,7 @@ int main(int argc, char** argv) {
             jvmpoc::ExtractedMidlet extracted = jvmpoc::loadExtractedMidlet(argv[argIndex], midletOverride);
             port::setResourceRoot(assetsDir.empty() ? extracted.root : assetsDir);
             app.setClasses(std::move(extracted.classes));
+            host.appProperties = std::move(extracted.appProperties);
             midletClass = extracted.midletClass;
         } else {
             if (argc - argIndex < 2) {
@@ -404,6 +418,7 @@ int main(int argc, char** argv) {
             const jvmpoc::ExecutionTrace& renderTrace = app.render();
             std::string stateKey = trackedStateKey(renderTrace);
             printMeaningfulUnknownCalls(renderTrace);
+            printExceptions(renderTrace);
 
             if (!stateKey.empty()) {
                 if (stateKey != lastStateKey) {

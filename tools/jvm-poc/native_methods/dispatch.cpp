@@ -118,6 +118,7 @@ NativeCallResult handleNativeInstanceCall(
         ctx.classes != nullptr &&
         isClassOrSubclassOf(*ctx.classes, ctx.receiverClassName, "javax/microedition/lcdui/Canvas");
     if (ref.className == "javax/microedition/lcdui/Canvas" ||
+        ref.className == "javax/microedition/lcdui/game/GameCanvas" ||
         (receiverIsCanvas && (ref.name == "getWidth" || ref.name == "getHeight"))) {
         return native_methods::handleCanvas(ctx, methodLabel, pc, ref, args);
     }
@@ -147,7 +148,8 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
     if (className == "javax/microedition/lcdui/Graphics")   return &native_methods::handleGraphics;
     if (className == "javax/microedition/lcdui/Image")      return &native_methods::handleImage;
     if (className == "javax/microedition/lcdui/Font")       return &native_methods::handleFont;
-    if (className == "javax/microedition/lcdui/Canvas")     return &native_methods::handleCanvas;
+    if (className == "javax/microedition/lcdui/Canvas")                    return &native_methods::handleCanvas;
+    if (className == "javax/microedition/lcdui/game/GameCanvas")           return &native_methods::handleCanvas;
     if (className == "java/lang/String")                    return &native_methods::handleString;
     if (className == "java/lang/Thread")                    return &native_methods::handleThread;
     if (className == "javax/microedition/rms/RecordStore")  return &native_methods::handleRecordStore;

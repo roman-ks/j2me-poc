@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 #include <iostream>
+#include <core/log.h>
 
 namespace jvmpoc {
 namespace {
@@ -913,13 +914,15 @@ bool handlePendingExceptionAt(
     if (handler == nullptr) {
         return false;
     }
-    rt.trace.caughtExceptions.push_back(CaughtExceptionTrace{
-        rt.pendingExceptionMethodLabel,
-        rt.pendingExceptionPc,
-        methodLabel(*rt.callStack.back().cls, method),
-        handler->handlerPc,
-        exceptionClassName(rt, *rt.pendingException),
-    });
+    if (rt.trace.recording) {
+        rt.trace.caughtExceptions.push_back(CaughtExceptionTrace{
+            rt.pendingExceptionMethodLabel,
+            rt.pendingExceptionPc,
+            methodLabel(*rt.callStack.back().cls, method),
+            handler->handlerPc,
+            exceptionClassName(rt, *rt.pendingException),
+        });
+    }
     Value exception = *rt.pendingException;
     clearPendingException(rt);
     frame.clearStack();
@@ -1323,6 +1326,7 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         return;
     }
     if (rt.session != nullptr) {
+        LOGF_W("[task-queued] %s.%s%s (pre-size=%zu)", owner->thisClass.c_str(), run->name.c_str(), run->descriptor.c_str(), rt.session->tasks().size());
         ThreadTask task;
         task.cls = owner;
         task.method = run;
@@ -2967,6 +2971,7 @@ std::optional<Value> resumeCurrentMethod(
         }
     }
 
+    LOGF_W("executeMethod: %s.%s%s depth=%zu - completed", cls.thisClass.c_str(), method.name.c_str(), method.descriptor.c_str(), depth);
     runtimeFrame.pc = pc;
     return finish(std::nullopt);
 }
@@ -3275,6 +3280,10 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
             }
             if (rt.pendingException.has_value()) {
+                LOGF_W("[task-died] %s uncaught=%s thrownAt=%s pc=%u", taskLabel.c_str(),
+                    exceptionClassName(rt, *rt.pendingException).c_str(),
+                    rt.pendingExceptionMethodLabel.c_str(),
+                    rt.pendingExceptionPc);
                 recordUncaughtException(rt, taskLabel);
                 recordThreadDeath(rt, taskLabel);
                 task.finished = true;
@@ -3303,6 +3312,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                     rt.trace.frameProfile.taskCatchUs += nowUs() - yieldStartUs;
                 }
             } else {
+                LOGF_W("[task-done] %s returned normally", taskLabel.c_str());
                 task.finished = true;
             }
         } catch (const YieldThreadSleep& request) {

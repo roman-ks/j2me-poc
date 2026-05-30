@@ -49,6 +49,21 @@ NativeCallResult handleCanvas(
         return handledVoid();
     }
 
+    // GameCanvas methods
+    if (ref.name == "<init>" && ref.descriptor == "(Z)V") {
+        return handledVoid();
+    }
+
+    if (ref.name == "getGraphics" && ref.descriptor == "()Ljavax/microedition/lcdui/Graphics;") {
+        return handledValue(Value::ofInt(Value::kHandleGfxTag | 0));
+    }
+
+    if ((ref.name == "flushGraphics" && ref.descriptor == "()V") ||
+        (ref.name == "flushGraphics" && ref.descriptor == "(IIII)V")) {
+        ctx.requestRepaint();
+        return handledVoid();
+    }
+
     return NativeCallResult{};
 }
 
