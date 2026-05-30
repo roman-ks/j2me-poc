@@ -12,10 +12,10 @@ Project targets to be a generic runtime. Optimisations for one particular app ca
 
 ## Two-Repo Structure
 
-| Repo | Role |
-|------|------|
-| `j2me-poc` (this repo) | Core JVM runtime, Java boot stubs, MIDlet source, dev tools |
-| `esp-j2me-poc` (`/home/roman/projects/esp-j2me-poc`) | PlatformIO host: ESP32 + Linux entry points, build orchestration, HAL |
+| Repo | Role | Usage in development  |
+|------|------| --------------------- |
+| `j2me-poc` (this repo) | Core JVM runtime, Java boot stubs, MIDlet source, dev tools | Used for main development, due to having simplified SDL2 integration which allows quick feedback for adding new game support |
+| `esp-j2me-poc` (`/home/roman/projects/esp-j2me-poc`) | PlatformIO host: ESP32 + Linux entry points, build orchestration, HAL. | Used for stable version of this project. |
 
 Active JVM C++ development happens in `tools/jvm-poc/`. The host repo references this directory via `custom_j2me_poc_root` in its `platformio.ini`.
 
