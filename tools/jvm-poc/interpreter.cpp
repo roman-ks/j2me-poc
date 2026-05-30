@@ -2996,32 +2996,6 @@ std::optional<Value> executeMethod(
 
     // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
     std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
-    // DBG: trace c.E() entry to diagnose blank title screen
-    // if (cls.thisClass == "c" && method.name == "E") {
-    //     if (!args.empty()) {
-    //         std::optional<uint32_t> id = objectId(args[0]);
-    //         auto heapIt = id.has_value() ? rt.heap.find(*id) : rt.heap.end();
-    //         if (heapIt != rt.heap.end()) {
-    //             auto slotCacheIt = rt.fieldSlotCache.find(heapIt->second.cls);
-    //             if (slotCacheIt != rt.fieldSlotCache.end()) {
-    //                 auto nameIt = slotCacheIt->second.find("c|B");
-    //                 if (nameIt != slotCacheIt->second.end()) {
-    //                     uint16_t slot = nameIt->second;
-    //                     int cval = slot < (int)heapIt->second.fields.size() ? heapIt->second.fields[slot].i32 : -999;
-    //                     // printf("[DBG-E] this.c=%d fields=%zu cls=%s\n", cval, heapIt->second.fields.size(), heapIt->second.cls ? heapIt->second.cls->thisClass.c_str() : "null");
-    //                 } else {
-    //                     // printf("[DBG-E] slot c|B not found in cls=%s\n", heapIt->second.cls ? heapIt->second.cls->thisClass.c_str() : "null");
-    //                 }
-    //             } else {
-    //                 // printf("[DBG-E] no slot cache for obj.cls\n");
-    //             }
-    //         } else {
-    //             // printf("[DBG-E] receiver not in heap\n");
-    //         }
-    //     } else {
-    //         // printf("[DBG-E] no args\n");
-    //     }
-    // }
     RuntimeFrame runtimeFrame{
         std::move(label), &cls, &method, 0,
         Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
@@ -3453,18 +3427,14 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.trace.frameProfile.paintLookupUs = nowUs() - paintLookupStartUs;
         rt.trace.frameProfile.repaintRequested = rt.repaintRequested;
     }
-    // If any task is alive (sleeping/waiting for input), the game is live and
-    // the display must keep updating even though no explicit repaint() was called.
-    // This matches MIDP spec: the display drives paint() independently of the app thread.
+    // Only paint when the app has explicitly requested a repaint. Sleeping tasks
+    // do not force paint — the app is responsible for calling repaint() when
+    // visual state changes. Forcing paint every frame on any live task causes
+    // frame-counting animations (where paint increments a counter) to advance
+    // orders of magnitude faster than the game's timer expects.
     if (!rt.repaintRequested) {
-        bool hasLiveTask = false;
-        for (const ThreadTask& task : session.tasks()) {
-            if (!task.finished) { hasLiveTask = true; break; }
-        }
-        if (!hasLiveTask) {
-            captureSuspendedForTrace();
-            return finishProfile();
-        }
+        captureSuspendedForTrace();
+        return finishProfile();
     }
 
     const uint32_t paintStartUs = profileFrame ? nowUs() : 0;
