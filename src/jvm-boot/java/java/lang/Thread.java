@@ -12,6 +12,8 @@ public class Thread {
 
     public native void start();
 
+    public static native void yield();
+
     public static native void sleep(int millis);
 
     public static native void sleep(long millis);

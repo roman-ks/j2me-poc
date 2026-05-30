@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -26,8 +28,10 @@
 #include <unordered_map>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+#include <iostream>
 
 namespace jvmpoc {
 namespace {
@@ -39,6 +43,14 @@ constexpr const char* kClassHandlePrefix = "class:";
 
 uint32_t branchTarget(size_t pc, int32_t offset) {
     return static_cast<uint32_t>(static_cast<int32_t>(pc) + offset);
+}
+
+template<typename To, typename From>
+To bitCast(From f) {
+    static_assert(sizeof(To) == sizeof(From), "bitCast size mismatch");
+    To t;
+    std::memcpy(&t, &f, sizeof(t));
+    return t;
 }
 
 inline uint32_t nowUs() {
@@ -324,15 +336,27 @@ struct Runtime {
     std::unordered_map<uint64_t, uint16_t,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, uint16_t>>> fieldIndexCache;
-    // Build-time maps: cls* → {fieldName → slot} and cls* → total slot count.
+    // Build-time maps: cls* → {fieldKey → slot} and cls* → total slot count.
+    // fieldKey is "name|descriptor" composite; see fieldSlotKey(). The same
+    // map also holds bare-name entries that point to the first slot assigned
+    // for that name, so native handlers that call ctx.readField(name) without
+    // a descriptor still resolve correctly when there is exactly one field
+    // with that name (true for every class accessed by current natives).
     std::unordered_map<const ClassFile*, std::unordered_map<std::string, uint16_t>> fieldSlotCache;
     std::unordered_map<const ClassFile*, uint16_t> fieldSlotCount;
+    // Cache (cls*, cpIdx) → "name|descriptor" composite. Strings owned here.
+    std::unordered_map<uint64_t, std::string,
+        std::hash<uint64_t>, std::equal_to<uint64_t>,
+        SramAllocator<std::pair<const uint64_t, std::string>>> fieldKeyCache;
     Value displayRef = Value::named("display#1");
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
     int graphicsWidth = 0;
     int graphicsHeight = 0;
     int graphicsColorRgb = 0x000000;
+    // Persistent main-framebuffer Canvas. Shared across all executeMethod() depths
+    // so translate/clip state set in paint() persists into Java sub-method calls.
+    std::optional<port::Canvas> mainFbCanvas;
     ExecutionTrace trace;
     std::vector<MethodProfileAccumulator, SramAllocator<MethodProfileAccumulator>> taskMethodProfiles;
     std::vector<NamedProfileAccumulator, SramAllocator<NamedProfileAccumulator>> taskNativeProfiles;
@@ -345,6 +369,7 @@ struct Runtime {
     bool stepLimitYieldEnabled = false;
     size_t steps = 0;
     bool repaintRequested = true;
+    std::unordered_set<std::string> initializedClasses;
 };
 
 // Resolve field name from CP without copying strings. Returns pointer into cls.cp (stable).
@@ -375,6 +400,52 @@ inline const std::string& resolveFieldName(Runtime& rt, const ClassFile& cls, ui
     return fallback;
 }
 
+// Composite "name|descriptor" key for the slot map. Required to disambiguate
+// JVM-legal overloaded instance fields (same name, different descriptor) — e.g.
+// Sonic's MainCanvasDraw has both `long a` and `boolean a`. Java forbids this
+// at source level but the bytecode is valid. Using name alone would collide
+// both onto slot 0 and corrupt every read of the boolean.
+inline std::string fieldSlotKey(const std::string& name, const std::string& descriptor) {
+    std::string key;
+    key.reserve(name.size() + 1 + descriptor.size());
+    key.append(name);
+    key.push_back('|');
+    key.append(descriptor);
+    return key;
+}
+
+// Resolve full name+descriptor composite for a Fieldref CP entry. Cached per
+// (cls, cpIdx). Returns pointer into a thread-local cache string owned by
+// fieldKeyCache (stored as std::string by value to keep the lifetime).
+inline const std::string& resolveFieldKey(Runtime& rt, const ClassFile& cls, uint16_t cpIdx) {
+    const uint64_t fkey = callCacheKey(&cls, cpIdx);
+    auto it = rt.fieldKeyCache.find(fkey);
+    if (it != rt.fieldKeyCache.end()) {
+        return it->second;
+    }
+    const auto& cp = cls.cp;
+    std::string name, descriptor;
+    if (cpIdx > 0 && cpIdx < cp.size() && cp[cpIdx].tag == CpFieldref) {
+        const uint16_t natIdx = cp[cpIdx].b;
+        if (natIdx > 0 && natIdx < cp.size() && cp[natIdx].tag == CpNameAndType) {
+            const uint16_t nameIdx = cp[natIdx].a;
+            const uint16_t descIdx = cp[natIdx].b;
+            if (nameIdx > 0 && nameIdx < cp.size() && cp[nameIdx].tag == CpUtf8) {
+                name = cp[nameIdx].utf8;
+            }
+            if (descIdx > 0 && descIdx < cp.size() && cp[descIdx].tag == CpUtf8) {
+                descriptor = cp[descIdx].utf8;
+            }
+        }
+    }
+    if (name.empty()) {
+        const FieldRef ref = resolveFieldRef(cls, cpIdx);
+        name = ref.name;
+        descriptor = ref.descriptor;
+    }
+    return rt.fieldKeyCache.emplace(fkey, fieldSlotKey(name, descriptor)).first->second;
+}
+
 // Assign stable slot indices to instance fields of cls (and its superclass chain).
 // Superclass fields get lower indices so the layout is consistent across subclasses.
 // Returns total slot count (= required size of HeapObject::fields for instances of cls).
@@ -397,7 +468,16 @@ uint16_t buildFieldSlots(Runtime& rt, const std::vector<ClassFile>& classes, con
     auto& mySlots = rt.fieldSlotCache[&cls];
     for (const FieldInfo& f : cls.fields) {
         if (f.access & 0x0008) continue; // static — not stored on heap object
-        if (mySlots.count(f.name) == 0) mySlots[f.name] = nextSlot++;
+        const std::string key = fieldSlotKey(f.name, f.descriptor);
+        if (mySlots.count(key) != 0) continue;
+        const uint16_t slot = nextSlot++;
+        mySlots[key] = slot;
+        // Bare-name fallback for ctx.readField(name) callers that don't know
+        // the descriptor. First-wins when a name is overloaded; native
+        // handlers only read uniquely-named fields, so this is safe.
+        if (mySlots.count(f.name) == 0) {
+            mySlots[f.name] = slot;
+        }
     }
     rt.fieldSlotCount[&cls] = nextSlot;
     return nextSlot;
@@ -1212,6 +1292,22 @@ std::optional<Value> executeMethod(
     Runtime& rt,
     size_t depth);
 
+void ensureClassInitialized(
+    const std::vector<ClassFile>& classes,
+    const std::string& className,
+    Runtime& rt,
+    size_t depth) {
+    if (!rt.initializedClasses.insert(className).second) return;
+    const ClassFile* cls = findClass(classes, className);
+    if (cls == nullptr) return;
+    if (!cls->superClass.empty())
+        ensureClassInitialized(classes, cls->superClass, rt, depth + 1);
+    const MethodInfo* clinit = findDeclaredMethod(*cls, "<clinit>", "()V");
+    if (clinit == nullptr) return;
+    std::vector<Value> noArgs;
+    (void)executeMethod(classes, *cls, *clinit, noArgs, rt, depth + 1);
+}
+
 void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const Value& runnable) {
     std::optional<uint32_t> id = objectId(runnable);
     if (!id.has_value()) {
@@ -1261,6 +1357,21 @@ void initializeFrameArgs(RuntimeFrame& runtimeFrame, std::vector<Value>& args) {
         localIndex += widths[i];
         ++argIndex;
     }
+}
+
+bool isAssignableTo(const std::vector<ClassFile>& classes,
+                    const std::string& objClass,
+                    const std::string& targetClass,
+                    int depth = 0) {
+    if (objClass == targetClass) return true;
+    if (depth > 16) return false;
+    const ClassFile* cls = findClass(classes, objClass);
+    if (cls == nullptr) return false;
+    if (!cls->superClass.empty() && isAssignableTo(classes, cls->superClass, targetClass, depth + 1))
+        return true;
+    for (const std::string& iface : cls->interfaces)
+        if (isAssignableTo(classes, iface, targetClass, depth + 1)) return true;
+    return false;
 }
 
 std::optional<Value> resumeCurrentMethod(
@@ -1436,15 +1547,9 @@ std::optional<Value> resumeCurrentMethod(
     // native dispatch rather than constructing it (and its std::function members)
     // anew for each bytecode instruction.
     NativeCallContext sharedNativeCtx = makeNativeContext();
-    // Build the cached main-framebuffer Canvas once here rather than
-    // constructing a new one on every Graphics native call.
-    if (sharedNativeCtx.graphicsFramebuffer != nullptr &&
-        sharedNativeCtx.graphicsWidth > 0 && sharedNativeCtx.graphicsHeight > 0) {
-        sharedNativeCtx.mainFbCanvas.emplace(
-            sharedNativeCtx.graphicsWidth,
-            sharedNativeCtx.graphicsHeight,
-            sharedNativeCtx.graphicsFramebuffer);
-    }
+    // Point to the Runtime-owned main-framebuffer Canvas so translate/clip state
+    // persists across nested executeMethod() calls within the same paint() frame.
+    sharedNativeCtx.mainFbCanvas = rt.mainFbCanvas.has_value() ? &rt.mainFbCanvas.value() : nullptr;
 
     // When no host is attached (or host has no stats to collect) skip all
     // per-bytecode nowUs() calls: each costs ~6µs and there are ~13 000/frame.
@@ -1495,6 +1600,11 @@ std::optional<Value> resumeCurrentMethod(
             case 0x08: { const uint32_t t0=statNow(); frame.push(Value::ofInt(5)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_5
             case 0x09: { const uint32_t t0=statNow(); frame.push(Value::ofLong(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // lconst_0
             case 0x0a: { const uint32_t t0=statNow(); frame.push(Value::ofLong(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // lconst_1
+            case 0x0b: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0));          ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // fconst_0
+            case 0x0c: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0x3F800000)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // fconst_1
+            case 0x0d: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0x40000000)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // fconst_2
+            case 0x0e: { const uint32_t t0=statNow(); frame.push(Value::ofLong(INT64_C(0)));                    ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // dconst_0
+            case 0x0f: { const uint32_t t0=statNow(); frame.push(Value::ofLong(INT64_C(0x3FF0000000000000))); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // dconst_1
             case 0x10: { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS1(code, pc + 1))); pc += 2; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // bipush
             case 0x11: { const uint32_t t0=statNow(); frame.push(Value::ofInt(codeS2(code, pc + 1))); pc += 3; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // sipush
             case 0x12: {
@@ -1537,15 +1647,29 @@ std::optional<Value> resumeCurrentMethod(
             case 0x16: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x15: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x19: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x22: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // fload_0
+            case 0x23: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // fload_1
+            case 0x24: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // fload_2
+            case 0x25: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // fload_3
+            case 0x26: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload_0
+            case 0x27: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload_1
+            case 0x28: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload_2
+            case 0x29: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload_3
+            case 0x17: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // fload
+            case 0x18: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload
             case 0x2a: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x2b: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x2c: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x2d: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
 
             case 0x2e:
+            case 0x2f:
+            case 0x30:  // faload
+            case 0x31:  // daload
             case 0x32:
             case 0x33:
-            case 0x34: {
+            case 0x34:
+            case 0x35: {  // saload
                 Value indexValue = frame.pop();
                 Value arrayValue = frame.pop();
                 const uint32_t t0 = statNow();
@@ -1566,15 +1690,29 @@ std::optional<Value> resumeCurrentMethod(
             case 0x37: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
             case 0x36: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
             case 0x3a: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
+            case 0x38: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // fstore
+            case 0x39: { const uint32_t t0=statNow(); store(codeU1(code, pc + 1), static_cast<uint32_t>(pc)); pc += 2; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // dstore
+            case 0x43: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // fstore_0
+            case 0x44: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // fstore_1
+            case 0x45: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // fstore_2
+            case 0x46: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // fstore_3
+            case 0x47: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // dstore_0
+            case 0x48: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // dstore_1
+            case 0x49: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // dstore_2
+            case 0x4a: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }  // dstore_3
             case 0x4b: { const uint32_t t0=statNow(); store(0, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
             case 0x4c: { const uint32_t t0=statNow(); store(1, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
             case 0x4d: { const uint32_t t0=statNow(); store(2, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
             case 0x4e: { const uint32_t t0=statNow(); store(3, static_cast<uint32_t>(pc)); ++pc; if(t0) rt.host->storeStats.record(nowUs()-t0); break; }
 
             case 0x4f:
+            case 0x50:
+            case 0x51:  // fastore
+            case 0x52:  // dastore
             case 0x53:
             case 0x54:
-            case 0x55: {
+            case 0x55:
+            case 0x56: {  // sastore
                 const uint32_t t0=statNow();
                 uint32_t writePc = static_cast<uint32_t>(pc);
                 Value value = frame.pop();
@@ -1667,6 +1805,11 @@ std::optional<Value> resumeCurrentMethod(
             case 0x57: {
                 const uint32_t t0m=statNow(); (void)frame.pop(); ++pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); break;
             }
+            case 0x58: {
+                Value top = frame.pop();
+                if (top.tag != Value::Tag::kLong) (void)frame.pop();
+                ++pc; break;  // pop2
+            }
 
             case 0x84: {
                 const uint32_t t0arith = statNow();
@@ -1741,6 +1884,53 @@ std::optional<Value> resumeCurrentMethod(
                     : Value::named("(-" + value.asText() + ")"));
                 ++pc;
                 break;
+            }
+
+            case 0x76: {  // fneg
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(-bitCast<float>(v.value_or(0)))));
+                ++pc; break;
+            }
+            case 0x77: {  // dneg
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(-bitCast<double>(v.value_or(0)))));
+                ++pc; break;
+            }
+
+            case 0x62: case 0x63: case 0x66: case 0x67:
+            case 0x6a: case 0x6b: case 0x6e: case 0x6f:
+            case 0x72: case 0x73: {
+                Value rhsV = frame.pop(), lhsV = frame.pop();
+                if (op & 1) {  // double ops: 0x63 dadd, 0x67 dsub, 0x6b dmul, 0x6f ddiv, 0x73 drem
+                    auto r = parseLongValue(rhsV), l = parseLongValue(lhsV);
+                    if (l && r) {
+                        double a = bitCast<double>(*l), b = bitCast<double>(*r), res;
+                        switch (op) {
+                            case 0x63: res = a + b; break;
+                            case 0x67: res = a - b; break;
+                            case 0x6b: res = a * b; break;
+                            case 0x6f: res = a / b; break;
+                            case 0x73: res = std::fmod(a, b); break;
+                            default:   res = 0.0; break;
+                        }
+                        frame.push(Value::ofLong(bitCast<int64_t>(res)));
+                    } else { frame.push(Value::named("<darith>")); }
+                } else {  // float ops: 0x62 fadd, 0x66 fsub, 0x6a fmul, 0x6e fdiv, 0x72 frem
+                    auto r = parseIntValue(rhsV), l = parseIntValue(lhsV);
+                    if (l && r) {
+                        float a = bitCast<float>(*l), b = bitCast<float>(*r), res;
+                        switch (op) {
+                            case 0x62: res = a + b; break;
+                            case 0x66: res = a - b; break;
+                            case 0x6a: res = a * b; break;
+                            case 0x6e: res = a / b; break;
+                            case 0x72: res = std::fmod(a, b); break;
+                            default:   res = 0.0f; break;
+                        }
+                        frame.push(Value::ofInt(bitCast<int32_t>(res)));
+                    } else { frame.push(Value::named("<farith>")); }
+                }
+                ++pc; break;
             }
 
             case 0x78:
@@ -1831,6 +2021,57 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
 
+            case 0x86: {  // i2f
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(v ? static_cast<float>(*v) : 0.0f)));
+                ++pc; break;
+            }
+            case 0x87: {  // i2d
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(v ? static_cast<double>(*v) : 0.0)));
+                ++pc; break;
+            }
+            case 0x89: {  // l2f
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(v ? static_cast<float>(*v) : 0.0f)));
+                ++pc; break;
+            }
+            case 0x8a: {  // l2d
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(v ? static_cast<double>(*v) : 0.0)));
+                ++pc; break;
+            }
+            case 0x8b: {  // f2i
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofInt(v ? static_cast<int32_t>(bitCast<float>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x8c: {  // f2l
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofLong(v ? static_cast<int64_t>(bitCast<float>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x8d: {  // f2d
+                auto v = parseIntValue(frame.pop());
+                frame.push(Value::ofLong(bitCast<int64_t>(v ? static_cast<double>(bitCast<float>(*v)) : 0.0)));
+                ++pc; break;
+            }
+            case 0x8e: {  // d2i
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofInt(v ? static_cast<int32_t>(bitCast<double>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x8f: {  // d2l
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofLong(v ? static_cast<int64_t>(bitCast<double>(*v)) : 0));
+                ++pc; break;
+            }
+            case 0x90: {  // d2f
+                auto v = parseLongValue(frame.pop());
+                frame.push(Value::ofInt(bitCast<int32_t>(v ? static_cast<float>(bitCast<double>(*v)) : 0.0f)));
+                ++pc; break;
+            }
+
             case 0x91: {
                 Value value = frame.pop();
                 std::optional<int> parsed = parseIntValue(value);
@@ -1865,6 +2106,28 @@ std::optional<Value> resumeCurrentMethod(
                     : Value::named("<lcmp:" + lhs.asText() + "," + rhs.asText() + ">"));
                 ++pc;
                 break;
+            }
+
+            case 0x95: case 0x96: case 0x97: case 0x98: {  // fcmpl fcmpg dcmpl dcmpg
+                Value rhsV = frame.pop(), lhsV = frame.pop();
+                int32_t cmp;
+                if (op >= 0x97) {  // dcmpl / dcmpg
+                    auto r = parseLongValue(rhsV), l = parseLongValue(lhsV);
+                    if (l && r) {
+                        double a = bitCast<double>(*l), b = bitCast<double>(*r);
+                        cmp = (std::isnan(a) || std::isnan(b)) ? (op == 0x97 ? -1 : 1)
+                                                                : (a < b ? -1 : a > b ? 1 : 0);
+                    } else { cmp = 0; }
+                } else {  // fcmpl / fcmpg
+                    auto r = parseIntValue(rhsV), l = parseIntValue(lhsV);
+                    if (l && r) {
+                        float a = bitCast<float>(*l), b = bitCast<float>(*r);
+                        cmp = (std::isnan(a) || std::isnan(b)) ? (op == 0x95 ? -1 : 1)
+                                                                : (a < b ? -1 : a > b ? 1 : 0);
+                    } else { cmp = 0; }
+                }
+                frame.push(Value::ofInt(cmp));
+                ++pc; break;
             }
 
             case 0x99:
@@ -1920,6 +2183,20 @@ std::optional<Value> resumeCurrentMethod(
                 }
                 pc = taken ? target : pc + 3;
                 if(t0b) rt.host->branchStats.record(nowUs()-t0b);
+                break;
+            }
+
+            case 0xa5:
+            case 0xa6: {  // if_acmpeq / if_acmpne
+                int16_t offset = codeS2(code, pc + 1);
+                uint32_t target = branchTarget(pc, offset);
+                Value rhs = frame.pop(), lhs = frame.pop();
+                bool equal = false;
+                if (lhs.tag == rhs.tag) {
+                    if (lhs.tag == Value::Tag::kInt)  equal = (lhs.i32 == rhs.i32);
+                    else if (lhs.tag == Value::Tag::kStr) equal = (*lhs.str == *rhs.str);
+                }
+                pc = ((op == 0xa5) ? equal : !equal) ? target : pc + 3;
                 break;
             }
 
@@ -2039,8 +2316,9 @@ std::optional<Value> resumeCurrentMethod(
                     ? skit->second
                     : [&]() -> const std::string& {
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
-                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
+                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
+                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt, depth);
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::ofInt(0) : it->second);
                 pc += 3;
@@ -2058,8 +2336,9 @@ std::optional<Value> resumeCurrentMethod(
                     ? skit->second
                     : [&]() -> const std::string& {
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
-                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name).first->second;
+                        return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
+                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt, depth);
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
                 if (rt.trace.recording) rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
@@ -2078,7 +2357,10 @@ std::optional<Value> resumeCurrentMethod(
                     auto objectIt = rt.heap.find(*id);
                     if (objectIt != rt.heap.end()) {
                         HeapObject& obj = objectIt->second;
-                        const uint64_t fidxKey = callCacheKey(obj.cls, cpIdx);
+                        // Key by executing class (not obj.cls) so cpIdx is interpreted in the
+                        // correct constant pool — avoids cross-class collisions when two classes
+                        // share the same cpIdx for different fields on the same object type.
+                        const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
                         auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                         if (fidxIt != rt.fieldIndexCache.end()) {
                             // Hot path: integer-keyed SRAM lookup → direct vector index.
@@ -2088,12 +2370,12 @@ std::optional<Value> resumeCurrentMethod(
                                 if (sv.isInitialized()) value = sv;
                             }
                         } else {
-                            // Cold path: resolve field name, find slot, populate cache.
-                            const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
+                            // Cold path: resolve name|descriptor key, find slot, populate cache.
+                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
                             if (obj.cls != nullptr) {
                                 buildFieldSlots(rt, classes, *obj.cls);
                                 const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                                auto nameIt = slotMap.find(fieldName);
+                                auto nameIt = slotMap.find(fieldKey);
                                 if (nameIt != slotMap.end()) {
                                     const uint16_t slot = nameIt->second;
                                     rt.fieldIndexCache[fidxKey] = slot;
@@ -2122,7 +2404,7 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0b5 = statNow();
                 if (id.has_value()) {
                     HeapObject& obj = rt.heap[*id];
-                    const uint64_t fidxKey = callCacheKey(obj.cls, cpIdx);
+                    const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
                     auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                     if (fidxIt != rt.fieldIndexCache.end()) {
                         // Hot path: integer-keyed SRAM lookup → direct vector index.
@@ -2130,12 +2412,12 @@ std::optional<Value> resumeCurrentMethod(
                         if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
                         obj.fields[slot] = value;
                     } else {
-                        // Cold path: resolve field name, find slot, populate cache.
-                        const std::string& fieldName = resolveFieldName(rt, cls, cpIdx);
+                        // Cold path: resolve name|descriptor key, find slot, populate cache.
+                        const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
                         if (obj.cls != nullptr) {
                             buildFieldSlots(rt, classes, *obj.cls);
                             const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                            auto nameIt = slotMap.find(fieldName);
+                            auto nameIt = slotMap.find(fieldKey);
                             if (nameIt != slotMap.end()) {
                                 const uint16_t slot = nameIt->second;
                                 rt.fieldIndexCache[fidxKey] = slot;
@@ -2189,6 +2471,12 @@ std::optional<Value> resumeCurrentMethod(
                             : nullptr;
                         rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeHandler};
                     }
+                }
+
+                if (targetClass != nullptr) {
+                    ensureClassInitialized(classes, targetClass->thisClass, rt, depth);
+                } else if (haveRef) {
+                    ensureClassInitialized(classes, ref.className, rt, depth);
                 }
 
                 rt.callArgsBuf.resize(argSlots);
@@ -2342,8 +2630,9 @@ std::optional<Value> resumeCurrentMethod(
                             lookupClassFromCache = true;
                         }
                     } else if (!haveRef) {
-                        lookupClassName = cit->second.runtimeClass;
-                        lookupClassFromCache = true;
+                        ref = resolveMethodRef(cls, cpIdx);
+                        haveRef = true;
+                        lookupClassName = ref.className;
                     }
                 } else if (!haveRef) {
                     // invokespecial on cache hit: use stored ref.className
@@ -2510,6 +2799,7 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow();
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
+                ensureClassInitialized(classes, className, rt, depth);
                 frame.push(allocateObject(rt, classes, label, allocPc, className));
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
@@ -2522,8 +2812,20 @@ std::optional<Value> resumeCurrentMethod(
                 uint8_t atype = codeU1(code, pc + 1);
                 Value countValue = frame.pop();
                 std::optional<int> count = parseIntValue(countValue);
-                if ((atype == 4 || atype == 5 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
+                if ((atype == 4 || atype == 5 || atype == 6 || atype == 8 || atype == 9 || atype == 10) && count.has_value() && *count >= 0) {
+                    // 4=bool 5=char 6=float 8=byte 9=short 10=int — all fit in CompactArrayHeap (int32_t/element)
                     frame.push(allocatePrimitiveArray(rt, label, allocPc, static_cast<size_t>(*count)));
+                } else if ((atype == 7 || atype == 11) && count.has_value() && *count >= 0) {
+                    // 7=double 11=long — store as Value::ofLong in the object array heap
+                    Value arr = allocateArray(rt, label, allocPc, static_cast<size_t>(*count));
+                    std::optional<uint32_t> arrId = arrayId(arr);
+                    if (arrId.has_value()) {
+                        auto it = rt.arrays.find(*arrId);
+                        if (it != rt.arrays.end()) {
+                            for (Value& v : it->second) v = Value::ofLong(0);
+                        }
+                    }
+                    frame.push(arr);
                 } else {
                     frame.push(Value::named("<array>"));
                 }
@@ -2610,8 +2912,31 @@ std::optional<Value> resumeCurrentMethod(
                 return finish(std::nullopt);
             }
 
+            case 0xc1: {  // instanceof
+                std::string targetName = resolveClassRef(cls, codeU2(code, pc + 1));
+                Value object = frame.pop();
+                bool matches = false;
+                std::optional<uint32_t> id = objectId(object);
+                if (id.has_value()) {
+                    auto objIt = rt.heap.find(*id);
+                    if (objIt != rt.heap.end())
+                        matches = isAssignableTo(classes, objIt->second.className, targetName);
+                }
+                frame.push(Value::ofInt(matches ? 1 : 0));
+                pc += 3;
+                break;
+            }
+            case 0xc2:
+            case 0xc3: {  // monitorenter / monitorexit — single-threaded; pop ref and ignore
+                (void)frame.pop();
+                ++pc;
+                break;
+            }
+
             case 0xac:
             case 0xad:
+            case 0xae:  // freturn
+            case 0xaf:  // dreturn
             case 0xb0: {
                 const uint32_t t0m=statNow(); Value v=frame.pop(); runtimeFrame.pc=pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); return finish(v);
             }
@@ -2657,6 +2982,32 @@ std::optional<Value> executeMethod(
 
     // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
     std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
+    // DBG: trace c.E() entry to diagnose blank title screen
+    // if (cls.thisClass == "c" && method.name == "E") {
+    //     if (!args.empty()) {
+    //         std::optional<uint32_t> id = objectId(args[0]);
+    //         auto heapIt = id.has_value() ? rt.heap.find(*id) : rt.heap.end();
+    //         if (heapIt != rt.heap.end()) {
+    //             auto slotCacheIt = rt.fieldSlotCache.find(heapIt->second.cls);
+    //             if (slotCacheIt != rt.fieldSlotCache.end()) {
+    //                 auto nameIt = slotCacheIt->second.find("c|B");
+    //                 if (nameIt != slotCacheIt->second.end()) {
+    //                     uint16_t slot = nameIt->second;
+    //                     int cval = slot < (int)heapIt->second.fields.size() ? heapIt->second.fields[slot].i32 : -999;
+    //                     // printf("[DBG-E] this.c=%d fields=%zu cls=%s\n", cval, heapIt->second.fields.size(), heapIt->second.cls ? heapIt->second.cls->thisClass.c_str() : "null");
+    //                 } else {
+    //                     // printf("[DBG-E] slot c|B not found in cls=%s\n", heapIt->second.cls ? heapIt->second.cls->thisClass.c_str() : "null");
+    //                 }
+    //             } else {
+    //                 // printf("[DBG-E] no slot cache for obj.cls\n");
+    //             }
+    //         } else {
+    //             // printf("[DBG-E] receiver not in heap\n");
+    //         }
+    //     } else {
+    //         // printf("[DBG-E] no args\n");
+    //     }
+    // }
     RuntimeFrame runtimeFrame{
         std::move(label), &cls, &method, 0,
         Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
@@ -2687,6 +3038,7 @@ void resetRuntimeTrace(Runtime& rt) {
     rt.graphicsWidth = 0;
     rt.graphicsHeight = 0;
     rt.graphicsColorRgb = 0x000000;
+    rt.mainFbCanvas.reset();
 }
 
 class ScopedResourceReadTrace final {
@@ -2740,7 +3092,23 @@ ExecutionTrace startSession(MidletSession& session) {
     const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
     if (startOwner != nullptr && startApp != nullptr) {
         std::vector<Value> startArgs = {session.midletRef()};
+        rt.stepLimitYieldEnabled = true;
         (void)executeMethod(classes, *startOwner, *startApp, startArgs, rt, 0);
+        // If the step limit fired, callStack still has frames — resume until done.
+        // Cap at 10 budgets (~1M steps) so a truly-infinite startApp doesn't hang forever.
+        for (int budget = 0; !rt.callStack.empty() && !rt.pendingException.has_value() && budget < 10; ++budget) {
+            rt.yieldRequested = false;
+            rt.steps = 0;
+            while (!rt.callStack.empty()) {
+                std::optional<Value> result = resumeCurrentMethod(classes, rt, 0);
+                if (rt.yieldRequested || rt.pendingException.has_value()) break;
+                if (result.has_value() && !rt.callStack.empty())
+                    rt.callStack.back().frame.push(*result);
+            }
+        }
+        rt.stepLimitYieldEnabled = false;
+        rt.yieldRequested = false;
+        rt.callStack.clear();
         if (rt.pendingException.has_value()) {
             recordUncaughtException(rt, "<midlet-start>");
             clearPendingException(rt);
@@ -2755,6 +3123,7 @@ ExecutionTrace startSession(MidletSession& session) {
 }
 
 void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
+    // std::cout << "dispatchCanvasKeyEvent: " << (event.type == HostKeyEventType::Press ? "Press" : "Release") << " code=" << event.keyCode << std::endl;
     Runtime& rt = session.runtime();
 
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
@@ -2795,6 +3164,26 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         recordUncaughtException(rt, "<input>");
         clearPendingException(rt);
     }
+    // std::cout << "dispatchCanvasKeyEvent: executed " << displayableIt->second.className << "::" << methodName << std::endl;
+    // {
+    //     // Debug: print key-gating fields from the displayable object
+    //     HeapObject& dbgObj = displayableIt->second;
+    //     if (dbgObj.cls != nullptr) {
+    //         buildFieldSlots(rt, classes, *dbgObj.cls);
+    //         auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
+    //         auto printField = [&](const char* name) {
+    //             auto it = slotMap.find(name);
+    //             if (it != slotMap.end() && it->second < dbgObj.fields.size()) {
+    //                 std::cout << "  field " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
+    //             } else {
+    //                 std::cout << "  field " << name << "=<missing>\n";
+    //             }
+    //         };
+    //         printField("ap");
+    //         printField("I");
+    //         printField("au");
+    //     }
+    // }
     rt.repaintRequested = true;
 }
 
@@ -2808,6 +3197,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     rt.graphicsFramebuffer = pixels;
     rt.graphicsWidth = width;
     rt.graphicsHeight = height;
+    rt.mainFbCanvas.emplace(width, height, pixels);
     auto finishProfile = [&]() -> ExecutionTrace {
         if (profileFrame && rt.host != nullptr) {
             rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
@@ -2966,6 +3356,51 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.trace.frameProfile.tasksUs = nowUs() - tasksStartUs;
     }
 
+    // {
+        // std::optional<uint32_t> dbgId = objectId(rt.currentDisplayable);
+        // if (dbgId.has_value()) {
+        //     auto dbgIt = rt.heap.find(*dbgId);
+        //     if (dbgIt != rt.heap.end()) {
+        //         HeapObject& dbgObj = dbgIt->second;
+        //         if (dbgObj.cls != nullptr) {
+        //             buildFieldSlots(rt, session.classes(), *dbgObj.cls);
+        //             auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
+        //             auto dumpField = [&](const char* name) {
+        //                 auto it = slotMap.find(name);
+        //                 if (it != slotMap.end() && it->second < dbgObj.fields.size() && dbgObj.fields[it->second].isInitialized()) {
+        //                     std::cout << "  post-task " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
+        //                 }
+        //             };
+        //             auto dumpStatic = [&](const char* key) {
+        //                 auto it = rt.staticFields.find(key);
+        //                 if (it != rt.staticFields.end()) {
+        //                     std::cout << "  static " << key << "=" << it->second.asText() << "\n";
+        //                 }
+        //             };
+        //             auto dumpArrayLen = [&](const char* name) {
+        //                 auto it = slotMap.find(name);
+        //                 if (it == slotMap.end() || it->second >= dbgObj.fields.size()) return;
+        //                 const Value& v = dbgObj.fields[it->second];
+        //                 std::optional<uint32_t> arrId = arrayId(v);
+        //                 if (!arrId.has_value()) { std::cout << "  post-task " << name << "=null\n"; return; }
+        //                 auto primIt = rt.primitiveArrays.find(*arrId);
+        //                 if (primIt != rt.primitiveArrays.end()) { std::cout << "  post-task " << name << ".len=" << primIt->second.size() << "\n"; return; }
+        //                 auto arrIt = rt.arrays.find(*arrId);
+        //                 if (arrIt != rt.arrays.end()) { std::cout << "  post-task " << name << ".len=" << arrIt->second.size() << "\n"; }
+        //             };
+        //             // dumpStatic("MainCanvas.aq|I");
+        //             // dumpStatic("MainCanvas.ar|I");
+        //             // dumpStatic("MainCanvas.aE|I");
+        //             // dumpStatic("MainCanvas.aF|I");
+        //             // dumpField("ap");
+        //             // dumpField("as");
+        //             // dumpField("at");
+        //             // dumpArrayLen("h"); // tile data byte[] - null means aY() failed
+        //         }
+        //     }
+        // }
+    // }
+
     const uint32_t displayLookupStartUs = profileFrame ? nowUs() : 0;
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
     if (!displayableId.has_value()) {
@@ -3004,15 +3439,28 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.trace.frameProfile.paintLookupUs = nowUs() - paintLookupStartUs;
         rt.trace.frameProfile.repaintRequested = rt.repaintRequested;
     }
+    // If any task is alive (sleeping/waiting for input), the game is live and
+    // the display must keep updating even though no explicit repaint() was called.
+    // This matches MIDP spec: the display drives paint() independently of the app thread.
     if (!rt.repaintRequested) {
-        captureSuspendedForTrace();
-        return finishProfile();
+        bool hasLiveTask = false;
+        for (const ThreadTask& task : session.tasks()) {
+            if (!task.finished) { hasLiveTask = true; break; }
+        }
+        if (!hasLiveTask) {
+            captureSuspendedForTrace();
+            return finishProfile();
+        }
     }
 
     const uint32_t paintStartUs = profileFrame ? nowUs() : 0;
     if (paintOwner != nullptr && paint != nullptr) {
         if (profileFrame) {
             rt.trace.frameProfile.paintCalled = true;
+        }
+        // J2ME spec: Graphics object starts each paint() with translate=(0,0) and full clip.
+        if (rt.mainFbCanvas.has_value()) {
+            rt.mainFbCanvas.emplace(rt.graphicsWidth, rt.graphicsHeight, rt.graphicsFramebuffer);
         }
         std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
         (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);

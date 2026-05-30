@@ -25,4 +25,16 @@ public final class Graphics {
     public native void drawString(String str, int x, int y, int anchor);
 
     public native void drawImage(Image img, int x, int y, int anchor);
+
+    public native void drawRegion(Image src, int xSrc, int ySrc, int width, int height, int transform, int xDest, int yDest, int anchor);
+
+    public native void translate(int x, int y);
+
+    public native int getColor();
+
+    public native void drawRect(int x, int y, int width, int height);
+
+    public native void setFont(Font font);
+
+    public native Font getFont();
 }

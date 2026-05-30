@@ -2,6 +2,7 @@
 
 #include "helpers.hpp"
 #include "../jvm_host.hpp"
+#include "../j2me_port/BitmapFont5x7.hpp"
 
 namespace jvmpoc::native_methods {
 

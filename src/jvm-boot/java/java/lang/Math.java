@@ -18,4 +18,12 @@ public class Math {
         return a > b ? a : b;
     }
 
+    public static int abs(int a) {
+        return a < 0 ? -a : a;
+    }
+
+    public static long abs(long a) {
+        return a < 0 ? -a : a;
+    }
+
 }

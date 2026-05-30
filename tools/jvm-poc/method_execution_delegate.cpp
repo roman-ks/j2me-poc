@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <string>
+// #include <iostream>
 
 namespace jvmpoc {
 namespace {
@@ -24,7 +25,11 @@ std::optional<Value> delegateMethodExecution(
     std::vector<Value>& args,
     const std::function<std::optional<Value>()>& invoke) {
     if (!shouldTimeMethod(cls, method)) {
-        return invoke();
+        // std::cout << "delegating method execution: " << methodLabel(cls, method) << std::endl;
+        auto result = invoke();
+        // std::cout << "method execution completed: " << methodLabel(cls, method)
+                //   << " result=" << (result.has_value() ? result->asText() : "<none>") << std::endl;
+        return result;
     }
 
     // Capture args BEFORE invoke() — the lambda will move from args into the frame.

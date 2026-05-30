@@ -22,11 +22,19 @@ public:
     void fillRect(int x, int y, int w, int h);
     void drawRect(int x, int y, int w, int h);
     void drawImage(const Image& image, int x, int y, int anchor = 0);
+    void drawRegion(const Image& image, int xSrc, int ySrc, int w, int h, int transform, int xDest, int yDest, int anchor);
+    void translate(int x, int y);
     void drawString(const char* text, int x, int y, int anchor = 0);
     void drawString(const std::string& text, int x, int y, int anchor = 0) { drawString(text.c_str(), x, y, anchor); }
 
     int width() const { return m_width; }
     int height() const { return m_height; }
+    int translateX() const { return m_translateX; }
+    int translateY() const { return m_translateY; }
+    int clipX() const { return m_clipX; }
+    int clipY() const { return m_clipY; }
+    int clipW() const { return m_clipW; }
+    int clipH() const { return m_clipH; }
 
     const uint16_t* framebuffer() const;
     uint16_t* framebuffer();
@@ -35,6 +43,8 @@ private:
     bool isInsideClip(int x, int y) const;
     int m_width;
     int m_height;
+    int m_translateX = 0;
+    int m_translateY = 0;
     int m_clipX = 0;
     int m_clipY = 0;
     int m_clipW = 0;
@@ -79,6 +89,7 @@ public:
 
     static Image createImage(const std::string& path);
     static Image createImage(int width, int height);
+    static Image createImage(const std::vector<uint8_t>& encoded);
     static void setDecoder(Decoder decoder);
 
     Canvas getGraphics();

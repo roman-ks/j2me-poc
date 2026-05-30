@@ -19,6 +19,19 @@ public class RecordStore {
         return new RecordStore(recordStoreName);
     }
 
+    // MIDP 2.0 4-arg form: authmode + writable are ignored — we always treat
+    // stores as private + writable.
+    public static RecordStore openRecordStore(String recordStoreName,
+                                              boolean createIfNecessary,
+                                              int authmode,
+                                              boolean writable) throws RecordStoreException {
+        return openRecordStore(recordStoreName, createIfNecessary);
+    }
+
+    public static RecordStore openRecordStore(String recordStoreName, String vendorName, String suiteName) throws RecordStoreException {
+        return openRecordStore(recordStoreName, true);
+    }
+
     public static void deleteRecordStore(String recordStoreName) throws RecordStoreException {
         if (recordStoreName == null) {
             throw new NullPointerException();
@@ -65,6 +78,27 @@ public class RecordStore {
             throw new RecordStoreException();
         }
         return data;
+    }
+
+    public int getRecord(int recordId, byte[] buffer, int offset) throws RecordStoreException {
+        checkOpen();
+        int size = getRecordSize0(recordId);
+        if (size < 0) {
+            throw new RecordStoreException();
+        }
+        if (!getRecord0(recordId, buffer, offset, size)) {
+            throw new RecordStoreException();
+        }
+        return size;
+    }
+
+    public int getRecordSize(int recordId) throws RecordStoreException {
+        checkOpen();
+        int size = getRecordSize0(recordId);
+        if (size < 0) {
+            throw new RecordStoreException();
+        }
+        return size;
     }
 
     private void checkOpen() throws RecordStoreException {

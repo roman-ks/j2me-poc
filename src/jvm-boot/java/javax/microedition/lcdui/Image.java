@@ -8,6 +8,8 @@ public class Image {
 
     public static native Image createImage(int width, int height);
 
+    public static native Image createImage(byte[] imageData, int imageOffset, int imageLength);
+
     public native int getWidth();
 
     public native int getHeight();

@@ -228,7 +228,7 @@ void printStalledState(const jvmpoc::ExecutionTrace& trace, int repeatedFrames) 
         std::cout << "  field writes:\n";
         for (const jvmpoc::FieldWrite& write : trace.fieldWrites) {
             std::cout << "    " << write.methodLabel << " pc=" << write.pc
-                      << " " << write.fieldName << "=" << write.value.text << "\n";
+                      << " " << write.fieldName << "=" << write.value.asText() << "\n";
         }
     }
     if (!trace.imageLoads.empty()) {
@@ -403,6 +403,8 @@ int main(int argc, char** argv) {
 
             const jvmpoc::ExecutionTrace& renderTrace = app.render();
             std::string stateKey = trackedStateKey(renderTrace);
+            printMeaningfulUnknownCalls(renderTrace);
+
             if (!stateKey.empty()) {
                 if (stateKey != lastStateKey) {
                     printStateTransition(renderTrace);
@@ -431,7 +433,10 @@ int main(int argc, char** argv) {
             } else {
                 blankFrames = 0;
             }
-            SDL_Delay(16);
+            // Step-limit yields happen mid-logic and only need 1ms; full
+            // frame-boundary yields (serviceRepaints, Thread.sleep) use 16ms
+            // to honour the game's 60fps timing.
+            SDL_Delay(renderTrace.stepLimitHit ? 1 : 16);
         }
     } catch (const std::exception& e) {
         std::cerr << "jvm-poc-sdl-demo: " << e.what() << "\n";

@@ -59,9 +59,10 @@ struct NativeCallContext {
     // disp_fn   = nowUs()@handleGraphics_call - tProfTEntry  (className checks in dispatch.cpp)
     uint32_t tProfT0 = 0;
     uint32_t tProfTEntry = 0;
-    // Cached main-framebuffer Canvas — built once per executeMethod call,
-    // reused by graphicsCanvas() for all ID=0 graphics targets.
-    std::optional<port::Canvas> mainFbCanvas = std::nullopt;
+    // Pointer to the shared main-framebuffer Canvas, which lives in Runtime so that
+    // translate/clip state persists across executeMethod() call depths (e.g. when
+    // paint() calls a Java sub-method that also invokes Graphics native methods).
+    port::Canvas* mainFbCanvas = nullptr;
     // Flat array of lightweight clip-state entries for image-backed Graphics objects.
     // graphicsCanvas() reconstructs a Canvas into scratchCanvas on each call.
     // Linear scan dominates unordered_map for the 1–2 entries games use, with
