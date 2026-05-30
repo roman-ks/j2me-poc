@@ -415,9 +415,9 @@ void Canvas::drawRegion(const Image& image, int xSrc, int ySrc, int w, int h,
                 case 2: sx = w - 1 - dx; sy = dy;         break; // MIRROR = flip horizontal
                 case 3: sx = w - 1 - dx; sy = h - 1 - dy; break; // ROT180
                 case 4: sx = dy;         sy = dx;         break; // MIRROR_ROT270
-                case 5: sx = h - 1 - dy; sy = dx;         break; // ROT90
-                case 6: sx = dy;         sy = w - 1 - dx; break; // ROT270
-                case 7: sx = h - 1 - dy; sy = w - 1 - dx; break; // MIRROR_ROT90
+                case 5: sx = dy;         sy = h - 1 - dx; break; // ROT90
+                case 6: sx = w - 1 - dy; sy = dx;         break; // ROT270
+                case 7: sx = w - 1 - dy; sy = h - 1 - dx; break; // MIRROR_ROT90
                 default: sx = dx;        sy = dy;         break;
             }
 

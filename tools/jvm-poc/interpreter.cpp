@@ -1300,6 +1300,8 @@ void ensureClassInitialized(
     if (!rt.initializedClasses.insert(className).second) return;
     const ClassFile* cls = findClass(classes, className);
     if (cls == nullptr) return;
+    if (!cls->superClass.empty())
+        ensureClassInitialized(classes, cls->superClass, rt, depth + 1);
     const MethodInfo* clinit = findDeclaredMethod(*cls, "<clinit>", "()V");
     if (clinit == nullptr) return;
     std::vector<Value> noArgs;
@@ -1789,7 +1791,9 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow(); (void)frame.pop(); ++pc; if(t0m) rt.host->miscStats.record(nowUs()-t0m); break;
             }
             case 0x58: {
-                (void)frame.pop(); (void)frame.pop(); ++pc; break;  // pop2
+                Value top = frame.pop();
+                if (top.tag != Value::Tag::kLong) (void)frame.pop();
+                ++pc; break;  // pop2
             }
 
             case 0x84: {
@@ -3062,7 +3066,23 @@ ExecutionTrace startSession(MidletSession& session) {
     const MethodInfo* startApp = findMethodInHierarchy(classes, *midletClass, "startApp", "()V", &startOwner);
     if (startOwner != nullptr && startApp != nullptr) {
         std::vector<Value> startArgs = {session.midletRef()};
+        rt.stepLimitYieldEnabled = true;
         (void)executeMethod(classes, *startOwner, *startApp, startArgs, rt, 0);
+        // If the step limit fired, callStack still has frames — resume until done.
+        // Cap at 10 budgets (~1M steps) so a truly-infinite startApp doesn't hang forever.
+        for (int budget = 0; !rt.callStack.empty() && !rt.pendingException.has_value() && budget < 10; ++budget) {
+            rt.yieldRequested = false;
+            rt.steps = 0;
+            while (!rt.callStack.empty()) {
+                std::optional<Value> result = resumeCurrentMethod(classes, rt, 0);
+                if (rt.yieldRequested || rt.pendingException.has_value()) break;
+                if (result.has_value() && !rt.callStack.empty())
+                    rt.callStack.back().frame.push(*result);
+            }
+        }
+        rt.stepLimitYieldEnabled = false;
+        rt.yieldRequested = false;
+        rt.callStack.clear();
         if (rt.pendingException.has_value()) {
             recordUncaughtException(rt, "<midlet-start>");
             clearPendingException(rt);
@@ -3310,50 +3330,50 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         rt.trace.frameProfile.tasksUs = nowUs() - tasksStartUs;
     }
 
-    {
-        std::optional<uint32_t> dbgId = objectId(rt.currentDisplayable);
-        if (dbgId.has_value()) {
-            auto dbgIt = rt.heap.find(*dbgId);
-            if (dbgIt != rt.heap.end()) {
-                HeapObject& dbgObj = dbgIt->second;
-                if (dbgObj.cls != nullptr) {
-                    buildFieldSlots(rt, session.classes(), *dbgObj.cls);
-                    auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
-                    auto dumpField = [&](const char* name) {
-                        auto it = slotMap.find(name);
-                        if (it != slotMap.end() && it->second < dbgObj.fields.size() && dbgObj.fields[it->second].isInitialized()) {
-                            std::cout << "  post-task " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
-                        }
-                    };
-                    auto dumpStatic = [&](const char* key) {
-                        auto it = rt.staticFields.find(key);
-                        if (it != rt.staticFields.end()) {
-                            std::cout << "  static " << key << "=" << it->second.asText() << "\n";
-                        }
-                    };
-                    auto dumpArrayLen = [&](const char* name) {
-                        auto it = slotMap.find(name);
-                        if (it == slotMap.end() || it->second >= dbgObj.fields.size()) return;
-                        const Value& v = dbgObj.fields[it->second];
-                        std::optional<uint32_t> arrId = arrayId(v);
-                        if (!arrId.has_value()) { std::cout << "  post-task " << name << "=null\n"; return; }
-                        auto primIt = rt.primitiveArrays.find(*arrId);
-                        if (primIt != rt.primitiveArrays.end()) { std::cout << "  post-task " << name << ".len=" << primIt->second.size() << "\n"; return; }
-                        auto arrIt = rt.arrays.find(*arrId);
-                        if (arrIt != rt.arrays.end()) { std::cout << "  post-task " << name << ".len=" << arrIt->second.size() << "\n"; }
-                    };
-                    // dumpStatic("MainCanvas.aq|I");
-                    // dumpStatic("MainCanvas.ar|I");
-                    // dumpStatic("MainCanvas.aE|I");
-                    // dumpStatic("MainCanvas.aF|I");
-                    // dumpField("ap");
-                    // dumpField("as");
-                    // dumpField("at");
-                    // dumpArrayLen("h"); // tile data byte[] - null means aY() failed
-                }
-            }
-        }
-    }
+    // {
+        // std::optional<uint32_t> dbgId = objectId(rt.currentDisplayable);
+        // if (dbgId.has_value()) {
+        //     auto dbgIt = rt.heap.find(*dbgId);
+        //     if (dbgIt != rt.heap.end()) {
+        //         HeapObject& dbgObj = dbgIt->second;
+        //         if (dbgObj.cls != nullptr) {
+        //             buildFieldSlots(rt, session.classes(), *dbgObj.cls);
+        //             auto& slotMap = rt.fieldSlotCache[dbgObj.cls];
+        //             auto dumpField = [&](const char* name) {
+        //                 auto it = slotMap.find(name);
+        //                 if (it != slotMap.end() && it->second < dbgObj.fields.size() && dbgObj.fields[it->second].isInitialized()) {
+        //                     std::cout << "  post-task " << name << "=" << dbgObj.fields[it->second].asText() << "\n";
+        //                 }
+        //             };
+        //             auto dumpStatic = [&](const char* key) {
+        //                 auto it = rt.staticFields.find(key);
+        //                 if (it != rt.staticFields.end()) {
+        //                     std::cout << "  static " << key << "=" << it->second.asText() << "\n";
+        //                 }
+        //             };
+        //             auto dumpArrayLen = [&](const char* name) {
+        //                 auto it = slotMap.find(name);
+        //                 if (it == slotMap.end() || it->second >= dbgObj.fields.size()) return;
+        //                 const Value& v = dbgObj.fields[it->second];
+        //                 std::optional<uint32_t> arrId = arrayId(v);
+        //                 if (!arrId.has_value()) { std::cout << "  post-task " << name << "=null\n"; return; }
+        //                 auto primIt = rt.primitiveArrays.find(*arrId);
+        //                 if (primIt != rt.primitiveArrays.end()) { std::cout << "  post-task " << name << ".len=" << primIt->second.size() << "\n"; return; }
+        //                 auto arrIt = rt.arrays.find(*arrId);
+        //                 if (arrIt != rt.arrays.end()) { std::cout << "  post-task " << name << ".len=" << arrIt->second.size() << "\n"; }
+        //             };
+        //             // dumpStatic("MainCanvas.aq|I");
+        //             // dumpStatic("MainCanvas.ar|I");
+        //             // dumpStatic("MainCanvas.aE|I");
+        //             // dumpStatic("MainCanvas.aF|I");
+        //             // dumpField("ap");
+        //             // dumpField("as");
+        //             // dumpField("at");
+        //             // dumpArrayLen("h"); // tile data byte[] - null means aY() failed
+        //         }
+        //     }
+        // }
+    // }
 
     const uint32_t displayLookupStartUs = profileFrame ? nowUs() : 0;
     std::optional<uint32_t> displayableId = objectId(rt.currentDisplayable);
