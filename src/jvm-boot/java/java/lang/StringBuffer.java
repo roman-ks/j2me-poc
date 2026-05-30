@@ -89,6 +89,34 @@ public final class StringBuffer {
         return this;
     }
 
+    public char charAt(int index) {
+        return value[index];
+    }
+
+    public void setCharAt(int index, char ch) {
+        valueAt(index, ch);
+    }
+
+    public StringBuffer delete(int start, int end) {
+        if (end > count) {
+            end = count;
+        }
+        if (start < 0) {
+            start = 0;
+        }
+        if (start >= end) {
+            return this;
+        }
+        int removed = end - start;
+        int i = start;
+        while (i < count - removed) {
+            valueAt(i, value[i + removed]);
+            i++;
+        }
+        count -= removed;
+        return this;
+    }
+
     public String toString() {
         return new String(value, 0, count);
     }

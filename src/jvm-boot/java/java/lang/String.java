@@ -218,6 +218,22 @@ public final class String {
         return -1;
     }
 
+    public String trim() {
+        int len = length();
+        int start = 0;
+        while (start < len && charAt(start) <= ' ') {
+            start++;
+        }
+        int end = len;
+        while (end > start && charAt(end - 1) <= ' ') {
+            end--;
+        }
+        if (start == 0 && end == len) {
+            return this;
+        }
+        return substring(start, end);
+    }
+
     public native String toLowerCase();
 
     public native String toUpperCase();
