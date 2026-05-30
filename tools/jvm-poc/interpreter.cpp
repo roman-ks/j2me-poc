@@ -1359,6 +1359,21 @@ void initializeFrameArgs(RuntimeFrame& runtimeFrame, std::vector<Value>& args) {
     }
 }
 
+bool isAssignableTo(const std::vector<ClassFile>& classes,
+                    const std::string& objClass,
+                    const std::string& targetClass,
+                    int depth = 0) {
+    if (objClass == targetClass) return true;
+    if (depth > 16) return false;
+    const ClassFile* cls = findClass(classes, objClass);
+    if (cls == nullptr) return false;
+    if (!cls->superClass.empty() && isAssignableTo(classes, cls->superClass, targetClass, depth + 1))
+        return true;
+    for (const std::string& iface : cls->interfaces)
+        if (isAssignableTo(classes, iface, targetClass, depth + 1)) return true;
+    return false;
+}
+
 std::optional<Value> resumeCurrentMethod(
     const std::vector<ClassFile>& classes,
     Runtime& rt,
@@ -2176,8 +2191,11 @@ std::optional<Value> resumeCurrentMethod(
                 int16_t offset = codeS2(code, pc + 1);
                 uint32_t target = branchTarget(pc, offset);
                 Value rhs = frame.pop(), lhs = frame.pop();
-                auto l = parseIntValue(lhs), r = parseIntValue(rhs);
-                bool equal = l.has_value() && r.has_value() && *l == *r;
+                bool equal = false;
+                if (lhs.tag == rhs.tag) {
+                    if (lhs.tag == Value::Tag::kInt)  equal = (lhs.i32 == rhs.i32);
+                    else if (lhs.tag == Value::Tag::kStr) equal = (*lhs.str == *rhs.str);
+                }
                 pc = ((op == 0xa5) ? equal : !equal) ? target : pc + 3;
                 break;
             }
@@ -2894,9 +2912,17 @@ std::optional<Value> resumeCurrentMethod(
                 return finish(std::nullopt);
             }
 
-            case 0xc1: {  // instanceof — no type info; conservatively push 0
-                (void)frame.pop();
-                frame.push(Value::ofInt(0));
+            case 0xc1: {  // instanceof
+                std::string targetName = resolveClassRef(cls, codeU2(code, pc + 1));
+                Value object = frame.pop();
+                bool matches = false;
+                std::optional<uint32_t> id = objectId(object);
+                if (id.has_value()) {
+                    auto objIt = rt.heap.find(*id);
+                    if (objIt != rt.heap.end())
+                        matches = isAssignableTo(classes, objIt->second.className, targetName);
+                }
+                frame.push(Value::ofInt(matches ? 1 : 0));
                 pc += 3;
                 break;
             }
