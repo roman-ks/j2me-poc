@@ -168,6 +168,12 @@ NativeMethodFn resolveNativeStaticMethod(
     if (className == "javax/microedition/lcdui/Image") {
         return native_methods::resolveImageMethod(name, descriptor);
     }
+    if (className == "javax/microedition/lcdui/Font") {
+        return native_methods::resolveFontMethod(name, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Display") {
+        return native_methods::resolveDisplayMethod(name, descriptor);
+    }
     return nullptr;
 }
 
@@ -184,6 +190,15 @@ NativeMethodFn resolveNativeInstanceMethod(
     }
     if (className == "javax/microedition/lcdui/Image") {
         return native_methods::resolveImageMethod(name, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Font") {
+        return native_methods::resolveFontMethod(name, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Display") {
+        return native_methods::resolveDisplayMethod(name, descriptor);
+    }
+    if (className == "java/lang/String") {
+        return native_methods::resolveStringMethod(name, descriptor);
     }
     return nullptr;
 }

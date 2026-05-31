@@ -84,5 +84,8 @@ NativeCallResult handleThread(
 NativeMethodFn resolveGraphicsMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveCanvasMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveImageMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveFontMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveDisplayMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveStringMethod(const std::string& name, const std::string& descriptor);
 
 } // namespace jvmpoc::native_methods

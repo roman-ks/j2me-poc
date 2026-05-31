@@ -36,67 +36,131 @@ int stringWidthChars(int charCount) {
     return charCount * port::kBitmapFontAdvance - 1;
 }
 
+// ---------------------------------------------------------------------------
+// Leaf method handlers. Several methods share bodies (getFont overloads,
+// charsWidth/substringWidth, the boolean style queries) — listed once here
+// and referenced from multiple table rows below.
+// ---------------------------------------------------------------------------
+
+// Used by getDefaultFont()L and both getFont overloads — all return the same
+// singleton font handle.
+NativeCallResult nm_font_default(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(defaultFontRef());
+}
+
+NativeCallResult nm_font_getHeight(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(port::kBitmapFontHeight));
+}
+
+NativeCallResult nm_font_getBaselinePosition(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(port::kBitmapFontBaseline));
+}
+
+NativeCallResult nm_font_getFace(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(0));   // FACE_SYSTEM
+}
+
+NativeCallResult nm_font_getStyle(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(0));   // STYLE_PLAIN
+}
+
+NativeCallResult nm_font_getSize(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(8));   // SIZE_SMALL — matches our 5x7 glyph
+}
+
+NativeCallResult nm_font_isPlain(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(1));
+}
+
+// Used by isBold, isItalic, isUnderlined — all three always return false in
+// our single-font runtime.
+NativeCallResult nm_font_isFalse(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(0));
+}
+
+NativeCallResult nm_font_charWidth(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& /*args*/) {
+    // Use advance so Σ charWidth(c) ≈ stringWidth (off-by-one matches the
+    // trailing-gap convention Canvas.drawString uses).
+    return handledValue(Value::ofInt(port::kBitmapFontAdvance));
+}
+
+// Used by both charsWidth([CII)I and substringWidth(Ljava/lang/String;II)I —
+// both take length at arg slot 3.
+NativeCallResult nm_font_widthFromArg3(
+    NativeCallContext& /*ctx*/, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const int length = intArg(args, 3);
+    return handledValue(Value::ofInt(stringWidthChars(length)));
+}
+
+NativeCallResult nm_font_stringWidth(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string text = stringArg(ctx, args, 1);
+    return handledValue(Value::ofInt(stringWidthChars(utf8CharCount(text))));
+}
+
+// ---------------------------------------------------------------------------
+// Method table. Font has both static factories (getDefaultFont, getFont) and
+// instance queries; one table serves both — Java bytecode invokestatic /
+// invokevirtual binds correctly per method.
+// ---------------------------------------------------------------------------
+const NativeMethodEntry kFontMethods[] = {
+    // Static factories — all share the same body (return the one physical font)
+    {"getDefaultFont",     "()Ljavax/microedition/lcdui/Font;",      &nm_font_default},
+    {"getFont",            "(III)Ljavax/microedition/lcdui/Font;",   &nm_font_default},
+    {"getFont",            "(I)Ljavax/microedition/lcdui/Font;",     &nm_font_default},
+    // Instance metrics
+    {"getHeight",          "()I",                                    &nm_font_getHeight},
+    {"getBaselinePosition","()I",                                    &nm_font_getBaselinePosition},
+    {"getFace",            "()I",                                    &nm_font_getFace},
+    {"getStyle",           "()I",                                    &nm_font_getStyle},
+    {"getSize",            "()I",                                    &nm_font_getSize},
+    {"isPlain",            "()Z",                                    &nm_font_isPlain},
+    {"isBold",             "()Z",                                    &nm_font_isFalse},
+    {"isItalic",           "()Z",                                    &nm_font_isFalse},
+    {"isUnderlined",       "()Z",                                    &nm_font_isFalse},
+    {"charWidth",          "(C)I",                                   &nm_font_charWidth},
+    {"charsWidth",         "([CII)I",                                &nm_font_widthFromArg3},
+    {"substringWidth",     "(Ljava/lang/String;II)I",                &nm_font_widthFromArg3},
+    {"stringWidth",        "(Ljava/lang/String;)I",                  &nm_font_stringWidth},
+};
+
 } // namespace
+
+NativeMethodFn resolveFontMethod(const std::string& name, const std::string& descriptor) {
+    for (const auto& e : kFontMethods) {
+        if (name == e.name && descriptor == e.descriptor) return e.fn;
+    }
+    return nullptr;
+}
 
 NativeCallResult handleFont(
     NativeCallContext& ctx,
-    const std::string& /*methodLabel*/,
-    uint32_t /*pc*/,
+    const std::string& methodLabel,
+    uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-
-    if (ref.name == "getDefaultFont" && ref.descriptor == "()Ljavax/microedition/lcdui/Font;") {
-        return handledValue(defaultFontRef());
-    }
-    if (ref.name == "getFont" &&
-        (ref.descriptor == "(III)Ljavax/microedition/lcdui/Font;" ||
-         ref.descriptor == "(I)Ljavax/microedition/lcdui/Font;")) {
-        return handledValue(defaultFontRef());
-    }
-
-    if (ref.name == "getHeight" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(port::kBitmapFontHeight));
-    }
-    if (ref.name == "getBaselinePosition" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(port::kBitmapFontBaseline));
-    }
-
-    if (ref.name == "getFace" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(0));   // FACE_SYSTEM
-    }
-    if (ref.name == "getStyle" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(0));   // STYLE_PLAIN
-    }
-    if (ref.name == "getSize" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(8));   // SIZE_SMALL — matches our 5x7 glyph
-    }
-
-    if (ref.name == "isPlain" && ref.descriptor == "()Z") {
-        return handledValue(Value::ofInt(1));
-    }
-    if ((ref.name == "isBold" || ref.name == "isItalic" || ref.name == "isUnderlined") &&
-        ref.descriptor == "()Z") {
-        return handledValue(Value::ofInt(0));
-    }
-
-    if (ref.name == "charWidth" && ref.descriptor == "(C)I") {
-        // Use advance so Σ charWidth(c) ≈ stringWidth (off-by-one matches the
-        // trailing-gap convention Canvas.drawString uses).
-        return handledValue(Value::ofInt(port::kBitmapFontAdvance));
-    }
-    if (ref.name == "charsWidth" && ref.descriptor == "([CII)I") {
-        const int length = intArg(args, 3);
-        return handledValue(Value::ofInt(stringWidthChars(length)));
-    }
-    if (ref.name == "stringWidth" && ref.descriptor == "(Ljava/lang/String;)I") {
-        const std::string text = stringArg(ctx, args, 1);
-        return handledValue(Value::ofInt(stringWidthChars(utf8CharCount(text))));
-    }
-    if (ref.name == "substringWidth" && ref.descriptor == "(Ljava/lang/String;II)I") {
-        const int length = intArg(args, 3);
-        return handledValue(Value::ofInt(stringWidthChars(length)));
-    }
-
+    NativeMethodFn fn = resolveFontMethod(ref.name, ref.descriptor);
+    if (fn != nullptr) return fn(ctx, methodLabel, pc, ref, args);
     return NativeCallResult{};
 }
 
