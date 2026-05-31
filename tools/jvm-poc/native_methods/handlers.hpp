@@ -77,15 +77,20 @@ NativeCallResult handleThread(
     const MethodRef& ref,
     const std::vector<Value>& args);
 
-// Per-class leaf-method resolvers. Each native_methods/<class>.cpp that has
-// been converted to the method-table pattern exposes one of these. Returns
-// the leaf NativeMethodFn for an exact (name, descriptor) match, or nullptr
-// when no static binding exists for that method.
+// Per-class leaf-method resolvers. Each native_methods/<class>.cpp exposes one
+// of these. Returns the leaf NativeMethodFn for an exact (name, descriptor)
+// match, or nullptr when no static binding exists for that method.
 NativeMethodFn resolveGraphicsMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveCanvasMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveImageMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveFontMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveDisplayMethod(const std::string& name, const std::string& descriptor);
 NativeMethodFn resolveStringMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveMidletMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveThreadMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveSystemMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveRecordStoreMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveNativeRuntimeMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolvePlayerMethod(const std::string& name, const std::string& descriptor);
 
 } // namespace jvmpoc::native_methods

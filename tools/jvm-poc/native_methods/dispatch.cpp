@@ -63,17 +63,6 @@ NativeCallResult handleNativeStaticCall(
     return NativeCallResult{};
 }
 
-NativeHandler resolveNativeStaticHandler(const std::string& className) {
-    if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
-    if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
-    if (className == "javax/microedition/lcdui/Font")    return &native_methods::handleFont;
-    if (className == "java/lang/System")                 return &native_methods::handleSystem;
-    if (className == "java/lang/Thread")                 return &native_methods::handleThread;
-    if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
-    if (className == "dev/roman/hello/NativeRuntime")    return &native_methods::handleNativeRuntime;
-    return nullptr;
-}
-
 NativeCallResult handleNativeInstanceCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
@@ -135,45 +124,27 @@ NativeCallResult handleNativeInstanceCall(
         return native_methods::handleRecordStore(ctx, methodLabel, pc, ref, args);
     }
 
-    // if (ref.className == "javax/microedition/media/Player") {
-    //     return native_methods::handlePlayer(ctx, methodLabel, pc, ref, args);
-    // }
+    if (ref.className == "javax/microedition/media/Player") {
+        return native_methods::handlePlayer(ctx, methodLabel, pc, ref, args);
+    }
 
     return NativeCallResult{};
 }
 
-NativeHandler resolveNativeInstanceHandler(const std::string& className) {
-    if (className == "javax/microedition/midlet/MIDlet")    return &native_methods::handleMidlet;
-    if (className == "javax/microedition/lcdui/Display")    return &native_methods::handleDisplay;
-    if (className == "javax/microedition/lcdui/Graphics")   return &native_methods::handleGraphics;
-    if (className == "javax/microedition/lcdui/Image")      return &native_methods::handleImage;
-    if (className == "javax/microedition/lcdui/Font")       return &native_methods::handleFont;
-    if (className == "javax/microedition/lcdui/Canvas")                    return &native_methods::handleCanvas;
-    if (className == "javax/microedition/lcdui/game/GameCanvas")           return &native_methods::handleCanvas;
-    if (className == "java/lang/String")                    return &native_methods::handleString;
-    if (className == "java/lang/Thread")                    return &native_methods::handleThread;
-    if (className == "javax/microedition/rms/RecordStore")  return &native_methods::handleRecordStore;
-    if (className == "javax/microedition/media/Player")     return &native_methods::handlePlayer;
-    return nullptr;
-}
-
-// Leaf-method resolvers. Cascade per class to the per-file resolver. Each
-// converted class file (graphics.cpp, etc.) registers its resolveXxxMethod
-// here. Classes not yet converted simply fall through to nullptr, in which
-// case the interpreter uses the per-class handler (or the slow cascade).
+// Leaf-method resolvers. All native classes are wired here. The interpreter
+// caches the returned function pointer per call site, so the hot path is a
+// single indirect call with zero string compares after warm-up.
 NativeMethodFn resolveNativeStaticMethod(
     const std::string& className,
     const std::string& name,
     const std::string& descriptor) {
-    if (className == "javax/microedition/lcdui/Image") {
-        return native_methods::resolveImageMethod(name, descriptor);
-    }
-    if (className == "javax/microedition/lcdui/Font") {
-        return native_methods::resolveFontMethod(name, descriptor);
-    }
-    if (className == "javax/microedition/lcdui/Display") {
-        return native_methods::resolveDisplayMethod(name, descriptor);
-    }
+    if (className == "javax/microedition/lcdui/Image")       return native_methods::resolveImageMethod(name, descriptor);
+    if (className == "javax/microedition/lcdui/Font")        return native_methods::resolveFontMethod(name, descriptor);
+    if (className == "javax/microedition/lcdui/Display")     return native_methods::resolveDisplayMethod(name, descriptor);
+    if (className == "java/lang/System")                     return native_methods::resolveSystemMethod(name, descriptor);
+    if (className == "java/lang/Thread")                     return native_methods::resolveThreadMethod(name, descriptor);
+    if (className == "javax/microedition/rms/RecordStore")   return native_methods::resolveRecordStoreMethod(name, descriptor);
+    if (className == "dev/roman/hello/NativeRuntime")        return native_methods::resolveNativeRuntimeMethod(name, descriptor);
     return nullptr;
 }
 
@@ -181,25 +152,18 @@ NativeMethodFn resolveNativeInstanceMethod(
     const std::string& className,
     const std::string& name,
     const std::string& descriptor) {
-    if (className == "javax/microedition/lcdui/Graphics") {
-        return native_methods::resolveGraphicsMethod(name, descriptor);
-    }
+    if (className == "javax/microedition/lcdui/Graphics")    return native_methods::resolveGraphicsMethod(name, descriptor);
     if (className == "javax/microedition/lcdui/Canvas" ||
-        className == "javax/microedition/lcdui/game/GameCanvas") {
-        return native_methods::resolveCanvasMethod(name, descriptor);
-    }
-    if (className == "javax/microedition/lcdui/Image") {
-        return native_methods::resolveImageMethod(name, descriptor);
-    }
-    if (className == "javax/microedition/lcdui/Font") {
-        return native_methods::resolveFontMethod(name, descriptor);
-    }
-    if (className == "javax/microedition/lcdui/Display") {
-        return native_methods::resolveDisplayMethod(name, descriptor);
-    }
-    if (className == "java/lang/String") {
-        return native_methods::resolveStringMethod(name, descriptor);
-    }
+        className == "javax/microedition/lcdui/game/GameCanvas")
+                                                             return native_methods::resolveCanvasMethod(name, descriptor);
+    if (className == "javax/microedition/lcdui/Image")       return native_methods::resolveImageMethod(name, descriptor);
+    if (className == "javax/microedition/lcdui/Font")        return native_methods::resolveFontMethod(name, descriptor);
+    if (className == "javax/microedition/lcdui/Display")     return native_methods::resolveDisplayMethod(name, descriptor);
+    if (className == "java/lang/String")                     return native_methods::resolveStringMethod(name, descriptor);
+    if (className == "javax/microedition/midlet/MIDlet")     return native_methods::resolveMidletMethod(name, descriptor);
+    if (className == "java/lang/Thread")                     return native_methods::resolveThreadMethod(name, descriptor);
+    if (className == "javax/microedition/rms/RecordStore")   return native_methods::resolveRecordStoreMethod(name, descriptor);
+    if (className == "javax/microedition/media/Player")      return native_methods::resolvePlayerMethod(name, descriptor);
     return nullptr;
 }
 

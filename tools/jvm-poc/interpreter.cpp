@@ -213,17 +213,9 @@ struct ResolvedCallEntry {
     const ClassFile* runtimeClassPtr = nullptr; // hot compare: pointer equality instead of string compare
     const ClassFile* targetClass;
     const MethodInfo* method;
-    // Option N(v1): resolved class-level native handler. Bypasses the
-    // string-compare cascade in handleNativeStaticCall/handleNativeInstanceCall.
-    // Set only for native calls whose className maps cleanly to a single
-    // handler; nullptr otherwise (slow cascade still runs).
-    NativeHandler nativeHandler = nullptr;
-    // Option N(v2): resolved leaf-method handler. One indirection deeper than
-    // nativeHandler — skips both the className cascade AND the per-class
-    // name/descriptor scan. Set when resolveNativeInstanceMethod /
-    // resolveNativeStaticMethod produces a hit for this exact (class, name,
-    // descriptor) triple. When non-null, the interpreter prefers it over
-    // nativeHandler on the hot path.
+    // Resolved leaf-method handler. Caches the exact NativeMethodFn for a
+    // (className, name, descriptor) triple. After warm-up: one indirect call,
+    // zero string compares. nullptr means use the slow cascade.
     NativeMethodFn nativeLeaf = nullptr;
 };
 
@@ -2536,7 +2528,6 @@ std::optional<Value> resumeCurrentMethod(
                 MethodRef ref;
                 bool haveRef = false;
 
-                NativeHandler cachedNativeHandler = nullptr;
                 NativeMethodFn cachedNativeLeaf = nullptr;
                 auto cit = rt.callCache.find(ckey);
                 if (cit != rt.callCache.end()) {
@@ -2544,7 +2535,6 @@ std::optional<Value> resumeCurrentMethod(
                     targetClass = cit->second.targetClass;
                     targetMethod = cit->second.method;
                     isNativeCall = cit->second.isNative;
-                    cachedNativeHandler = cit->second.nativeHandler;
                     cachedNativeLeaf = cit->second.nativeLeaf;
                 } else {
                     ref = resolveMethodRef(cls, cpIdx);
@@ -2557,11 +2547,8 @@ std::optional<Value> resumeCurrentMethod(
                         if (isNativeCall) {
                             cachedNativeLeaf = resolveNativeStaticMethod(
                                 targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
-                            cachedNativeHandler = cachedNativeLeaf != nullptr
-                                ? nullptr
-                                : resolveNativeStaticHandler(targetClass->thisClass);
                         }
-                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeHandler, cachedNativeLeaf};
+                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeLeaf};
                     }
                 }
 
@@ -2592,9 +2579,7 @@ std::optional<Value> resumeCurrentMethod(
                         try {
                             nativeResult = cachedNativeLeaf != nullptr
                                 ? cachedNativeLeaf(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf)
-                                : (cachedNativeHandler != nullptr
-                                    ? cachedNativeHandler(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf)
-                                    : handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf));
+                                : handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
@@ -2750,13 +2735,11 @@ std::optional<Value> resumeCurrentMethod(
                     lookupClassFromCache ||
                     (lookupClassPtr && cit->second.runtimeClassPtr == lookupClassPtr) ||
                     (!lookupClassPtr && cit->second.runtimeClass == lookupClassName));
-                NativeHandler cachedNativeHandler = nullptr;
                 NativeMethodFn cachedNativeLeaf = nullptr;
                 if (cacheClassMatch) {
                     targetClass = cit->second.targetClass;
                     targetMethod = cit->second.method;
                     isNativeCall = cit->second.isNative;
-                    cachedNativeHandler = cit->second.nativeHandler;
                     cachedNativeLeaf = cit->second.nativeLeaf;
                 } else {
                     const std::string& lookupName = haveRef ? ref.name : cit->second.method->name;
@@ -2768,13 +2751,10 @@ std::optional<Value> resumeCurrentMethod(
                         if (isNativeCall) {
                             cachedNativeLeaf = resolveNativeInstanceMethod(
                                 targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
-                            cachedNativeHandler = cachedNativeLeaf != nullptr
-                                ? nullptr
-                                : resolveNativeInstanceHandler(targetClass->thisClass);
                         }
                         rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall,
                                               lookupClassName, findClass(classes, lookupClassName),
-                                              targetClass, targetMethod, cachedNativeHandler, cachedNativeLeaf};
+                                              targetClass, targetMethod, cachedNativeLeaf};
                     }
                 }
 
@@ -2803,9 +2783,7 @@ std::optional<Value> resumeCurrentMethod(
                         try {
                             nativeResult = cachedNativeLeaf != nullptr
                                 ? cachedNativeLeaf(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf)
-                                : (cachedNativeHandler != nullptr
-                                    ? cachedNativeHandler(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf)
-                                    : handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf));
+                                : handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);

@@ -112,31 +112,11 @@ NativeCallResult handleNativeInstanceCall(
     const MethodRef& ref,
     const std::vector<Value>& args);
 
-// Option N: class-level handler caching. Resolved once at callCache write time
-// and stored on ResolvedCallEntry, then called directly to bypass the string
-// compares inside handleNativeStaticCall / handleNativeInstanceCall.
-using NativeHandler = NativeCallResult(*)(
-    NativeCallContext&, const std::string&, uint32_t,
-    const MethodRef&, const std::vector<Value>&);
-
-// Returns the leaf handler for invokestatic on `className`, or nullptr when
-// the slow cascade is needed (no className-only mapping exists).
-NativeHandler resolveNativeStaticHandler(const std::string& className);
-
-// Returns the leaf handler for invokevirtual on `className`. Receiver-type
-// OR fallbacks (handleImage on imageId(receiver), handleString on string
-// receivers, handleCanvas on Canvas subclasses) are NOT cached — the slow
-// path covers them. Cache hits only fire when className matches one of the
-// known native classes exactly.
-NativeHandler resolveNativeInstanceHandler(const std::string& className);
-
-// Leaf (per-method) handler caching. One step deeper than NativeHandler: the
-// interpreter caches the exact function for a (className, name, descriptor)
-// triple, eliminating the per-class handler's name+descriptor scan on the hot
-// path. Same call signature as NativeHandler — interchangeable at the call
-// site. Tables live in each native_methods/<class>.cpp file and are the single
-// source of truth for that class's method dispatch (used by both the leaf
-// cache and the class-level slow path).
+// Leaf (per-method) handler caching. The interpreter caches the exact function
+// for a (className, name, descriptor) triple at the call site, eliminating all
+// string compares on the hot path after warm-up. Tables live in each
+// native_methods/<class>.cpp and are the single source of truth for that
+// class's method dispatch (used by both the leaf cache and the slow cascade).
 using NativeMethodFn = NativeCallResult(*)(
     NativeCallContext&, const std::string&, uint32_t,
     const MethodRef&, const std::vector<Value>&);

@@ -300,112 +300,146 @@ bool copyRecordToJavaArray(
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Static methods (args[0] is the String name parameter, no receiver)
+// ---------------------------------------------------------------------------
+
+NativeCallResult nm_rms_open0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = args.empty() ? "" : runtimeString(ctx, args[0]);
+    const bool create = args.size() > 1 && parseIntValue(args[1]).value_or(0) != 0;
+    RmsStore store;
+    bool exists = false;
+    if (loadStore(name, store, &exists)) {
+        return handledValue(Value::ofInt(1));
+    }
+    if (!create) {
+        return handledValue(Value::ofInt(0));
+    }
+    store.records.clear();
+    return handledValue(Value::ofInt(saveStore(name, store) ? 1 : 0));
+}
+
+NativeCallResult nm_rms_delete0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = args.empty() ? "" : runtimeString(ctx, args[0]);
+    return handledValue(Value::ofInt(deleteStoreFile(name) ? 1 : 0));
+}
+
+// ---------------------------------------------------------------------------
+// Instance methods (args[0] is the RecordStore receiver)
+// ---------------------------------------------------------------------------
+
+NativeCallResult nm_rms_addRecord0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = storeNameFromReceiver(ctx, args);
+    if (name.empty()) return handledValue(Value::ofInt(0));
+    if (args.size() < 4) return handledValue(Value::ofInt(0));
+    RmsStore store;
+    (void)loadStore(name, store);
+    std::vector<uint8_t> record;
+    if (!bytesFromJavaArray(ctx, args[1], intArg(args, 2), intArg(args, 3), record)) {
+        return handledValue(Value::ofInt(0));
+    }
+    store.records.push_back(std::move(record));
+    if (!saveStore(name, store)) {
+        return handledValue(Value::ofInt(0));
+    }
+    return handledValue(Value::ofInt(static_cast<int32_t>(store.records.size())));
+}
+
+NativeCallResult nm_rms_getNumRecords0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = storeNameFromReceiver(ctx, args);
+    if (name.empty()) return handledValue(Value::ofInt(0));
+    RmsStore store;
+    if (!loadStore(name, store)) return handledValue(Value::ofInt(0));
+    return handledValue(Value::ofInt(static_cast<int32_t>(store.records.size())));
+}
+
+NativeCallResult nm_rms_setRecord0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = storeNameFromReceiver(ctx, args);
+    if (name.empty()) return handledValue(Value::ofInt(0));
+    if (args.size() < 5) return handledValue(Value::ofInt(0));
+    RmsStore store;
+    if (!loadStore(name, store)) return handledValue(Value::ofInt(0));
+    const int recordId = intArg(args, 1);
+    if (recordId <= 0 || recordId > static_cast<int>(store.records.size())) {
+        return handledValue(Value::ofInt(0));
+    }
+    std::vector<uint8_t> record;
+    if (!bytesFromJavaArray(ctx, args[2], intArg(args, 3), intArg(args, 4), record)) {
+        return handledValue(Value::ofInt(0));
+    }
+    store.records[static_cast<size_t>(recordId - 1)] = std::move(record);
+    return handledValue(Value::ofInt(saveStore(name, store) ? 1 : 0));
+}
+
+NativeCallResult nm_rms_getRecordSize0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = storeNameFromReceiver(ctx, args);
+    if (name.empty()) return handledValue(Value::ofInt(-1));
+    RmsStore store;
+    if (!loadStore(name, store)) return handledValue(Value::ofInt(-1));
+    const int recordId = intArg(args, 1);
+    if (recordId <= 0 || recordId > static_cast<int>(store.records.size())) {
+        return handledValue(Value::ofInt(-1));
+    }
+    return handledValue(Value::ofInt(static_cast<int32_t>(store.records[static_cast<size_t>(recordId - 1)].size())));
+}
+
+NativeCallResult nm_rms_getRecord0(
+    NativeCallContext& ctx, const std::string& /*methodLabel*/, uint32_t /*pc*/,
+    const MethodRef& /*ref*/, const std::vector<Value>& args) {
+    const std::string name = storeNameFromReceiver(ctx, args);
+    if (name.empty()) return handledValue(Value::ofInt(0));
+    if (args.size() < 5) return handledValue(Value::ofInt(0));
+    RmsStore store;
+    if (!loadStore(name, store)) return handledValue(Value::ofInt(0));
+    const int recordId = intArg(args, 1);
+    if (recordId <= 0 || recordId > static_cast<int>(store.records.size())) {
+        return handledValue(Value::ofInt(0));
+    }
+    const std::vector<uint8_t>& record = store.records[static_cast<size_t>(recordId - 1)];
+    return handledValue(Value::ofInt(copyRecordToJavaArray(ctx, record, args[2], intArg(args, 3), intArg(args, 4)) ? 1 : 0));
+}
+
+const NativeMethodEntry kRecordStoreMethods[] = {
+    // Static
+    {"open0",          "(Ljava/lang/String;Z)Z",  &nm_rms_open0},
+    {"delete0",        "(Ljava/lang/String;)Z",   &nm_rms_delete0},
+    // Instance
+    {"addRecord0",     "([BII)I",                 &nm_rms_addRecord0},
+    {"getNumRecords0", "()I",                      &nm_rms_getNumRecords0},
+    {"setRecord0",     "(I[BII)Z",                &nm_rms_setRecord0},
+    {"getRecordSize0", "(I)I",                     &nm_rms_getRecordSize0},
+    {"getRecord0",     "(I[BII)Z",                &nm_rms_getRecord0},
+};
+
 } // namespace
+
+NativeMethodFn resolveRecordStoreMethod(const std::string& name, const std::string& descriptor) {
+    for (const auto& e : kRecordStoreMethods) {
+        if (name == e.name && descriptor == e.descriptor) return e.fn;
+    }
+    return nullptr;
+}
 
 NativeCallResult handleRecordStore(
     NativeCallContext& ctx,
-    const std::string& /*methodLabel*/,
-    uint32_t /*pc*/,
+    const std::string& methodLabel,
+    uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args) {
-    if (ref.name == "open0" && ref.descriptor == "(Ljava/lang/String;Z)Z") {
-        const std::string name = args.empty() ? "" : runtimeString(ctx, args[0]);
-        const bool create = args.size() > 1 && parseIntValue(args[1]).value_or(0) != 0;
-        RmsStore store;
-        bool exists = false;
-        if (loadStore(name, store, &exists)) {
-            return handledValue(Value::ofInt(1));
-        }
-        if (!create) {
-            return handledValue(Value::ofInt(0));
-        }
-        store.records.clear();
-        return handledValue(Value::ofInt(saveStore(name, store) ? 1 : 0));
-    }
-
-    if (ref.name == "delete0" && ref.descriptor == "(Ljava/lang/String;)Z") {
-        const std::string name = args.empty() ? "" : runtimeString(ctx, args[0]);
-        return handledValue(Value::ofInt(deleteStoreFile(name) ? 1 : 0));
-    }
-
-    const std::string name = storeNameFromReceiver(ctx, args);
-    if (name.empty()) {
-        return NativeCallResult{};
-    }
-
-    if (ref.name == "addRecord0" && ref.descriptor == "([BII)I") {
-        if (args.size() < 4) {
-            return handledValue(Value::ofInt(0));
-        }
-        RmsStore store;
-        (void)loadStore(name, store);
-        std::vector<uint8_t> record;
-        if (!bytesFromJavaArray(ctx, args[1], intArg(args, 2), intArg(args, 3), record)) {
-            return handledValue(Value::ofInt(0));
-        }
-        store.records.push_back(std::move(record));
-        if (!saveStore(name, store)) {
-            return handledValue(Value::ofInt(0));
-        }
-        return handledValue(Value::ofInt(static_cast<int32_t>(store.records.size())));
-    }
-
-    if (ref.name == "getNumRecords0" && ref.descriptor == "()I") {
-        RmsStore store;
-        if (!loadStore(name, store)) {
-            return handledValue(Value::ofInt(0));
-        }
-        return handledValue(Value::ofInt(static_cast<int32_t>(store.records.size())));
-    }
-
-    if (ref.name == "setRecord0" && ref.descriptor == "(I[BII)Z") {
-        if (args.size() < 5) {
-            return handledValue(Value::ofInt(0));
-        }
-        RmsStore store;
-        if (!loadStore(name, store)) {
-            return handledValue(Value::ofInt(0));
-        }
-        const int recordId = intArg(args, 1);
-        if (recordId <= 0 || recordId > static_cast<int>(store.records.size())) {
-            return handledValue(Value::ofInt(0));
-        }
-        std::vector<uint8_t> record;
-        if (!bytesFromJavaArray(ctx, args[2], intArg(args, 3), intArg(args, 4), record)) {
-            return handledValue(Value::ofInt(0));
-        }
-        store.records[static_cast<size_t>(recordId - 1)] = std::move(record);
-        return handledValue(Value::ofInt(saveStore(name, store) ? 1 : 0));
-    }
-
-    if (ref.name == "getRecordSize0" && ref.descriptor == "(I)I") {
-        RmsStore store;
-        if (!loadStore(name, store)) {
-            return handledValue(Value::ofInt(-1));
-        }
-        const int recordId = intArg(args, 1);
-        if (recordId <= 0 || recordId > static_cast<int>(store.records.size())) {
-            return handledValue(Value::ofInt(-1));
-        }
-        return handledValue(Value::ofInt(static_cast<int32_t>(store.records[static_cast<size_t>(recordId - 1)].size())));
-    }
-
-    if (ref.name == "getRecord0" && ref.descriptor == "(I[BII)Z") {
-        if (args.size() < 5) {
-            return handledValue(Value::ofInt(0));
-        }
-        RmsStore store;
-        if (!loadStore(name, store)) {
-            return handledValue(Value::ofInt(0));
-        }
-        const int recordId = intArg(args, 1);
-        if (recordId <= 0 || recordId > static_cast<int>(store.records.size())) {
-            return handledValue(Value::ofInt(0));
-        }
-        const std::vector<uint8_t>& record = store.records[static_cast<size_t>(recordId - 1)];
-        return handledValue(Value::ofInt(copyRecordToJavaArray(ctx, record, args[2], intArg(args, 3), intArg(args, 4)) ? 1 : 0));
-    }
-
+    NativeMethodFn fn = resolveRecordStoreMethod(ref.name, ref.descriptor);
+    if (fn != nullptr) return fn(ctx, methodLabel, pc, ref, args);
     return NativeCallResult{};
 }
 
