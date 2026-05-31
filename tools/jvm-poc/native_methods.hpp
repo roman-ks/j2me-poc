@@ -105,18 +105,34 @@ struct NativeCallResult {
           exception(std::move(exception)) {}
 };
 
+// Slow-cascade view over the resolved call target. Three references into
+// stable strings (ClassFile::thisClass, MethodInfo::name/descriptor) — zero
+// copies on construction. Replaces `const MethodRef&` in handler signatures
+// to eliminate per-slow-call MethodRef construction. Implicitly constructible
+// from MethodRef so existing call sites still work.
+struct MethodRefView {
+    const std::string& className;
+    const std::string& name;
+    const std::string& descriptor;
+
+    MethodRefView(const std::string& c, const std::string& n, const std::string& d)
+        : className(c), name(n), descriptor(d) {}
+    MethodRefView(const MethodRef& r)
+        : className(r.className), name(r.name), descriptor(r.descriptor) {}
+};
+
 NativeCallResult handleNativeStaticCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args);
 
 NativeCallResult handleNativeInstanceCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args);
 
 // Per-call-site leaf resolution. Returns the leaf for exactly one method,

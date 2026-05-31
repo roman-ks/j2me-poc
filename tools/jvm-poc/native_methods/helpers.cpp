@@ -57,7 +57,7 @@ std::optional<uint32_t> imageGraphicsId(const Value& value) {
     return std::nullopt;
 }
 
-std::string methodName(const MethodRef& ref) {
+std::string methodName(const MethodRefView& ref) {
     return ref.className + "." + ref.name + ref.descriptor;
 }
 

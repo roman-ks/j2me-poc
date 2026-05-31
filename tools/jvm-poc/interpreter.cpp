@@ -194,7 +194,7 @@ bool returnsValue(const std::string& descriptor) {
     return close != std::string::npos && close + 1 < descriptor.size() && descriptor[close + 1] != 'V';
 }
 
-std::string callName(const MethodRef& ref) {
+std::string callName(const MethodRefView& ref) {
     return ref.className + "." + ref.name + ref.descriptor;
 }
 
@@ -794,7 +794,7 @@ std::optional<Value> recordUnknownCall(
     Runtime& rt,
     const std::string& label,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args) {
     std::optional<Value> result;
     if (returnsValue(ref.descriptor)) {
@@ -999,7 +999,7 @@ void captureTaskMethodProfiles(Runtime& rt) {
     }
 }
 
-void recordTaskNativeProfile(Runtime& rt, const MethodRef& ref, uint32_t elapsedUs) {
+void recordTaskNativeProfile(Runtime& rt, const MethodRefView& ref, uint32_t elapsedUs) {
     const std::string label = callName(ref);
     for (NamedProfileAccumulator& entry : rt.taskNativeProfiles) {
         if (entry.label == label) {
@@ -2552,7 +2552,7 @@ std::optional<Value> resumeCurrentMethod(
                         nativeResult = leaf(sharedNativeCtx, callPc, rt.callArgsBuf);
                     } catch (const YieldThreadSleep&) {
                         if (tTaskNative != 0 && fastTargetClass && fastTargetMethod) {
-                            MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                            MethodRefView profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
                             recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
                         }
                         pc += 3;
@@ -2562,7 +2562,7 @@ std::optional<Value> resumeCurrentMethod(
                         throw;
                     }
                     if (tTaskNative != 0 && fastTargetClass && fastTargetMethod) {
-                        MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                        MethodRefView profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
                         recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
                     }
 #if JVM_ENABLE_NATIVE_PROFILING
@@ -2592,7 +2592,7 @@ std::optional<Value> resumeCurrentMethod(
                             frame.push(*nativeResult.returnValue);
                         }
                     } else {
-                        MethodRef ref{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                        MethodRefView ref{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
                         std::optional<Value> result = recordUnknownCall(
                             rt, label, callPc, ref, rt.callArgsBuf);
                         if (result.has_value()) {
@@ -2694,7 +2694,7 @@ std::optional<Value> resumeCurrentMethod(
                 if (targetClass != nullptr && targetMethod != nullptr) {
                     if (isNativeCall) {
                         sharedNativeCtx.receiverClassName = {};
-                        MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
+                        MethodRefView nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
                         const uint32_t tN =
 #if JVM_ENABLE_NATIVE_PROFILING
@@ -2860,7 +2860,7 @@ std::optional<Value> resumeCurrentMethod(
                                     nativeResult = leaf(sharedNativeCtx, static_cast<uint32_t>(pc), rt.callArgsBuf);
                                 } catch (const YieldThreadSleep&) {
                                     if (tTaskNative != 0) {
-                                        MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                                        MethodRefView profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
                                         recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
                                     }
                                     pc += invokeLength(op);
@@ -2870,7 +2870,7 @@ std::optional<Value> resumeCurrentMethod(
                                     throw;
                                 }
                                 if (tTaskNative != 0) {
-                                    MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                                    MethodRefView profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
                                     recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
                                 }
 #if JVM_ENABLE_NATIVE_PROFILING
@@ -2900,7 +2900,7 @@ std::optional<Value> resumeCurrentMethod(
                                         frame.push(*nativeResult.returnValue);
                                     }
                                 } else {
-                                    MethodRef nativeRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                                    MethodRefView nativeRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
                                     std::optional<Value> result = recordUnknownCall(
                                         rt, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                                     if (result.has_value()) {
@@ -3038,7 +3038,7 @@ std::optional<Value> resumeCurrentMethod(
                                 sharedNativeCtx.receiverClassName = objectIt->second.className;
                             }
                         }
-                        MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
+                        MethodRefView nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
                         NativeCallResult nativeResult;
                         const uint32_t tN =
 #if JVM_ENABLE_NATIVE_PROFILING

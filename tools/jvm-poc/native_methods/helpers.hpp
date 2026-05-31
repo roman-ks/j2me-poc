@@ -17,7 +17,7 @@ bool isStringObject(const NativeCallContext& ctx, const Value& value);
 std::optional<uint32_t> arrayId(const Value& value);
 std::optional<uint32_t> imageId(const Value& value);
 std::optional<uint32_t> imageGraphicsId(const Value& value);
-std::string methodName(const MethodRef& ref);
+std::string methodName(const MethodRefView& ref);
 NativeCallResult handledVoid();
 NativeCallResult handledValue(Value value);
 int intArg(const std::vector<Value>& args, size_t index, int fallback = 0);

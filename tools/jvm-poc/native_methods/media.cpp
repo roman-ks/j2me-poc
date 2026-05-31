@@ -62,7 +62,7 @@ NativeCallResult handlePlayer(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args) {
     if (NativeLeafFn leaf = lookupPlayerInstanceLeaf(ref.name, ref.descriptor)) {
         ctx.callerLabel = methodLabel;

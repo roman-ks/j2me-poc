@@ -133,7 +133,7 @@ NativeCallResult handleImage(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args) {
     // Delegate static createImage calls to the same leaves used by the
     // per-class call-site fast path (single source of truth). callerLabel
