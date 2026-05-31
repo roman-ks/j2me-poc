@@ -60,6 +60,7 @@ NativeCallResult handleCanvas(
 
     if ((ref.name == "flushGraphics" && ref.descriptor == "()V") ||
         (ref.name == "flushGraphics" && ref.descriptor == "(IIII)V")) {
+        ctx.gameCanvasFlushCommitted = true;
         ctx.requestRepaint();
         return handledVoid();
     }

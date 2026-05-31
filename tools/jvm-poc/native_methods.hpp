@@ -37,6 +37,7 @@ struct NativeCallContext {
     std::function<void(const Value&)> startRunnable;
     std::function<void(uint32_t)> sleepThread;
     std::function<void()> requestRepaint;
+    bool& gameCanvasFlushCommitted;
     std::function<void(const Value&, const Value&)> notifyDisplayChanged;
     std::unordered_map<uint32_t, std::string>& strings;
     std::unordered_map<uint32_t, std::vector<Value>>& arrays;

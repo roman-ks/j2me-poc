@@ -211,6 +211,9 @@ struct ExecutionTrace {
     std::string currentDisplayableClass;
     FrameProfile frameProfile;
     bool stepLimitHit = false;
+    // True when paint() completed this render tick — signals that the
+    // framebuffer is ready to display. False on step-limit mid-render yields.
+    bool framePresented = false;
 };
 
 std::shared_ptr<MidletSession> createMidletSession(

@@ -60,7 +60,9 @@ const ExecutionTrace& JvmMidletApp::render() {
         fb = framebuffer_.data();
     }
     lastTrace_ = renderMidletSession(*session_, fb, width, height);
-    host_.present(fb, width, height);
+    if (lastTrace_.framePresented) {
+        host_.present(fb, width, height);
+    }
     return lastTrace_;
 }
 

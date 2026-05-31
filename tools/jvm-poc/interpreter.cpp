@@ -358,6 +358,10 @@ struct Runtime {
     // Persistent main-framebuffer Canvas. Shared across all executeMethod() depths
     // so translate/clip state set in paint() persists into Java sub-method calls.
     std::optional<port::Canvas> mainFbCanvas;
+    // Set by flushGraphics() to distinguish a committed GameCanvas frame from a
+    // spurious repaint() call (e.g. from a timer thread mid-render). Cleared after
+    // each paint() call in renderSession.
+    bool gameCanvasFlushCommitted = false;
     ExecutionTrace trace;
     std::vector<MethodProfileAccumulator, SramAllocator<MethodProfileAccumulator>> taskMethodProfiles;
     std::vector<NamedProfileAccumulator, SramAllocator<NamedProfileAccumulator>> taskNativeProfiles;
@@ -1491,6 +1495,7 @@ std::optional<Value> resumeCurrentMethod(
             [&]() {
                 rt.repaintRequested = true;
             },
+            rt.gameCanvasFlushCommitted,
             [&](const Value& oldDisplayable, const Value& newDisplayable) {
                 if (oldDisplayable.asText() == newDisplayable.asText()) {
                     return;
@@ -3462,6 +3467,11 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             recordUncaughtException(rt, "<paint>");
             clearPendingException(rt);
         }
+        const bool isGameCanvas = isClassOrSubclassOf(
+            classes, displayableIt->second.className,
+            "javax/microedition/lcdui/game/GameCanvas");
+        rt.trace.framePresented = !isGameCanvas || rt.gameCanvasFlushCommitted;
+        rt.gameCanvasFlushCommitted = false;
     } else {
         MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)});
