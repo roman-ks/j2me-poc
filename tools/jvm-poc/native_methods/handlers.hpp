@@ -75,6 +75,8 @@ NativeCallResult handleRecordStore(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupRecordStoreStaticLeaf(const std::string& name, const std::string& descriptor);
+NativeLeafFn lookupRecordStoreInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleThread(
     NativeCallContext& ctx,
     const std::string& methodLabel,
