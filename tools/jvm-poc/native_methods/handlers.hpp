@@ -16,12 +16,16 @@ NativeCallResult handleDisplay(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupDisplayStaticLeaf(const std::string& name, const std::string& descriptor);
+NativeLeafFn lookupDisplayInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleFont(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupFontStaticLeaf(const std::string& name, const std::string& descriptor);
+NativeLeafFn lookupFontInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleGraphics(
     NativeCallContext& ctx,
     const std::string& methodLabel,
@@ -66,6 +70,7 @@ NativeCallResult handleString(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupStringInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleSystem(
     NativeCallContext& ctx,
     const std::string& methodLabel,

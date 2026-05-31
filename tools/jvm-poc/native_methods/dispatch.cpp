@@ -166,6 +166,12 @@ NativeLeafFn resolveStaticLeaf(const std::string& className,
     if (className == "javax/microedition/lcdui/Image") {
         return native_methods::lookupImageStaticLeaf(methodName, descriptor);
     }
+    if (className == "javax/microedition/lcdui/Display") {
+        return native_methods::lookupDisplayStaticLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Font") {
+        return native_methods::lookupFontStaticLeaf(methodName, descriptor);
+    }
     if (className == "javax/microedition/rms/RecordStore") {
         return native_methods::lookupRecordStoreStaticLeaf(methodName, descriptor);
     }
@@ -186,6 +192,15 @@ NativeLeafFn resolveInstanceLeaf(const std::string& className,
                                  const std::string& descriptor) {
     if (className == "javax/microedition/lcdui/Graphics") {
         return native_methods::lookupGraphicsInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Display") {
+        return native_methods::lookupDisplayInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Font") {
+        return native_methods::lookupFontInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/String") {
+        return native_methods::lookupStringInstanceLeaf(methodName, descriptor);
     }
     if (className == "javax/microedition/rms/RecordStore") {
         return native_methods::lookupRecordStoreInstanceLeaf(methodName, descriptor);
