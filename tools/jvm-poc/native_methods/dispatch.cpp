@@ -202,6 +202,10 @@ NativeLeafFn resolveInstanceLeaf(const std::string& className,
     if (className == "java/lang/String") {
         return native_methods::lookupStringInstanceLeaf(methodName, descriptor);
     }
+    if (className == "javax/microedition/lcdui/Canvas" ||
+        className == "javax/microedition/lcdui/game/GameCanvas") {
+        return native_methods::lookupCanvasInstanceLeaf(methodName, descriptor);
+    }
     if (className == "javax/microedition/rms/RecordStore") {
         return native_methods::lookupRecordStoreInstanceLeaf(methodName, descriptor);
     }

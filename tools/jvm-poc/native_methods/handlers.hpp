@@ -10,6 +10,7 @@ NativeCallResult handleCanvas(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupCanvasInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleDisplay(
     NativeCallContext& ctx,
     const std::string& methodLabel,
