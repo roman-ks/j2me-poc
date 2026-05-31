@@ -2,12 +2,22 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "build jvm-boot-classes",
+            "type": "shell",
+            "command": "mvn compiler:compile@compile-jvm-boot-classes",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "build jvm-poc-sdl-demo",
             "type": "shell",
             "command": "make -C tools/jvm-poc clean && make -C tools/jvm-poc jvm-poc-sdl-demo",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
+            "dependsOn": ["build jvm-boot-classes"],
             "group": {
                 "kind": "build",
                 "isDefault": true
