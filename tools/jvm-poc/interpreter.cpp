@@ -2817,6 +2817,148 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0inv = statNow();
                 const uint16_t cpIdx = codeU2(code, pc + 1);
                 const bool isVirtualOp = (op == 0xb6 || op == 0xb9);
+
+                // Per-class call-site cache (fast path). Populated lazily by
+                // the slow path on first miss; instance-method PIC keys on
+                // receiver.cls. See docs/per-class-call-site-cache.plan.md.
+                CallSiteEntry* siteEntry = nullptr;
+                if (cpIdx < cls.cpToSite.size()) {
+                    const uint16_t siteIdx = cls.cpToSite[cpIdx];
+                    if (siteIdx != 0xFFFF) {
+                        siteEntry = &cls.sites[siteIdx];
+                    }
+                }
+
+                // FAST PATH: site populated, PIC matches receiver (for
+                // virtual/interface; invokespecial skips the PIC check).
+                if (siteEntry != nullptr
+                    && (siteEntry->kind == CallSiteEntry::kNative
+                        || siteEntry->kind == CallSiteEntry::kJava)
+                    && siteEntry->targetClass != nullptr
+                    && siteEntry->targetMethod != nullptr) {
+                    const uint8_t fastArgSlots = siteEntry->argSlots;
+                    const size_t totalSlots = static_cast<size_t>(fastArgSlots) + 1;
+
+                    if (frame.stackSize() >= totalSlots) {
+                        // Peek 'this' without popping so a PIC miss can fall
+                        // through to the slow path with the stack intact.
+                        const Value& thisVal = frame.stackData()[frame.stackSize() - totalSlots];
+                        const ClassFile* receiverCls = nullptr;
+                        if (!thisVal.isNull()) {
+                            std::optional<uint32_t> id = objectId(thisVal);
+                            if (id.has_value()) {
+                                auto objectIt = rt.heap.find(*id);
+                                if (objectIt != rt.heap.end()) {
+                                    receiverCls = objectIt->second.cls;
+                                }
+                            }
+                        }
+
+                        const bool picHit = !isVirtualOp ||
+                            (receiverCls != nullptr && receiverCls == siteEntry->receiverClass);
+
+                        if (!thisVal.isNull() && picHit) {
+                            const ClassFile* fastTargetClass = siteEntry->targetClass;
+                            const MethodInfo* fastTargetMethod = siteEntry->targetMethod;
+
+                            rt.callArgsBuf.resize(totalSlots);
+                            for (size_t i = fastArgSlots; i > 0; --i) {
+                                rt.callArgsBuf[i] = frame.pop();
+                            }
+                            rt.callArgsBuf[0] = frame.pop();
+
+                            if (siteEntry->kind == CallSiteEntry::kNative) {
+                                const NativeLeafFn leaf = siteEntry->nativeFn;
+                                sharedNativeCtx.receiverClassName =
+                                    receiverCls ? receiverCls->thisClass : std::string{};
+                                sharedNativeCtx.callerLabel = label;
+
+                                const uint32_t tN =
+#if JVM_ENABLE_NATIVE_PROFILING
+                                    (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+#else
+                                    0;
+#endif
+                                const uint32_t tTaskNative =
+                                    (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
+                                sharedNativeCtx.tProfT0 = tN;
+                                sharedNativeCtx.tProfTEntry = 0;
+
+                                NativeCallResult nativeResult;
+                                try {
+                                    nativeResult = leaf(sharedNativeCtx, static_cast<uint32_t>(pc), rt.callArgsBuf);
+                                } catch (const YieldThreadSleep&) {
+                                    if (tTaskNative != 0) {
+                                        MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                                        recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
+                                    }
+                                    pc += invokeLength(op);
+                                    runtimeFrame.pc = pc;
+                                    rt.pendingYieldRethrowStartUs =
+                                        (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
+                                    throw;
+                                }
+                                if (tTaskNative != 0) {
+                                    MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                                    recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
+                                }
+#if JVM_ENABLE_NATIVE_PROFILING
+                                if (tN) {
+                                    rt.host->nativeStats[fastTargetClass->thisClass + "." + fastTargetMethod->name].record(nowUs() - tN);
+                                }
+#endif
+                                if (rt.yieldRequested) {
+                                    pc += invokeLength(op);
+                                    runtimeFrame.pc = pc;
+                                    return std::nullopt;
+                                }
+                                if (nativeResult.exception.has_value()) {
+                                    setPendingException(rt, *nativeResult.exception, label, static_cast<uint32_t>(pc));
+                                }
+                                if (rt.pendingException.has_value()) {
+                                    if (catchPendingException(static_cast<uint32_t>(pc))) {
+                                        if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                        break;
+                                    }
+                                    runtimeFrame.pc = pc;
+                                    if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                    return finish(std::nullopt);
+                                }
+                                if (nativeResult.handled) {
+                                    if (nativeResult.returnValue.has_value()) {
+                                        frame.push(*nativeResult.returnValue);
+                                    }
+                                } else {
+                                    MethodRef nativeRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                                    std::optional<Value> result = recordUnknownCall(
+                                        rt, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
+                                    if (result.has_value()) {
+                                        frame.push(*result);
+                                    }
+                                }
+                                pc += invokeLength(op);
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                break;
+                            } else {
+                                // kJava
+                                const size_t invokePc = pc;
+                                runtimeFrame.lastCallPc = invokePc;
+                                runtimeFrame.pc = pc + invokeLength(op);
+                                if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                                if (!pushJavaFrame(rt, classes, *fastTargetClass, *fastTargetMethod, rt.callArgsBuf)) {
+                                    if (catchPendingException(static_cast<uint32_t>(invokePc))) {
+                                        runtimeFrame.lastCallPc = SIZE_MAX;
+                                        break;
+                                    }
+                                    runtimeFrame.pc = invokePc;
+                                    return finish(std::nullopt);
+                                }
+                                return std::nullopt;
+                            }
+                        }
+                    }
+                }
+
                 const uint64_t ckey = callCacheKey(&cls, cpIdx);
 
                 const ClassFile* targetClass = nullptr;
@@ -2910,6 +3052,33 @@ std::optional<Value> resumeCurrentMethod(
                                               lookupClassName, findClass(classes, lookupClassName),
                                               targetClass, targetMethod, cachedNativeHandler};
                     }
+                }
+
+                // Populate per-class call-site entry. For virtual ops, PIC
+                // keys on the receiver's ClassFile* (lookupClassPtr). For
+                // invokespecial (non-virtual), receiverClass stays null and
+                // the fast path skips the check. Overwrites on PIC miss so
+                // the site tracks the most recent receiver class.
+                if (siteEntry != nullptr
+                    && targetClass != nullptr && targetMethod != nullptr) {
+                    if (isNativeCall) {
+                        NativeLeafFn leaf = resolveInstanceLeaf(
+                            targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
+                        if (leaf != nullptr) {
+                            siteEntry->kind = CallSiteEntry::kNative;
+                            siteEntry->nativeFn = leaf;
+                        } else {
+                            siteEntry->kind = CallSiteEntry::kSlowCascade;
+                            siteEntry->nativeFn = nullptr;
+                        }
+                    } else {
+                        siteEntry->kind = CallSiteEntry::kJava;
+                        siteEntry->nativeFn = nullptr;
+                    }
+                    siteEntry->argSlots = static_cast<uint8_t>(argSlots);
+                    siteEntry->targetClass = targetClass;
+                    siteEntry->targetMethod = targetMethod;
+                    siteEntry->receiverClass = isVirtualOp ? lookupClassPtr : nullptr;
                 }
 
                 if (targetClass != nullptr && targetMethod != nullptr) {
