@@ -34,6 +34,10 @@ NativeCallResult handleImage(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+// Per-method leaves for the per-class call-site cache fast path.
+// Returns nullptr if (name, descriptor) does not match any registered Image
+// static method (caller falls back to slow cascade).
+NativeLeafFn lookupImageStaticLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleMidlet(
     NativeCallContext& ctx,
     const std::string& methodLabel,

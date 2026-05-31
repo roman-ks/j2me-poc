@@ -157,13 +157,15 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
     return nullptr;
 }
 
-// Per-call-site leaf resolution. Returns nullptr until per-class leaf tables
-// land (one class per step). Sites where resolveStaticLeaf/resolveInstanceLeaf
-// return nullptr get tagged kSlowCascade by the dispatcher and route through
-// the existing handleNativeXCall string-cascade.
-NativeLeafFn resolveStaticLeaf(const std::string& /*className*/,
-                               const std::string& /*methodName*/,
-                               const std::string& /*descriptor*/) {
+// Per-call-site leaf resolution. Routes to per-class leaf tables; returns
+// nullptr when no leaf is registered (caller tags the site kSlowCascade so
+// the existing handleNativeXCall string-cascade runs instead).
+NativeLeafFn resolveStaticLeaf(const std::string& className,
+                               const std::string& methodName,
+                               const std::string& descriptor) {
+    if (className == "javax/microedition/lcdui/Image") {
+        return native_methods::lookupImageStaticLeaf(methodName, descriptor);
+    }
     return nullptr;
 }
 

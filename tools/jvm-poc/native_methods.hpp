@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -52,6 +53,12 @@ struct NativeCallContext {
     int& graphicsHeight;
     int& graphicsColorRgb;
     std::string receiverClassName;
+    // Caller's frame label (e.g. "dev/roman/hello/Foo.bar()V"), set by the
+    // interpreter before each native call. string_view points at the
+    // interpreter's local — no copy on the hot path. Used by leaves that
+    // emit trace records (replaces the methodLabel parameter dropped from
+    // NativeLeafFn).
+    std::string_view callerLabel = {};
     std::function<void(std::string)> collectGarbage;
     std::function<Value(const std::string&)> internString;
     // Sub-profiling: set tProfT0 = tN just before calling handleNativeInstanceCall,

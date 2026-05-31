@@ -1575,6 +1575,7 @@ std::optional<Value> resumeCurrentMethod(
             rt.graphicsHeight,
             rt.graphicsColorRgb,
             {},
+            {},
             [&](std::string when) {
                 collectGarbage(rt, std::move(when));
             },
@@ -2552,6 +2553,7 @@ std::optional<Value> resumeCurrentMethod(
                         rt.callArgsBuf[i - 1] = frame.pop();
                     }
                     sharedNativeCtx.receiverClassName = {};
+                    sharedNativeCtx.callerLabel = label;
 
                     const uint32_t tN =
 #if JVM_ENABLE_NATIVE_PROFILING
