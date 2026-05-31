@@ -206,20 +206,6 @@ inline uint64_t callCacheKey(const ClassFile* cls, uint16_t cpIndex) {
     return (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(cls)) << 16) | cpIndex;
 }
 
-struct ResolvedCallEntry {
-    uint8_t argSlots;
-    bool isNative;
-    std::string runtimeClass; // static/special: stored ref.className; virtual: last runtime type
-    const ClassFile* runtimeClassPtr = nullptr; // hot compare: pointer equality instead of string compare
-    const ClassFile* targetClass;
-    const MethodInfo* method;
-    // Option N(v1): resolved class-level native handler. Bypasses the
-    // string-compare cascade in handleNativeStaticCall/handleNativeInstanceCall.
-    // Set only for native calls whose className maps cleanly to a single
-    // handler; nullptr otherwise (slow cascade still runs).
-    NativeHandler nativeHandler = nullptr;
-};
-
 struct HeapObject {
     std::string className;
     const ClassFile* cls = nullptr; // cached class pointer for fast virtual dispatch (item K)
@@ -328,9 +314,6 @@ struct Runtime {
     // loop runs (which is the only code that could re-use callArgsBuf recursively).
     // Uses default allocator: on ESP32, allocations <=4KB go to SRAM by default.
     std::vector<Value> callArgsBuf;
-    std::unordered_map<uint64_t, ResolvedCallEntry,
-        std::hash<uint64_t>, std::equal_to<uint64_t>,
-        SramAllocator<std::pair<const uint64_t, ResolvedCallEntry>>> callCache;
     // Cache (cls*, cpIdx) → pointer into cls.cp UTF8 entry for field name.
     // ClassFile objects are stable for the session so the pointer is safe.
     std::unordered_map<uint64_t, const std::string*,
@@ -2652,8 +2635,9 @@ std::optional<Value> resumeCurrentMethod(
                     return std::nullopt;
                 }
 
-                const uint64_t ckey = callCacheKey(&cls, cpIdx);
-
+                // SLOW PATH: use site data if populated; resolve+populate
+                // on first call. Native dispatch goes through handleNativeStaticCall
+                // (which delegates to per-class leaf tables); Java via pushJavaFrame.
                 const ClassFile* targetClass = nullptr;
                 const MethodInfo* targetMethod = nullptr;
                 size_t argSlots = 0;
@@ -2661,14 +2645,15 @@ std::optional<Value> resumeCurrentMethod(
                 MethodRef ref;
                 bool haveRef = false;
 
-                NativeHandler cachedNativeHandler = nullptr;
-                auto cit = rt.callCache.find(ckey);
-                if (cit != rt.callCache.end()) {
-                    argSlots = cit->second.argSlots;
-                    targetClass = cit->second.targetClass;
-                    targetMethod = cit->second.method;
-                    isNativeCall = cit->second.isNative;
-                    cachedNativeHandler = cit->second.nativeHandler;
+                if (siteEntry != nullptr
+                    && siteEntry->kind != CallSiteEntry::kUncached
+                    && siteEntry->targetClass != nullptr
+                    && siteEntry->targetMethod != nullptr) {
+                    targetClass = siteEntry->targetClass;
+                    targetMethod = siteEntry->targetMethod;
+                    argSlots = siteEntry->argSlots;
+                    isNativeCall = (siteEntry->kind == CallSiteEntry::kNative
+                                    || siteEntry->kind == CallSiteEntry::kSlowCascade);
                 } else {
                     ref = resolveMethodRef(cls, cpIdx);
                     haveRef = true;
@@ -2677,34 +2662,22 @@ std::optional<Value> resumeCurrentMethod(
                         classes, ref.className, ref.name, ref.descriptor, &targetClass);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         isNativeCall = hasAccess(targetMethod->access, kAccNative);
-                        cachedNativeHandler = isNativeCall
-                            ? resolveNativeStaticHandler(targetClass->thisClass)
-                            : nullptr;
-                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeHandler};
                     }
-                }
 
-                // Populate per-class call-site entry on first resolve.
-                // Native: try resolveStaticLeaf; non-null → kNative, else
-                // kSlowCascade. Java: store target directly → kJava.
-                if (siteEntry != nullptr
-                    && siteEntry->kind == CallSiteEntry::kUncached
-                    && targetClass != nullptr && targetMethod != nullptr) {
-                    if (isNativeCall) {
-                        NativeLeafFn leaf = resolveStaticLeaf(
-                            targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
-                        if (leaf != nullptr) {
-                            siteEntry->kind = CallSiteEntry::kNative;
+                    if (siteEntry != nullptr && targetClass != nullptr && targetMethod != nullptr) {
+                        if (isNativeCall) {
+                            NativeLeafFn leaf = resolveStaticLeaf(
+                                targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
+                            siteEntry->kind = leaf ? CallSiteEntry::kNative : CallSiteEntry::kSlowCascade;
                             siteEntry->nativeFn = leaf;
                         } else {
-                            siteEntry->kind = CallSiteEntry::kSlowCascade;
+                            siteEntry->kind = CallSiteEntry::kJava;
+                            siteEntry->nativeFn = nullptr;
                         }
-                    } else {
-                        siteEntry->kind = CallSiteEntry::kJava;
+                        siteEntry->argSlots = static_cast<uint8_t>(argSlots);
+                        siteEntry->targetClass = targetClass;
+                        siteEntry->targetMethod = targetMethod;
                     }
-                    siteEntry->argSlots = static_cast<uint8_t>(argSlots);
-                    siteEntry->targetClass = targetClass;
-                    siteEntry->targetMethod = targetMethod;
                 }
 
                 if (targetClass != nullptr) {
@@ -2732,9 +2705,7 @@ std::optional<Value> resumeCurrentMethod(
                         const uint32_t tTaskNative =
                             (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
                         try {
-                            nativeResult = cachedNativeHandler != nullptr
-                                ? cachedNativeHandler(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf)
-                                : handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
+                            nativeResult = handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
@@ -2959,8 +2930,8 @@ std::optional<Value> resumeCurrentMethod(
                     }
                 }
 
-                const uint64_t ckey = callCacheKey(&cls, cpIdx);
-
+                // SLOW PATH: use site data if populated and PIC matches;
+                // resolve+populate on first call or PIC miss.
                 const ClassFile* targetClass = nullptr;
                 const MethodInfo* targetMethod = nullptr;
                 bool isNativeCall = false;
@@ -2969,9 +2940,10 @@ std::optional<Value> resumeCurrentMethod(
                 bool haveRef = false;
 
                 // Phase 1: get argSlots (must happen before popping stack)
-                auto cit = rt.callCache.find(ckey);
-                if (cit != rt.callCache.end()) {
-                    argSlots = cit->second.argSlots;
+                const bool siteHasArgs = siteEntry != nullptr
+                    && siteEntry->kind != CallSiteEntry::kUncached;
+                if (siteHasArgs) {
+                    argSlots = siteEntry->argSlots;
                 } else {
                     ref = resolveMethodRef(cls, cpIdx);
                     haveRef = true;
@@ -2984,7 +2956,7 @@ std::optional<Value> resumeCurrentMethod(
                     rt.callArgsBuf[i] = frame.pop();
                 }
                 rt.callArgsBuf[0] = frame.pop(); // 'this'
-                const Value& object = rt.callArgsBuf[0]; // ref into callArgsBuf (no copy)
+                const Value& object = rt.callArgsBuf[0];
 
                 if (object.isNull()) {
                     const uint32_t npe_pc = static_cast<uint32_t>(pc);
@@ -3000,10 +2972,10 @@ std::optional<Value> resumeCurrentMethod(
                     return finish(std::nullopt);
                 }
 
-                // Phase 3: determine lookupClassName + lookupClassPtr for cache hit check
+                // Phase 3: determine receiver class for PIC + lookupClassName
+                // for findMethodInHierarchy fallback.
                 std::string lookupClassName = haveRef ? ref.className : "";
                 const ClassFile* lookupClassPtr = nullptr;
-                bool lookupClassFromCache = false;
                 if (isVirtualOp) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
@@ -3011,74 +2983,49 @@ std::optional<Value> resumeCurrentMethod(
                         if (objectIt != rt.heap.end()) {
                             lookupClassName = objectIt->second.className;
                             lookupClassPtr = objectIt->second.cls;
-                        } else if (!haveRef) {
-                            lookupClassName = cit->second.runtimeClass;
-                            lookupClassFromCache = true;
                         }
-                    } else if (!haveRef) {
-                        ref = resolveMethodRef(cls, cpIdx);
-                        haveRef = true;
-                        lookupClassName = ref.className;
                     }
-                } else if (!haveRef) {
-                    // invokespecial on cache hit: use stored ref.className
-                    lookupClassName = cit->second.runtimeClass;
-                    lookupClassFromCache = true;
+                }
+                if (lookupClassName.empty()) {
+                    if (!haveRef) { ref = resolveMethodRef(cls, cpIdx); haveRef = true; }
+                    lookupClassName = ref.className;
                 }
 
-                // Phase 4: resolve dispatch (cache hit when runtime class matches).
-                // Use pointer comparison when both sides are set (faster than string compare).
-                const bool cacheClassMatch = cit != rt.callCache.end() && (
-                    lookupClassFromCache ||
-                    (lookupClassPtr && cit->second.runtimeClassPtr == lookupClassPtr) ||
-                    (!lookupClassPtr && cit->second.runtimeClass == lookupClassName));
-                NativeHandler cachedNativeHandler = nullptr;
-                if (cacheClassMatch) {
-                    targetClass = cit->second.targetClass;
-                    targetMethod = cit->second.method;
-                    isNativeCall = cit->second.isNative;
-                    cachedNativeHandler = cit->second.nativeHandler;
+                // Phase 4: use site data if PIC matches; else resolve+populate.
+                const bool siteValid = siteEntry != nullptr
+                    && siteEntry->kind != CallSiteEntry::kUncached
+                    && siteEntry->targetClass != nullptr
+                    && siteEntry->targetMethod != nullptr
+                    && (!isVirtualOp || siteEntry->receiverClass == lookupClassPtr);
+
+                if (siteValid) {
+                    targetClass = siteEntry->targetClass;
+                    targetMethod = siteEntry->targetMethod;
+                    isNativeCall = (siteEntry->kind == CallSiteEntry::kNative
+                                    || siteEntry->kind == CallSiteEntry::kSlowCascade);
                 } else {
-                    const std::string& lookupName = haveRef ? ref.name : cit->second.method->name;
-                    const std::string& lookupDesc = haveRef ? ref.descriptor : cit->second.method->descriptor;
+                    if (!haveRef) { ref = resolveMethodRef(cls, cpIdx); haveRef = true; }
                     targetMethod = findMethodInHierarchy(
-                        classes, lookupClassName, lookupName, lookupDesc, &targetClass);
+                        classes, lookupClassName, ref.name, ref.descriptor, &targetClass);
                     if (targetClass != nullptr && targetMethod != nullptr) {
                         isNativeCall = hasAccess(targetMethod->access, kAccNative);
-                        cachedNativeHandler = isNativeCall
-                            ? resolveNativeInstanceHandler(targetClass->thisClass)
-                            : nullptr;
-                        rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall,
-                                              lookupClassName, findClass(classes, lookupClassName),
-                                              targetClass, targetMethod, cachedNativeHandler};
                     }
-                }
 
-                // Populate per-class call-site entry. For virtual ops, PIC
-                // keys on the receiver's ClassFile* (lookupClassPtr). For
-                // invokespecial (non-virtual), receiverClass stays null and
-                // the fast path skips the check. Overwrites on PIC miss so
-                // the site tracks the most recent receiver class.
-                if (siteEntry != nullptr
-                    && targetClass != nullptr && targetMethod != nullptr) {
-                    if (isNativeCall) {
-                        NativeLeafFn leaf = resolveInstanceLeaf(
-                            targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
-                        if (leaf != nullptr) {
-                            siteEntry->kind = CallSiteEntry::kNative;
+                    if (siteEntry != nullptr && targetClass != nullptr && targetMethod != nullptr) {
+                        if (isNativeCall) {
+                            NativeLeafFn leaf = resolveInstanceLeaf(
+                                targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
+                            siteEntry->kind = leaf ? CallSiteEntry::kNative : CallSiteEntry::kSlowCascade;
                             siteEntry->nativeFn = leaf;
                         } else {
-                            siteEntry->kind = CallSiteEntry::kSlowCascade;
+                            siteEntry->kind = CallSiteEntry::kJava;
                             siteEntry->nativeFn = nullptr;
                         }
-                    } else {
-                        siteEntry->kind = CallSiteEntry::kJava;
-                        siteEntry->nativeFn = nullptr;
+                        siteEntry->argSlots = static_cast<uint8_t>(argSlots);
+                        siteEntry->targetClass = targetClass;
+                        siteEntry->targetMethod = targetMethod;
+                        siteEntry->receiverClass = isVirtualOp ? lookupClassPtr : nullptr;
                     }
-                    siteEntry->argSlots = static_cast<uint8_t>(argSlots);
-                    siteEntry->targetClass = targetClass;
-                    siteEntry->targetMethod = targetMethod;
-                    siteEntry->receiverClass = isVirtualOp ? lookupClassPtr : nullptr;
                 }
 
                 if (targetClass != nullptr && targetMethod != nullptr) {
@@ -3104,9 +3051,7 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.tProfT0 = tN;
                         sharedNativeCtx.tProfTEntry = 0;
                         try {
-                            nativeResult = cachedNativeHandler != nullptr
-                                ? cachedNativeHandler(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf)
-                                : handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
+                            nativeResult = handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);

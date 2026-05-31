@@ -119,24 +119,6 @@ NativeCallResult handleNativeInstanceCall(
     const MethodRef& ref,
     const std::vector<Value>& args);
 
-// Option N: class-level handler caching. Resolved once at callCache write time
-// and stored on ResolvedCallEntry, then called directly to bypass the string
-// compares inside handleNativeStaticCall / handleNativeInstanceCall.
-using NativeHandler = NativeCallResult(*)(
-    NativeCallContext&, const std::string&, uint32_t,
-    const MethodRef&, const std::vector<Value>&);
-
-// Returns the leaf handler for invokestatic on `className`, or nullptr when
-// the slow cascade is needed (no className-only mapping exists).
-NativeHandler resolveNativeStaticHandler(const std::string& className);
-
-// Returns the leaf handler for invokevirtual on `className`. Receiver-type
-// OR fallbacks (handleImage on imageId(receiver), handleString on string
-// receivers, handleCanvas on Canvas subclasses) are NOT cached — the slow
-// path covers them. Cache hits only fire when className matches one of the
-// known native classes exactly.
-NativeHandler resolveNativeInstanceHandler(const std::string& className);
-
 // Per-call-site leaf resolution. Returns the leaf for exactly one method,
 // or nullptr if no leaf is registered (call must fall back to the slow
 // cascade in handleNativeXCall). Run once per call site at slow-path time;

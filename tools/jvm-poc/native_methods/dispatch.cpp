@@ -63,17 +63,6 @@ NativeCallResult handleNativeStaticCall(
     return NativeCallResult{};
 }
 
-NativeHandler resolveNativeStaticHandler(const std::string& className) {
-    if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
-    if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
-    if (className == "javax/microedition/lcdui/Font")    return &native_methods::handleFont;
-    if (className == "java/lang/System")                 return &native_methods::handleSystem;
-    if (className == "java/lang/Thread")                 return &native_methods::handleThread;
-    if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
-    if (className == "dev/roman/hello/NativeRuntime")    return &native_methods::handleNativeRuntime;
-    return nullptr;
-}
-
 NativeCallResult handleNativeInstanceCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
@@ -140,21 +129,6 @@ NativeCallResult handleNativeInstanceCall(
     // }
 
     return NativeCallResult{};
-}
-
-NativeHandler resolveNativeInstanceHandler(const std::string& className) {
-    if (className == "javax/microedition/midlet/MIDlet")    return &native_methods::handleMidlet;
-    if (className == "javax/microedition/lcdui/Display")    return &native_methods::handleDisplay;
-    if (className == "javax/microedition/lcdui/Graphics")   return &native_methods::handleGraphics;
-    if (className == "javax/microedition/lcdui/Image")      return &native_methods::handleImage;
-    if (className == "javax/microedition/lcdui/Font")       return &native_methods::handleFont;
-    if (className == "javax/microedition/lcdui/Canvas")                    return &native_methods::handleCanvas;
-    if (className == "javax/microedition/lcdui/game/GameCanvas")           return &native_methods::handleCanvas;
-    if (className == "java/lang/String")                    return &native_methods::handleString;
-    if (className == "java/lang/Thread")                    return &native_methods::handleThread;
-    if (className == "javax/microedition/rms/RecordStore")  return &native_methods::handleRecordStore;
-    if (className == "javax/microedition/media/Player")     return &native_methods::handlePlayer;
-    return nullptr;
 }
 
 // Per-call-site leaf resolution. Routes to per-class leaf tables; returns
