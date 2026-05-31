@@ -45,18 +45,21 @@ NativeCallResult handleMidlet(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupMidletInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handlePlayer(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupPlayerInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleNativeRuntime(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupNativeRuntimeStaticLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleString(
     NativeCallContext& ctx,
     const std::string& methodLabel,
@@ -69,6 +72,7 @@ NativeCallResult handleSystem(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupSystemStaticLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleRecordStore(
     NativeCallContext& ctx,
     const std::string& methodLabel,
@@ -83,5 +87,7 @@ NativeCallResult handleThread(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupThreadStaticLeaf(const std::string& name, const std::string& descriptor);
+NativeLeafFn lookupThreadInstanceLeaf(const std::string& name, const std::string& descriptor);
 
 } // namespace jvmpoc::native_methods

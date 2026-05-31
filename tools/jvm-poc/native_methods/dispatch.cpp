@@ -169,6 +169,15 @@ NativeLeafFn resolveStaticLeaf(const std::string& className,
     if (className == "javax/microedition/rms/RecordStore") {
         return native_methods::lookupRecordStoreStaticLeaf(methodName, descriptor);
     }
+    if (className == "java/lang/System") {
+        return native_methods::lookupSystemStaticLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/Thread") {
+        return native_methods::lookupThreadStaticLeaf(methodName, descriptor);
+    }
+    if (className == "dev/roman/hello/NativeRuntime") {
+        return native_methods::lookupNativeRuntimeStaticLeaf(methodName, descriptor);
+    }
     return nullptr;
 }
 
@@ -180,6 +189,15 @@ NativeLeafFn resolveInstanceLeaf(const std::string& className,
     }
     if (className == "javax/microedition/rms/RecordStore") {
         return native_methods::lookupRecordStoreInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/midlet/MIDlet") {
+        return native_methods::lookupMidletInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/media/Player") {
+        return native_methods::lookupPlayerInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/Thread") {
+        return native_methods::lookupThreadInstanceLeaf(methodName, descriptor);
     }
     return nullptr;
 }
