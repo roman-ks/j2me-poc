@@ -339,6 +339,26 @@ ClassFile parseClassFile(const std::string& path) {
         cls.cp[i] = entry;
     }
 
+    // Build per-callsite resolution cache (Option C: cpToSite + packed sites).
+    // Single pass: find max methodref cpIdx, then size cpToSite and populate.
+    uint16_t maxMethodRefCp = 0;
+    for (uint16_t i = 1; i < cpCount; ++i) {
+        uint8_t tag = cls.cp[i].tag;
+        if (tag == CpMethodref || tag == CpInterfaceMethodref) {
+            maxMethodRefCp = i;
+        }
+    }
+    if (maxMethodRefCp > 0) {
+        cls.cpToSite.assign(maxMethodRefCp + 1, 0xFFFF);
+        for (uint16_t i = 1; i <= maxMethodRefCp; ++i) {
+            uint8_t tag = cls.cp[i].tag;
+            if (tag == CpMethodref || tag == CpInterfaceMethodref) {
+                cls.cpToSite[i] = static_cast<uint16_t>(cls.sites.size());
+                cls.sites.emplace_back();
+            }
+        }
+    }
+
     cls.access = r.u2();
     cls.thisClass = className(cls.cp, r.u2());
     cls.superClass = className(cls.cp, r.u2());
