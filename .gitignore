@@ -9,3 +9,4 @@ tools/jvm-poc/jvm-poc-tests
 tools/jvm-poc/build/
 *.patch
 decompiled/
+*.log

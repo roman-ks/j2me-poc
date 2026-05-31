@@ -28,6 +28,7 @@ NativeCallResult handleGraphics(
     uint32_t pc,
     const MethodRef& ref,
     const std::vector<Value>& args);
+NativeLeafFn lookupGraphicsInstanceLeaf(const std::string& name, const std::string& descriptor);
 NativeCallResult handleImage(
     NativeCallContext& ctx,
     const std::string& methodLabel,

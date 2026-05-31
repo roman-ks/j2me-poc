@@ -169,9 +169,12 @@ NativeLeafFn resolveStaticLeaf(const std::string& className,
     return nullptr;
 }
 
-NativeLeafFn resolveInstanceLeaf(const std::string& /*className*/,
-                                 const std::string& /*methodName*/,
-                                 const std::string& /*descriptor*/) {
+NativeLeafFn resolveInstanceLeaf(const std::string& className,
+                                 const std::string& methodName,
+                                 const std::string& descriptor) {
+    if (className == "javax/microedition/lcdui/Graphics") {
+        return native_methods::lookupGraphicsInstanceLeaf(methodName, descriptor);
+    }
     return nullptr;
 }
 
