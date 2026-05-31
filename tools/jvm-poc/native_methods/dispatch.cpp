@@ -162,10 +162,12 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
 // here. Classes not yet converted simply fall through to nullptr, in which
 // case the interpreter uses the per-class handler (or the slow cascade).
 NativeMethodFn resolveNativeStaticMethod(
-    const std::string& /*className*/,
-    const std::string& /*name*/,
-    const std::string& /*descriptor*/) {
-    // No static methods converted to the leaf-cache pattern yet.
+    const std::string& className,
+    const std::string& name,
+    const std::string& descriptor) {
+    if (className == "javax/microedition/lcdui/Image") {
+        return native_methods::resolveImageMethod(name, descriptor);
+    }
     return nullptr;
 }
 
@@ -175,6 +177,13 @@ NativeMethodFn resolveNativeInstanceMethod(
     const std::string& descriptor) {
     if (className == "javax/microedition/lcdui/Graphics") {
         return native_methods::resolveGraphicsMethod(name, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Canvas" ||
+        className == "javax/microedition/lcdui/game/GameCanvas") {
+        return native_methods::resolveCanvasMethod(name, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Image") {
+        return native_methods::resolveImageMethod(name, descriptor);
     }
     return nullptr;
 }

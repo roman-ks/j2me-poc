@@ -82,5 +82,7 @@ NativeCallResult handleThread(
 // the leaf NativeMethodFn for an exact (name, descriptor) match, or nullptr
 // when no static binding exists for that method.
 NativeMethodFn resolveGraphicsMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveCanvasMethod(const std::string& name, const std::string& descriptor);
+NativeMethodFn resolveImageMethod(const std::string& name, const std::string& descriptor);
 
 } // namespace jvmpoc::native_methods
