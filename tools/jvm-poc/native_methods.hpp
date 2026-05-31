@@ -130,4 +130,15 @@ NativeHandler resolveNativeStaticHandler(const std::string& className);
 // known native classes exactly.
 NativeHandler resolveNativeInstanceHandler(const std::string& className);
 
+// Per-call-site leaf resolution. Returns the leaf for exactly one method,
+// or nullptr if no leaf is registered (call must fall back to the slow
+// cascade in handleNativeXCall). Run once per call site at slow-path time;
+// never on the hot path. See docs/per-class-call-site-cache.plan.md.
+NativeLeafFn resolveStaticLeaf(const std::string& className,
+                               const std::string& methodName,
+                               const std::string& descriptor);
+NativeLeafFn resolveInstanceLeaf(const std::string& className,
+                                 const std::string& methodName,
+                                 const std::string& descriptor);
+
 } // namespace jvmpoc

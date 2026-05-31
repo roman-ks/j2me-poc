@@ -2520,6 +2520,105 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0inv = statNow();
                 uint32_t callPc = static_cast<uint32_t>(pc);
                 const uint16_t cpIdx = codeU2(code, pc + 1);
+
+                // Per-class call-site cache lookup (fast path). siteEntry may
+                // be nullptr if cpIdx is out-of-range or marked 0xFFFF
+                // (defensive — well-formed bytecode never does this).
+                CallSiteEntry* siteEntry = nullptr;
+                if (cpIdx < cls.cpToSite.size()) {
+                    const uint16_t siteIdx = cls.cpToSite[cpIdx];
+                    if (siteIdx != 0xFFFF) {
+                        siteEntry = &cls.sites[siteIdx];
+                    }
+                }
+
+                // FAST PATH: kNative + non-null leaf. Skips callCache hash
+                // lookup AND MethodRef construction. Inert until step 3 wires
+                // resolveStaticLeaf to return real leaves.
+                if (siteEntry != nullptr
+                    && siteEntry->kind == CallSiteEntry::kNative
+                    && siteEntry->nativeFn != nullptr) {
+                    const NativeLeafFn leaf = siteEntry->nativeFn;
+                    const uint8_t fastArgSlots = siteEntry->argSlots;
+                    const ClassFile* fastTargetClass = siteEntry->targetClass;
+                    const MethodInfo* fastTargetMethod = siteEntry->targetMethod;
+
+                    if (fastTargetClass != nullptr) {
+                        ensureClassInitialized(classes, fastTargetClass->thisClass, rt);
+                    }
+
+                    rt.callArgsBuf.resize(fastArgSlots);
+                    for (size_t i = fastArgSlots; i > 0; --i) {
+                        rt.callArgsBuf[i - 1] = frame.pop();
+                    }
+                    sharedNativeCtx.receiverClassName = {};
+
+                    const uint32_t tN =
+#if JVM_ENABLE_NATIVE_PROFILING
+                        (rt.host && rt.host->profileNatives) ? nowUs() : 0;
+#else
+                        0;
+#endif
+                    const uint32_t tTaskNative =
+                        (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
+
+                    NativeCallResult nativeResult;
+                    try {
+                        nativeResult = leaf(sharedNativeCtx, callPc, rt.callArgsBuf);
+                    } catch (const YieldThreadSleep&) {
+                        if (tTaskNative != 0 && fastTargetClass && fastTargetMethod) {
+                            MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                            recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
+                        }
+                        pc += 3;
+                        runtimeFrame.pc = pc;
+                        rt.pendingYieldRethrowStartUs =
+                            (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
+                        throw;
+                    }
+                    if (tTaskNative != 0 && fastTargetClass && fastTargetMethod) {
+                        MethodRef profRef{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                        recordTaskNativeProfile(rt, profRef, nowUs() - tTaskNative);
+                    }
+#if JVM_ENABLE_NATIVE_PROFILING
+                    if (tN && fastTargetClass && fastTargetMethod) {
+                        rt.host->nativeStats[fastTargetClass->thisClass + "." + fastTargetMethod->name].record(nowUs() - tN);
+                    }
+#endif
+                    if (rt.yieldRequested) {
+                        pc += 3;
+                        runtimeFrame.pc = pc;
+                        return std::nullopt;
+                    }
+                    if (nativeResult.exception.has_value()) {
+                        setPendingException(rt, *nativeResult.exception, label, callPc);
+                    }
+                    if (rt.pendingException.has_value()) {
+                        if (catchPendingException(callPc)) {
+                            if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                            break;
+                        }
+                        runtimeFrame.pc = callPc;
+                        if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                        return finish(std::nullopt);
+                    }
+                    if (nativeResult.handled) {
+                        if (nativeResult.returnValue.has_value()) {
+                            frame.push(*nativeResult.returnValue);
+                        }
+                    } else {
+                        MethodRef ref{fastTargetClass->thisClass, fastTargetMethod->name, fastTargetMethod->descriptor};
+                        std::optional<Value> result = recordUnknownCall(
+                            rt, label, callPc, ref, rt.callArgsBuf);
+                        if (result.has_value()) {
+                            frame.push(*result);
+                        }
+                    }
+                    pc += 3;
+                    if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                    break;
+                }
+
                 const uint64_t ckey = callCacheKey(&cls, cpIdx);
 
                 const ClassFile* targetClass = nullptr;
@@ -2549,6 +2648,27 @@ std::optional<Value> resumeCurrentMethod(
                             ? resolveNativeStaticHandler(targetClass->thisClass)
                             : nullptr;
                         rt.callCache[ckey] = {static_cast<uint8_t>(argSlots), isNativeCall, "", nullptr, targetClass, targetMethod, cachedNativeHandler};
+                    }
+                }
+
+                // Populate per-class call-site entry on first native resolve.
+                // For non-native calls we leave the site kUncached for now;
+                // Java fast path is wired in step 4.
+                if (siteEntry != nullptr
+                    && siteEntry->kind == CallSiteEntry::kUncached
+                    && targetClass != nullptr && targetMethod != nullptr
+                    && isNativeCall) {
+                    if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
+                    NativeLeafFn leaf = resolveStaticLeaf(
+                        targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
+                    if (leaf != nullptr) {
+                        siteEntry->kind = CallSiteEntry::kNative;
+                        siteEntry->nativeFn = leaf;
+                        siteEntry->argSlots = static_cast<uint8_t>(argSlots);
+                        siteEntry->targetClass = targetClass;
+                        siteEntry->targetMethod = targetMethod;
+                    } else {
+                        siteEntry->kind = CallSiteEntry::kSlowCascade;
                     }
                 }
 

@@ -157,4 +157,20 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
     return nullptr;
 }
 
+// Per-call-site leaf resolution. Returns nullptr until per-class leaf tables
+// land (one class per step). Sites where resolveStaticLeaf/resolveInstanceLeaf
+// return nullptr get tagged kSlowCascade by the dispatcher and route through
+// the existing handleNativeXCall string-cascade.
+NativeLeafFn resolveStaticLeaf(const std::string& /*className*/,
+                               const std::string& /*methodName*/,
+                               const std::string& /*descriptor*/) {
+    return nullptr;
+}
+
+NativeLeafFn resolveInstanceLeaf(const std::string& /*className*/,
+                                 const std::string& /*methodName*/,
+                                 const std::string& /*descriptor*/) {
+    return nullptr;
+}
+
 } // namespace jvmpoc
