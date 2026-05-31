@@ -130,4 +130,36 @@ NativeHandler resolveNativeStaticHandler(const std::string& className);
 // known native classes exactly.
 NativeHandler resolveNativeInstanceHandler(const std::string& className);
 
+// Leaf (per-method) handler caching. One step deeper than NativeHandler: the
+// interpreter caches the exact function for a (className, name, descriptor)
+// triple, eliminating the per-class handler's name+descriptor scan on the hot
+// path. Same call signature as NativeHandler — interchangeable at the call
+// site. Tables live in each native_methods/<class>.cpp file and are the single
+// source of truth for that class's method dispatch (used by both the leaf
+// cache and the class-level slow path).
+using NativeMethodFn = NativeCallResult(*)(
+    NativeCallContext&, const std::string&, uint32_t,
+    const MethodRef&, const std::vector<Value>&);
+
+struct NativeMethodEntry {
+    const char* name;
+    const char* descriptor;   // exact descriptor; nullptr or "" means match any descriptor
+    NativeMethodFn fn;
+};
+
+// Returns the leaf-method handler for invokestatic on
+// `className.name(descriptor)`, or nullptr if no static binding exists.
+NativeMethodFn resolveNativeStaticMethod(
+    const std::string& className,
+    const std::string& name,
+    const std::string& descriptor);
+
+// Same as resolveNativeStaticMethod for invokevirtual. Does NOT cover
+// receiver-type fallbacks (image-by-id, string-by-receiver, Canvas subclass) —
+// those still require the slow cascade in handleNativeInstanceCall.
+NativeMethodFn resolveNativeInstanceMethod(
+    const std::string& className,
+    const std::string& name,
+    const std::string& descriptor);
+
 } // namespace jvmpoc

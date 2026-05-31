@@ -157,4 +157,26 @@ NativeHandler resolveNativeInstanceHandler(const std::string& className) {
     return nullptr;
 }
 
+// Leaf-method resolvers. Cascade per class to the per-file resolver. Each
+// converted class file (graphics.cpp, etc.) registers its resolveXxxMethod
+// here. Classes not yet converted simply fall through to nullptr, in which
+// case the interpreter uses the per-class handler (or the slow cascade).
+NativeMethodFn resolveNativeStaticMethod(
+    const std::string& /*className*/,
+    const std::string& /*name*/,
+    const std::string& /*descriptor*/) {
+    // No static methods converted to the leaf-cache pattern yet.
+    return nullptr;
+}
+
+NativeMethodFn resolveNativeInstanceMethod(
+    const std::string& className,
+    const std::string& name,
+    const std::string& descriptor) {
+    if (className == "javax/microedition/lcdui/Graphics") {
+        return native_methods::resolveGraphicsMethod(name, descriptor);
+    }
+    return nullptr;
+}
+
 } // namespace jvmpoc
