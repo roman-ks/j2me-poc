@@ -2621,6 +2621,37 @@ std::optional<Value> resumeCurrentMethod(
                     break;
                 }
 
+                // FAST PATH: kJava. Skips callCache hash lookup and resolves
+                // pushJavaFrame directly from the site's targetClass/method.
+                if (siteEntry != nullptr
+                    && siteEntry->kind == CallSiteEntry::kJava
+                    && siteEntry->targetClass != nullptr
+                    && siteEntry->targetMethod != nullptr) {
+                    const ClassFile* fastTargetClass = siteEntry->targetClass;
+                    const MethodInfo* fastTargetMethod = siteEntry->targetMethod;
+                    const uint8_t fastArgSlots = siteEntry->argSlots;
+
+                    ensureClassInitialized(classes, fastTargetClass->thisClass, rt);
+
+                    rt.callArgsBuf.resize(fastArgSlots);
+                    for (size_t i = fastArgSlots; i > 0; --i) {
+                        rt.callArgsBuf[i - 1] = frame.pop();
+                    }
+
+                    runtimeFrame.lastCallPc = callPc;
+                    runtimeFrame.pc = pc + 3;
+                    if(t0inv) rt.host->invokeStats.record(nowUs() - t0inv);
+                    if (!pushJavaFrame(rt, classes, *fastTargetClass, *fastTargetMethod, rt.callArgsBuf)) {
+                        if (catchPendingException(callPc)) {
+                            runtimeFrame.lastCallPc = SIZE_MAX;
+                            break;
+                        }
+                        runtimeFrame.pc = callPc;
+                        return finish(std::nullopt);
+                    }
+                    return std::nullopt;
+                }
+
                 const uint64_t ckey = callCacheKey(&cls, cpIdx);
 
                 const ClassFile* targetClass = nullptr;
@@ -2653,25 +2684,27 @@ std::optional<Value> resumeCurrentMethod(
                     }
                 }
 
-                // Populate per-class call-site entry on first native resolve.
-                // For non-native calls we leave the site kUncached for now;
-                // Java fast path is wired in step 4.
+                // Populate per-class call-site entry on first resolve.
+                // Native: try resolveStaticLeaf; non-null → kNative, else
+                // kSlowCascade. Java: store target directly → kJava.
                 if (siteEntry != nullptr
                     && siteEntry->kind == CallSiteEntry::kUncached
-                    && targetClass != nullptr && targetMethod != nullptr
-                    && isNativeCall) {
-                    if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
-                    NativeLeafFn leaf = resolveStaticLeaf(
-                        targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
-                    if (leaf != nullptr) {
-                        siteEntry->kind = CallSiteEntry::kNative;
-                        siteEntry->nativeFn = leaf;
-                        siteEntry->argSlots = static_cast<uint8_t>(argSlots);
-                        siteEntry->targetClass = targetClass;
-                        siteEntry->targetMethod = targetMethod;
+                    && targetClass != nullptr && targetMethod != nullptr) {
+                    if (isNativeCall) {
+                        NativeLeafFn leaf = resolveStaticLeaf(
+                            targetClass->thisClass, targetMethod->name, targetMethod->descriptor);
+                        if (leaf != nullptr) {
+                            siteEntry->kind = CallSiteEntry::kNative;
+                            siteEntry->nativeFn = leaf;
+                        } else {
+                            siteEntry->kind = CallSiteEntry::kSlowCascade;
+                        }
                     } else {
-                        siteEntry->kind = CallSiteEntry::kSlowCascade;
+                        siteEntry->kind = CallSiteEntry::kJava;
                     }
+                    siteEntry->argSlots = static_cast<uint8_t>(argSlots);
+                    siteEntry->targetClass = targetClass;
+                    siteEntry->targetMethod = targetMethod;
                 }
 
                 if (targetClass != nullptr) {
