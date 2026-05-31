@@ -2,7 +2,6 @@
 
 #include "bytecode.hpp"
 #include "jvm_host.hpp"
-#include "method_execution_delegate.hpp"
 #include "method_resolution.hpp"
 #include "native_methods.hpp"
 #include "sram_allocator.hpp"
@@ -239,6 +238,11 @@ struct RuntimeFrame {
     const ClassFile* cls = nullptr;
     const MethodInfo* method = nullptr;
     size_t pc = 0;
+    // Trampoline support: pc of the invoke bytecode that started the pending
+    // Java call from this frame. SIZE_MAX = no pending call. Read by the entry
+    // exception guard in resumeCurrentMethod to know where to look up handlers
+    // when a callee throws and propagates back here.
+    size_t lastCallPc = SIZE_MAX;
     Frame frame;
     // Populated only while this RuntimeFrame lives in ThreadTask::suspendedFrames.
     // Holds a copy of the [locals... stack...] slot range that was in the arena
@@ -1291,28 +1295,40 @@ Value readFieldValue(Runtime& rt, const Value& object, const std::string& fieldN
     return obj.fields[slot];
 }
 
-std::optional<Value> executeMethod(
+// Forward declarations for the trampoline-based dispatch. resumeCurrentMethod
+// no longer recurses; it pushes new Java frames onto rt.callStack and returns
+// to the trampoline loop, which re-enters it on the newly-pushed frame. This
+// keeps the C++ stack flat regardless of Java call depth.
+std::optional<Value> resumeCurrentMethod(
+    const std::vector<ClassFile>& classes,
+    Runtime& rt);
+bool pushJavaFrame(
+    Runtime& rt,
     const std::vector<ClassFile>& classes,
     const ClassFile& cls,
     const MethodInfo& method,
-    std::vector<Value>& args,
+    std::vector<Value>& args);
+void runTrampoline(const std::vector<ClassFile>& classes, Runtime& rt);
+void runTrampolineUntilSize(
+    const std::vector<ClassFile>& classes,
     Runtime& rt,
-    size_t depth);
+    size_t targetSize);
 
 void ensureClassInitialized(
     const std::vector<ClassFile>& classes,
     const std::string& className,
-    Runtime& rt,
-    size_t depth) {
+    Runtime& rt) {
     if (!rt.initializedClasses.insert(className).second) return;
     const ClassFile* cls = findClass(classes, className);
     if (cls == nullptr) return;
     if (!cls->superClass.empty())
-        ensureClassInitialized(classes, cls->superClass, rt, depth + 1);
+        ensureClassInitialized(classes, cls->superClass, rt);
     const MethodInfo* clinit = findDeclaredMethod(*cls, "<clinit>", "()V");
     if (clinit == nullptr) return;
     std::vector<Value> noArgs;
-    (void)executeMethod(classes, *cls, *clinit, noArgs, rt, depth + 1);
+    const size_t base = rt.callStack.size();
+    if (!pushJavaFrame(rt, classes, *cls, *clinit, noArgs)) return;
+    runTrampolineUntilSize(classes, rt, base);
 }
 
 void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const Value& runnable) {
@@ -1339,7 +1355,9 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         return;
     }
     std::vector<Value> runArgs = {runnable};
-    (void)executeMethod(classes, *owner, *run, runArgs, rt, 0);
+    const size_t base = rt.callStack.size();
+    if (!pushJavaFrame(rt, classes, *owner, *run, runArgs)) return;
+    runTrampolineUntilSize(classes, rt, base);
 }
 
 void initializeFrameArgs(RuntimeFrame& runtimeFrame, std::vector<Value>& args) {
@@ -1382,12 +1400,47 @@ bool isAssignableTo(const std::vector<ClassFile>& classes,
     return false;
 }
 
+// Sets up a new RuntimeFrame for the given Java method, pushes it onto
+// rt.callStack, and returns true. On Java call depth limit or frame-arena
+// overflow, raises a StackOverflowError via setPendingException and returns
+// false — the caller is responsible for invoking its own exception handler
+// search (catchPendingException) before continuing.
+bool pushJavaFrame(
+    Runtime& rt,
+    const std::vector<ClassFile>& classes,
+    const ClassFile& cls,
+    const MethodInfo& method,
+    std::vector<Value>& args) {
+    if (rt.callStack.size() >= kMaxCallDepth) {
+        Value soe = allocateObject(rt, classes, "<push>", 0, "java/lang/StackOverflowError");
+        setPendingException(rt, std::move(soe), "", 0);
+        return false;
+    }
+    Value* slabBase = rt.callStack.empty()
+        ? rt.frameArena.begin()
+        : rt.callStack.back().frame.stackEnd();
+    Value* arenaEnd = rt.frameArena.end();
+    const size_t needed = static_cast<size_t>(method.maxLocals) + static_cast<size_t>(method.maxStack);
+    if (slabBase + needed > arenaEnd) {
+        Value soe = allocateObject(rt, classes, "<push>", 0, "java/lang/StackOverflowError");
+        setPendingException(rt, std::move(soe), "", 0);
+        return false;
+    }
+    std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
+    RuntimeFrame frame{
+        std::move(label), &cls, &method, 0, SIZE_MAX,
+        Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
+        {}};
+    initializeFrameArgs(frame, args);
+    rt.callStack.push_back(std::move(frame));
+    return true;
+}
+
 std::optional<Value> resumeCurrentMethod(
     const std::vector<ClassFile>& classes,
-    Runtime& rt,
-    size_t depth) {
-    if (depth > kMaxCallDepth || rt.callStack.empty()) {
-        return Value::named("<call-depth-limit>");
+    Runtime& rt) {
+    if (rt.callStack.empty()) {
+        return std::nullopt;
     }
 
     RuntimeFrame& runtimeFrame = rt.callStack.back();
@@ -1469,7 +1522,9 @@ std::optional<Value> resumeCurrentMethod(
             return;
         }
         std::vector<Value> notifyArgs = {displayable};
-        (void)executeMethod(classes, *owner, *notify, notifyArgs, rt, depth + 1);
+        const size_t notifyBase = rt.callStack.size();
+        if (!pushJavaFrame(rt, classes, *owner, *notify, notifyArgs)) return;
+        runTrampolineUntilSize(classes, rt, notifyBase);
     };
 
     auto makeNativeContext = [&]() {
@@ -1574,6 +1629,21 @@ std::optional<Value> resumeCurrentMethod(
     auto statNow = [&]() -> uint32_t {
         return kCollectStats ? nowUs() : 0u;
     };
+
+    // Trampoline re-entry exception guard: when the previous resumeCurrentMethod
+    // call popped a callee that threw and didn't catch, the trampoline re-enters
+    // this frame with rt.pendingException still set. Try this frame's exception
+    // table at the invoke pc (lastCallPc); if no handler matches, propagate up.
+    if (rt.pendingException.has_value() && runtimeFrame.lastCallPc != SIZE_MAX) {
+        const uint32_t throwPc = static_cast<uint32_t>(runtimeFrame.lastCallPc);
+        runtimeFrame.lastCallPc = SIZE_MAX;
+        if (!catchPendingException(throwPc)) {
+            runtimeFrame.pc = throwPc;
+            return finish(std::nullopt);
+        }
+        // catchPendingException succeeded: pc is now at handler, runtimeFrame.pc
+        // was updated, rt.pendingException cleared. Fall through to bytecode loop.
+    }
 
     while (pc < codeSize) {
         // Batched step-limit check: increment every step, but only consult
@@ -2327,7 +2397,7 @@ std::optional<Value> resumeCurrentMethod(
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
                         return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
-                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt, depth);
+                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt);
                 auto it = rt.staticFields.find(key);
                 frame.push(it == rt.staticFields.end() ? Value::ofInt(0) : it->second);
                 pc += 3;
@@ -2347,7 +2417,7 @@ std::optional<Value> resumeCurrentMethod(
                         FieldRef ref = resolveFieldRef(cls, cpIdx);
                         return rt.staticKeyCache.emplace(skey, ref.className + "." + ref.name + "|" + ref.descriptor).first->second;
                     }();
-                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt, depth);
+                ensureClassInitialized(classes, key.substr(0, key.find('.')), rt);
                 Value value = frame.pop();
                 rt.staticFields[key] = value;
                 if (rt.trace.recording) rt.trace.staticWrites.push_back(StaticWrite{label, writePc, key, value});
@@ -2483,9 +2553,9 @@ std::optional<Value> resumeCurrentMethod(
                 }
 
                 if (targetClass != nullptr) {
-                    ensureClassInitialized(classes, targetClass->thisClass, rt, depth);
+                    ensureClassInitialized(classes, targetClass->thisClass, rt);
                 } else if (haveRef) {
-                    ensureClassInitialized(classes, ref.className, rt, depth);
+                    ensureClassInitialized(classes, ref.className, rt);
                 }
 
                 rt.callArgsBuf.resize(argSlots);
@@ -2555,28 +2625,24 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
+                        // Trampoline: save continuation pc + invoke pc, push the
+                        // callee frame, and return to the outer trampoline loop.
+                        // It will re-enter this frame after the callee returns
+                        // (or throws — handled by the entry guard above).
+                        runtimeFrame.lastCallPc = callPc;
                         runtimeFrame.pc = pc + 3;
                         const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
-                        std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
-                        if (rt.yieldRequested) {
-                            return std::nullopt;
-                        }
-                        if (rt.pendingException.has_value()) {
+                        if(t0inv) rt.host->invokeStats.record(tDisp0);
+                        if (!pushJavaFrame(rt, classes, *targetClass, *targetMethod, rt.callArgsBuf)) {
+                            // StackOverflowError raised by pushJavaFrame
                             if (catchPendingException(callPc)) {
-                                if(t0inv) rt.host->invokeStats.record(tDisp0);
+                                runtimeFrame.lastCallPc = SIZE_MAX;
                                 break;
                             }
                             runtimeFrame.pc = callPc;
-                            if(t0inv) rt.host->invokeStats.record(tDisp0);
                             return finish(std::nullopt);
                         }
-                        if (result.has_value()) {
-                            frame.push(*result);
-                        }
-                        pc += 3;
-                        if(t0inv) rt.host->invokeStats.record(tDisp0);
-                        break;
+                        return std::nullopt;
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
@@ -2762,28 +2828,23 @@ std::optional<Value> resumeCurrentMethod(
                             }
                         }
                     } else {
+                        // Trampoline: save continuation pc + invoke pc, push the
+                        // callee frame, and return to the outer trampoline loop.
+                        const size_t invokePc = pc;
+                        runtimeFrame.lastCallPc = invokePc;
                         runtimeFrame.pc = pc + invokeLength(op);
                         const uint32_t tDisp0 = t0inv ? nowUs() - t0inv : 0;
-                        std::optional<Value> result = executeMethod(
-                            classes, *targetClass, *targetMethod, rt.callArgsBuf, rt, depth + 1);
-                        if (rt.yieldRequested) {
-                            return std::nullopt;
-                        }
-                        if (rt.pendingException.has_value()) {
-                            if (catchPendingException(static_cast<uint32_t>(pc))) {
-                                if(t0inv) rt.host->invokeStats.record(tDisp0);
+                        if(t0inv) rt.host->invokeStats.record(tDisp0);
+                        if (!pushJavaFrame(rt, classes, *targetClass, *targetMethod, rt.callArgsBuf)) {
+                            // StackOverflowError raised by pushJavaFrame
+                            if (catchPendingException(static_cast<uint32_t>(invokePc))) {
+                                runtimeFrame.lastCallPc = SIZE_MAX;
                                 break;
                             }
-                            runtimeFrame.pc = pc;
-                            if(t0inv) rt.host->invokeStats.record(tDisp0);
+                            runtimeFrame.pc = invokePc;
                             return finish(std::nullopt);
                         }
-                        if (result.has_value()) {
-                            frame.push(*result);
-                        }
-                        pc += op == 0xb9 ? 5 : 3;
-                        if(t0inv) rt.host->invokeStats.record(tDisp0);
-                        break;
+                        return std::nullopt;
                     }
                 } else {
                     if (!haveRef) ref = resolveMethodRef(cls, cpIdx);
@@ -2822,7 +2883,7 @@ std::optional<Value> resumeCurrentMethod(
                 const uint32_t t0m=statNow();
                 uint32_t allocPc = static_cast<uint32_t>(pc);
                 std::string className = resolveClassRef(cls, codeU2(code, pc + 1));
-                ensureClassInitialized(classes, className, rt, depth);
+                ensureClassInitialized(classes, className, rt);
                 frame.push(allocateObject(rt, classes, label, allocPc, className));
                 pc += 3;
                 if(t0m) rt.host->miscStats.record(nowUs()-t0m);
@@ -2976,47 +3037,57 @@ std::optional<Value> resumeCurrentMethod(
         }
     }
 
-    LOGF_W("executeMethod: %s.%s%s depth=%zu - completed", cls.thisClass.c_str(), method.name.c_str(), method.descriptor.c_str(), depth);
+    LOGF_W("resumeCurrentMethod: %s.%s%s - completed", cls.thisClass.c_str(), method.name.c_str(), method.descriptor.c_str());
     runtimeFrame.pc = pc;
     return finish(std::nullopt);
 }
 
-std::optional<Value> executeMethod(
+// Drives execution until the call stack empties, a yield is requested, or
+// an uncaught exception escapes all frames. Each iteration of the loop:
+//   - calls resumeCurrentMethod on the current top frame
+//   - if the bytecode loop pushed a new Java frame (size grew): loop runs it
+//   - if the top frame returned (size shrank): push its return value onto
+//     the new top's operand stack
+//   - if pendingException is set: keep looping so the next iteration's entry
+//     guard can try the new top's exception table at its lastCallPc
+void runTrampoline(const std::vector<ClassFile>& classes, Runtime& rt) {
+    while (!rt.callStack.empty()) {
+        const size_t sizeBefore = rt.callStack.size();
+        std::optional<Value> returnVal = resumeCurrentMethod(classes, rt);
+        if (rt.yieldRequested) return;
+        if (rt.pendingException.has_value()) {
+            if (rt.callStack.empty()) return;
+            continue;
+        }
+        const size_t sizeAfter = rt.callStack.size();
+        if (sizeAfter > sizeBefore) continue;        // new frame pushed; keep running
+        if (returnVal.has_value() && !rt.callStack.empty()) {
+            rt.callStack.back().frame.push(*returnVal);
+        }
+    }
+}
+
+// Variant for nested blocking sub-calls (e.g. <clinit>, hideNotify/showNotify)
+// that must complete before the caller can continue. Stops once the callStack
+// shrinks back to (or below) targetSize.
+void runTrampolineUntilSize(
     const std::vector<ClassFile>& classes,
-    const ClassFile& cls,
-    const MethodInfo& method,
-    std::vector<Value>& args,
     Runtime& rt,
-    size_t depth) {
-    if (depth > kMaxCallDepth) {
-        return Value::named("<call-depth-limit>");
+    size_t targetSize) {
+    while (rt.callStack.size() > targetSize) {
+        const size_t sizeBefore = rt.callStack.size();
+        std::optional<Value> returnVal = resumeCurrentMethod(classes, rt);
+        if (rt.yieldRequested) return;
+        if (rt.pendingException.has_value()) {
+            if (rt.callStack.size() <= targetSize) return;
+            continue;
+        }
+        const size_t sizeAfter = rt.callStack.size();
+        if (sizeAfter > sizeBefore) continue;
+        if (returnVal.has_value() && !rt.callStack.empty()) {
+            rt.callStack.back().frame.push(*returnVal);
+        }
     }
-
-    // Bump-allocate the frame's slot region in the arena. New frame starts at
-    // the calling frame's actual operand-stack top (or arena base if no
-    // caller). Overflow returns a sentinel — same shape as the depth limit.
-    Value* slabBase = rt.callStack.empty()
-        ? rt.frameArena.begin()
-        : rt.callStack.back().frame.stackEnd();
-    Value* arenaEnd = rt.frameArena.end();
-    const size_t needed = static_cast<size_t>(method.maxLocals) + static_cast<size_t>(method.maxStack);
-    if (slabBase + needed > arenaEnd) {
-        return Value::named("<frame-arena-overflow>");
-    }
-
-    // Skip string alloc for the method label when tracing is off (saves 1 SRAM malloc/call).
-    std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
-    RuntimeFrame runtimeFrame{
-        std::move(label), &cls, &method, 0,
-        Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
-        {}};
-    // Pass args to delegateMethodExecution BEFORE consuming them in the lambda so
-    // the timing delegate can read args[1]/args[2] for make_buf logging.
-    return delegateMethodExecution(cls, method, args, [&]() {
-        initializeFrameArgs(runtimeFrame, args); // moves strings from args into frame locals
-        rt.callStack.push_back(std::move(runtimeFrame));
-        return resumeCurrentMethod(classes, rt, depth);
-    });
 }
 
 void resetRuntimeTrace(Runtime& rt) {
@@ -3075,7 +3146,9 @@ ExecutionTrace startSession(MidletSession& session) {
     const MethodInfo* init = findDeclaredMethod(*midletClass, "<init>", "()V");
     if (init != nullptr) {
         std::vector<Value> initArgs = {session.midletRef()};
-        (void)executeMethod(classes, *midletClass, *init, initArgs, rt, 0);
+        if (pushJavaFrame(rt, classes, *midletClass, *init, initArgs)) {
+            runTrampoline(classes, rt);
+        }
         if (rt.pendingException.has_value()) {
             recordUncaughtException(rt, "<midlet-init>");
             clearPendingException(rt);
@@ -3091,17 +3164,14 @@ ExecutionTrace startSession(MidletSession& session) {
     if (startOwner != nullptr && startApp != nullptr) {
         std::vector<Value> startArgs = {session.midletRef()};
         rt.stepLimitYieldEnabled = true;
-        (void)executeMethod(classes, *startOwner, *startApp, startArgs, rt, 0);
-        // If the step limit fired, callStack still has frames — resume until done.
-        // Cap at 10 budgets (~1M steps) so a truly-infinite startApp doesn't hang forever.
-        for (int budget = 0; !rt.callStack.empty() && !rt.pendingException.has_value() && budget < 10; ++budget) {
-            rt.yieldRequested = false;
-            rt.steps = 0;
-            while (!rt.callStack.empty()) {
-                std::optional<Value> result = resumeCurrentMethod(classes, rt, 0);
-                if (rt.yieldRequested || rt.pendingException.has_value()) break;
-                if (result.has_value() && !rt.callStack.empty())
-                    rt.callStack.back().frame.push(*result);
+        if (pushJavaFrame(rt, classes, *startOwner, *startApp, startArgs)) {
+            runTrampoline(classes, rt);
+            // If the step limit fired mid-startApp, callStack still has frames.
+            // Cap at 10 budgets (~1M steps) so a truly-infinite startApp doesn't hang.
+            for (int budget = 0; !rt.callStack.empty() && !rt.pendingException.has_value() && budget < 10; ++budget) {
+                rt.yieldRequested = false;
+                rt.steps = 0;
+                runTrampoline(classes, rt);
             }
         }
         rt.stepLimitYieldEnabled = false;
@@ -3151,13 +3221,9 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
     }
 
     std::vector<Value> keyArgs = {rt.currentDisplayable, Value::named(std::to_string(event.keyCode))};
-    (void)executeMethod(
-        classes,
-        *owner,
-        *handler,
-        keyArgs,
-        rt,
-        0);
+    if (pushJavaFrame(rt, classes, *owner, *handler, keyArgs)) {
+        runTrampoline(classes, rt);
+    }
     if (rt.pendingException.has_value()) {
         recordUncaughtException(rt, "<input>");
         clearPendingException(rt);
@@ -3242,15 +3308,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     const uint32_t tasksStartUs = profileFrame ? nowUs() : 0;
     const uint32_t now = rt.host != nullptr ? rt.host->millis() : 0;
     auto resumeTaskStack = [&]() {
-        while (!rt.callStack.empty()) {
-            std::optional<Value> result = resumeCurrentMethod(session.classes(), rt, 0);
-            if (rt.yieldRequested || rt.pendingException.has_value()) {
-                return;
-            }
-            if (result.has_value() && !rt.callStack.empty()) {
-                rt.callStack.back().frame.push(*result);
-            }
-        }
+        runTrampoline(session.classes(), rt);
     };
     for (ThreadTask& task : session.tasks()) {
         if (task.finished) {
@@ -3282,7 +3340,9 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 resumeTaskStack();
             } else if (task.cls != nullptr && task.method != nullptr) {
                 std::vector<Value> taskArgs = {task.receiver};
-                (void)executeMethod(session.classes(), *task.cls, *task.method, taskArgs, rt, 0);
+                if (pushJavaFrame(rt, session.classes(), *task.cls, *task.method, taskArgs)) {
+                    runTrampoline(session.classes(), rt);
+                }
             }
             if (rt.pendingException.has_value()) {
                 LOGF_W("[task-died] %s uncaught=%s thrownAt=%s pc=%u", taskLabel.c_str(),
@@ -3462,7 +3522,9 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             rt.mainFbCanvas.emplace(rt.graphicsWidth, rt.graphicsHeight, rt.graphicsFramebuffer);
         }
         std::vector<Value> paintArgs = {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)};
-        (void)executeMethod(classes, *paintOwner, *paint, paintArgs, rt, 0);
+        if (pushJavaFrame(rt, classes, *paintOwner, *paint, paintArgs)) {
+            runTrampoline(classes, rt);
+        }
         if (rt.pendingException.has_value()) {
             recordUncaughtException(rt, "<paint>");
             clearPendingException(rt);
@@ -3515,7 +3577,9 @@ ExecutionTrace executeStraightLine(const std::vector<ClassFile>& classes, const 
     Runtime rt;
     rt.callStack.reserve(kMaxCallDepth + 1);
     std::vector<Value> emptyArgs;
-    (void)executeMethod(classes, cls, method, emptyArgs, rt, 0);
+    if (pushJavaFrame(rt, classes, cls, method, emptyArgs)) {
+        runTrampoline(classes, rt);
+    }
     if (rt.pendingException.has_value()) {
         recordUncaughtException(rt, "<main>");
         clearPendingException(rt);
