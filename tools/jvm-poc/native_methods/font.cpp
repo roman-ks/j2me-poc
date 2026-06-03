@@ -15,8 +15,6 @@ Value defaultFontRef() {
 }
 
 int utf8CharCount(const std::string& s) {
-    // Count code points (not bytes) for width math. The bitmap font only has
-    // ASCII glyphs; non-ASCII bytes map to '?' but still occupy one cell.
     int count = 0;
     for (size_t i = 0; i < s.size(); ) {
         const unsigned char c = static_cast<unsigned char>(s[i]);
@@ -36,67 +34,140 @@ int stringWidthChars(int charCount) {
     return charCount * port::kBitmapFontAdvance - 1;
 }
 
+NativeCallResult nm_font_getDefaultFont(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(defaultFontRef());
+}
+
+NativeCallResult nm_font_getFont(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(defaultFontRef());
+}
+
+NativeCallResult nm_font_getHeight(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(port::kBitmapFontHeight));
+}
+
+NativeCallResult nm_font_getBaselinePosition(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(port::kBitmapFontBaseline));
+}
+
+NativeCallResult nm_font_getFace(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(0));   // FACE_SYSTEM
+}
+
+NativeCallResult nm_font_getStyle(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(0));   // STYLE_PLAIN
+}
+
+NativeCallResult nm_font_getSize(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(8));   // SIZE_SMALL — matches our 5x7 glyph
+}
+
+NativeCallResult nm_font_isPlain(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(1));
+}
+
+NativeCallResult nm_font_isStyleFalse(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(0));
+}
+
+NativeCallResult nm_font_charWidth(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
+    return handledValue(Value::ofInt(port::kBitmapFontAdvance));
+}
+
+NativeCallResult nm_font_charsWidth(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& args) {
+    const int length = intArg(args, 3);
+    return handledValue(Value::ofInt(stringWidthChars(length)));
+}
+
+NativeCallResult nm_font_stringWidth(
+    NativeCallContext& ctx, uint32_t /*pc*/, const std::vector<Value>& args) {
+    const std::string text = stringArg(ctx, args, 1);
+    return handledValue(Value::ofInt(stringWidthChars(utf8CharCount(text))));
+}
+
+NativeCallResult nm_font_substringWidth(
+    NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& args) {
+    const int length = intArg(args, 3);
+    return handledValue(Value::ofInt(stringWidthChars(length)));
+}
+
+struct NativeMethodEntry {
+    const char* name;
+    const char* descriptor;
+    NativeLeafFn fn;
+};
+
+constexpr NativeMethodEntry kFontStaticMethods[] = {
+    {"getDefaultFont", "()Ljavax/microedition/lcdui/Font;",    &nm_font_getDefaultFont},
+    {"getFont",        "(III)Ljavax/microedition/lcdui/Font;", &nm_font_getFont},
+    {"getFont",        "(I)Ljavax/microedition/lcdui/Font;",   &nm_font_getFont},
+};
+
+constexpr NativeMethodEntry kFontInstanceMethods[] = {
+    {"getHeight",           "()I",                           &nm_font_getHeight},
+    {"getBaselinePosition", "()I",                           &nm_font_getBaselinePosition},
+    {"getFace",             "()I",                           &nm_font_getFace},
+    {"getStyle",            "()I",                           &nm_font_getStyle},
+    {"getSize",             "()I",                           &nm_font_getSize},
+    {"isPlain",             "()Z",                           &nm_font_isPlain},
+    {"isBold",              "()Z",                           &nm_font_isStyleFalse},
+    {"isItalic",            "()Z",                           &nm_font_isStyleFalse},
+    {"isUnderlined",        "()Z",                           &nm_font_isStyleFalse},
+    {"charWidth",           "(C)I",                          &nm_font_charWidth},
+    {"charsWidth",          "([CII)I",                       &nm_font_charsWidth},
+    {"stringWidth",         "(Ljava/lang/String;)I",         &nm_font_stringWidth},
+    {"substringWidth",      "(Ljava/lang/String;II)I",       &nm_font_substringWidth},
+};
+
+NativeLeafFn lookupLeaf(const NativeMethodEntry* table, size_t n,
+                        const std::string& name, const std::string& descriptor) {
+    for (size_t i = 0; i < n; ++i) {
+        if (name == table[i].name && descriptor == table[i].descriptor) {
+            return table[i].fn;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace
+
+NativeLeafFn lookupFontStaticLeaf(const std::string& name, const std::string& descriptor) {
+    return lookupLeaf(kFontStaticMethods,
+                      sizeof(kFontStaticMethods) / sizeof(kFontStaticMethods[0]),
+                      name, descriptor);
+}
+
+NativeLeafFn lookupFontInstanceLeaf(const std::string& name, const std::string& descriptor) {
+    return lookupLeaf(kFontInstanceMethods,
+                      sizeof(kFontInstanceMethods) / sizeof(kFontInstanceMethods[0]),
+                      name, descriptor);
+}
 
 NativeCallResult handleFont(
     NativeCallContext& ctx,
-    const std::string& /*methodLabel*/,
-    uint32_t /*pc*/,
-    const MethodRef& ref,
+    const std::string& methodLabel,
+    uint32_t pc,
+    const MethodRefView& ref,
     const std::vector<Value>& args) {
-
-    if (ref.name == "getDefaultFont" && ref.descriptor == "()Ljavax/microedition/lcdui/Font;") {
-        return handledValue(defaultFontRef());
+    if (NativeLeafFn leaf = lookupFontStaticLeaf(ref.name, ref.descriptor)) {
+        ctx.callerLabel = methodLabel;
+        return leaf(ctx, pc, args);
     }
-    if (ref.name == "getFont" &&
-        (ref.descriptor == "(III)Ljavax/microedition/lcdui/Font;" ||
-         ref.descriptor == "(I)Ljavax/microedition/lcdui/Font;")) {
-        return handledValue(defaultFontRef());
+    if (NativeLeafFn leaf = lookupFontInstanceLeaf(ref.name, ref.descriptor)) {
+        ctx.callerLabel = methodLabel;
+        return leaf(ctx, pc, args);
     }
-
-    if (ref.name == "getHeight" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(port::kBitmapFontHeight));
-    }
-    if (ref.name == "getBaselinePosition" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(port::kBitmapFontBaseline));
-    }
-
-    if (ref.name == "getFace" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(0));   // FACE_SYSTEM
-    }
-    if (ref.name == "getStyle" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(0));   // STYLE_PLAIN
-    }
-    if (ref.name == "getSize" && ref.descriptor == "()I") {
-        return handledValue(Value::ofInt(8));   // SIZE_SMALL — matches our 5x7 glyph
-    }
-
-    if (ref.name == "isPlain" && ref.descriptor == "()Z") {
-        return handledValue(Value::ofInt(1));
-    }
-    if ((ref.name == "isBold" || ref.name == "isItalic" || ref.name == "isUnderlined") &&
-        ref.descriptor == "()Z") {
-        return handledValue(Value::ofInt(0));
-    }
-
-    if (ref.name == "charWidth" && ref.descriptor == "(C)I") {
-        // Use advance so Σ charWidth(c) ≈ stringWidth (off-by-one matches the
-        // trailing-gap convention Canvas.drawString uses).
-        return handledValue(Value::ofInt(port::kBitmapFontAdvance));
-    }
-    if (ref.name == "charsWidth" && ref.descriptor == "([CII)I") {
-        const int length = intArg(args, 3);
-        return handledValue(Value::ofInt(stringWidthChars(length)));
-    }
-    if (ref.name == "stringWidth" && ref.descriptor == "(Ljava/lang/String;)I") {
-        const std::string text = stringArg(ctx, args, 1);
-        return handledValue(Value::ofInt(stringWidthChars(utf8CharCount(text))));
-    }
-    if (ref.name == "substringWidth" && ref.descriptor == "(Ljava/lang/String;II)I") {
-        const int length = intArg(args, 3);
-        return handledValue(Value::ofInt(stringWidthChars(length)));
-    }
-
     return NativeCallResult{};
 }
 

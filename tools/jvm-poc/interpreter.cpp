@@ -1575,6 +1575,7 @@ std::optional<Value> resumeCurrentMethod(
             rt.graphicsHeight,
             rt.graphicsColorRgb,
             {},
+            {},
             [&](std::string when) {
                 collectGarbage(rt, std::move(when));
             },
