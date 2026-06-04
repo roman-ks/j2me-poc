@@ -29,7 +29,7 @@ NativeCallResult handleNativeStaticCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args) {
 
     if (ref.className == "javax/microedition/lcdui/Display") {
@@ -63,22 +63,11 @@ NativeCallResult handleNativeStaticCall(
     return NativeCallResult{};
 }
 
-NativeHandler resolveNativeStaticHandler(const std::string& className) {
-    if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
-    if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
-    if (className == "javax/microedition/lcdui/Font")    return &native_methods::handleFont;
-    if (className == "java/lang/System")                 return &native_methods::handleSystem;
-    if (className == "java/lang/Thread")                 return &native_methods::handleThread;
-    if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
-    if (className == "dev/roman/hello/NativeRuntime")    return &native_methods::handleNativeRuntime;
-    return nullptr;
-}
-
 NativeCallResult handleNativeInstanceCall(
     NativeCallContext& ctx,
     const std::string& methodLabel,
     uint32_t pc,
-    const MethodRef& ref,
+    const MethodRefView& ref,
     const std::vector<Value>& args) {
     // Record function-entry time for disp_call measurement.
 #if JVM_ENABLE_NATIVE_PROFILING
@@ -140,6 +129,85 @@ NativeCallResult handleNativeInstanceCall(
     // }
 
     return NativeCallResult{};
+}
+
+// Per-call-site leaf resolution. Routes to per-class leaf tables; returns
+// nullptr when no leaf is registered (caller tags the site kSlowCascade so
+// the existing handleNativeXCall string-cascade runs instead).
+NativeLeafFn resolveStaticLeaf(const std::string& className,
+                               const std::string& methodName,
+                               const std::string& descriptor) {
+    if (className == "javax/microedition/lcdui/Image") {
+        return native_methods::lookupImageStaticLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Display") {
+        return native_methods::lookupDisplayStaticLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Font") {
+        return native_methods::lookupFontStaticLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/rms/RecordStore") {
+        return native_methods::lookupRecordStoreStaticLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/System") {
+        return native_methods::lookupSystemStaticLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/Thread") {
+        return native_methods::lookupThreadStaticLeaf(methodName, descriptor);
+    }
+    if (className == "dev/roman/hello/NativeRuntime") {
+        return native_methods::lookupNativeRuntimeStaticLeaf(methodName, descriptor);
+    }
+    return nullptr;
+}
+
+NativeLeafFn resolveInstanceLeaf(const std::string& className,
+                                 const std::string& methodName,
+                                 const std::string& descriptor) {
+    if (className == "javax/microedition/lcdui/Graphics") {
+        return native_methods::lookupGraphicsInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Display") {
+        return native_methods::lookupDisplayInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Font") {
+        return native_methods::lookupFontInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/String") {
+        return native_methods::lookupStringInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/lcdui/Canvas" ||
+        className == "javax/microedition/lcdui/game/GameCanvas") {
+        return native_methods::lookupCanvasInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/rms/RecordStore") {
+        return native_methods::lookupRecordStoreInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/midlet/MIDlet") {
+        return native_methods::lookupMidletInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "javax/microedition/media/Player") {
+        return native_methods::lookupPlayerInstanceLeaf(methodName, descriptor);
+    }
+    if (className == "java/lang/Thread") {
+        return native_methods::lookupThreadInstanceLeaf(methodName, descriptor);
+    }
+    return nullptr;
+}
+
+// Per-class thick-handler resolvers used by the callCache fast path.
+// These map (className -> handleX) so the callCache stores a single function
+// pointer per (cls*, cpIdx) instead of running the string-compare cascade in
+// handleNativeStaticCall / handleNativeInstanceCall on every call.
+NativeHandler resolveNativeStaticHandler(const std::string& className) {
+    if (className == "javax/microedition/lcdui/Display") return &native_methods::handleDisplay;
+    if (className == "javax/microedition/lcdui/Image")   return &native_methods::handleImage;
+    if (className == "javax/microedition/lcdui/Font")    return &native_methods::handleFont;
+    if (className == "java/lang/System")                 return &native_methods::handleSystem;
+    if (className == "java/lang/Thread")                 return &native_methods::handleThread;
+    if (className == "javax/microedition/rms/RecordStore") return &native_methods::handleRecordStore;
+    if (className == "dev/roman/hello/NativeRuntime")    return &native_methods::handleNativeRuntime;
+    return nullptr;
 }
 
 NativeHandler resolveNativeInstanceHandler(const std::string& className) {
