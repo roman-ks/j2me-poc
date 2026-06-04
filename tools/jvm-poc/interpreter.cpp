@@ -213,17 +213,28 @@ struct ResolvedCallEntry {
     const ClassFile* runtimeClassPtr = nullptr; // hot compare: pointer equality instead of string compare
     const ClassFile* targetClass;
     const MethodInfo* method;
-    // Option N(v1): resolved class-level native handler. Bypasses the
-    // string-compare cascade in handleNativeStaticCall/handleNativeInstanceCall.
-    // Set only for native calls whose className maps cleanly to a single
-    // handler; nullptr otherwise (slow cascade still runs).
+    // Per-class thick handler resolved by resolveNativeXHandler(className).
+    // Bypasses the string-compare cascade in handleNativeStaticCall /
+    // handleNativeInstanceCall by jumping straight into handleX. Set only
+    // when className maps cleanly to a single handler.
+    //
+    // Why this is kept alongside nativeFn: removing it regressed max frame
+    // by ~3ms on ESP32. The leaf tables in native_methods/<class>.cpp do not
+    // cover every native method — Image instance methods (getWidth/getHeight/
+    // getGraphics) have no leaf entry and are dispatched inside handleImage,
+    // and several classes route via *receiver-type* cascade rather than
+    // className (e.g. Image-on-Object, String-on-Object). For those calls
+    // nativeFn is nullptr and we still need a cheap path that skips the
+    // ~10-branch className cascade — that path is nativeHandler. Attempting
+    // to plug the gap by adding the missing Image leaves regressed perf
+    // further (~+4ms avg / +11ms max, cause not isolated). Leave as-is.
     NativeHandler nativeHandler = nullptr;
     // Per-method leaf function (resolveStaticLeaf / resolveInstanceLeaf).
-    // When non-null, the dispatch fast path calls this directly and skips
-    // the thick handler entirely — no method-name routing chain inside
-    // handleX, no MethodRefView construction. Null means no leaf is
-    // registered for this (className, name, descriptor); dispatch falls
-    // back to nativeHandler (or the slow cascade for receiver-type cases).
+    // When non-null, dispatch calls this directly and skips both nativeHandler
+    // and the slow cascade — no method-name routing inside handleX, no
+    // MethodRefView construction. Null means no leaf is registered for this
+    // (className, name, descriptor); dispatch falls back to nativeHandler,
+    // and if that is also null, to the slow cascade (receiver-type cases).
     NativeLeafFn nativeFn = nullptr;
 };
 
