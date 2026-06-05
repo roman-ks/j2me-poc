@@ -282,9 +282,12 @@ int64_t resolveLongConstant(const ClassFile& cls, uint16_t index) {
 // (parseClassFile here AND the ESP32 in-memory parser).
 void populateMethodInfoCaches(ClassFile& cls) {
     for (MethodInfo& m : cls.methods) {
+        m.label.clear();
+        m.argSlotWidths.clear();
+
         m.label.reserve(cls.thisClass.size() + 1 + m.name.size() + m.descriptor.size());
         m.label.append(cls.thisClass);
-        m.label.append(1, '.');
+        m.label.push_back('.');
         m.label.append(m.name);
         m.label.append(m.descriptor);
         size_t pos = 0;
