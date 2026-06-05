@@ -1422,14 +1422,13 @@ void initializeFrameArgs(RuntimeFrame& runtimeFrame, std::vector<Value>& args) {
         frame.setLocal(0, std::move(args[0]));
         argIndex = 1;
     }
-    // Reverted: caching argSlotWidths on MethodInfo broke string-concat on
-    // ESP32 (game2 saw "/game2/0" instead of "/game2/<N>.dat" from
-    // StringBuffer-chain ops). Not reproducible on Linux; cache content
-    // appears identical to argumentSlotWidths() output for every descriptor
-    // shape I tested. Suspect interaction with ESP32 memory layout or some
-    // load-time state I'm missing. Keeping method.argSlotWidths populated so
-    // future investigation can read both, but back on the runtime parse.
-    std::vector<size_t> widths = argumentSlotWidths(method.descriptor);
+    // Use widths cached on MethodInfo by populateMethodInfoCaches at class
+    // load. Replaces the old per-call argumentSlotWidths() that heap-
+    // allocated a vector and re-parsed the descriptor every invocation
+    // (~5ms/frame on hot interpreters per performance-findings.md item F).
+    // BOTH the Linux parseClassFile and the ESP32 parseClassBytes parser
+    // must run the post-pass — see class_file.cpp/esp_extracted_midlet.cpp.
+    const std::vector<uint8_t>& widths = method.argSlotWidths;
     for (size_t i = 0; i < widths.size() && argIndex < args.size() && localIndex < method.maxLocals; ++i) {
         frame.setLocal(static_cast<uint16_t>(localIndex), std::move(args[argIndex]));
         localIndex += widths[i];

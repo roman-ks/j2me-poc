@@ -114,4 +114,11 @@ int64_t resolveLongConstant(const ClassFile& cls, uint16_t index);
 
 ClassFile parseClassFile(const std::string& path);
 
+// Populates MethodInfo::label and MethodInfo::argSlotWidths for every method
+// on cls. Must be called once at class-load time (after methods are parsed
+// but before the class is used). Both parseClassFile() and the ESP32
+// in-memory parser must call this — otherwise pushJavaFrame and
+// initializeFrameArgs see empty caches and behave incorrectly.
+void populateMethodInfoCaches(ClassFile& cls);
+
 } // namespace jvmpoc

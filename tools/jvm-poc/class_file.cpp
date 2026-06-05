@@ -275,6 +275,28 @@ int64_t resolveLongConstant(const ClassFile& cls, uint16_t index) {
     return cls.cp[index].longValue;
 }
 
+// Pre-compute MethodInfo::label and argSlotWidths so pushJavaFrame and
+// initializeFrameArgs don't recompute them on every call. Class-load cost
+// is one-time; saves ~10-25ms/frame on hot interpreters per
+// performance-findings.md item F. Must be called by every class parser
+// (parseClassFile here AND the ESP32 in-memory parser).
+void populateMethodInfoCaches(ClassFile& cls) {
+    for (MethodInfo& m : cls.methods) {
+        m.label.reserve(cls.thisClass.size() + 1 + m.name.size() + m.descriptor.size());
+        m.label.append(cls.thisClass);
+        m.label.append(1, '.');
+        m.label.append(m.name);
+        m.label.append(m.descriptor);
+        size_t pos = 0;
+        if (!m.descriptor.empty() && m.descriptor[pos] == '(') {
+            ++pos;
+            while (pos < m.descriptor.size() && m.descriptor[pos] != ')') {
+                m.argSlotWidths.push_back(static_cast<uint8_t>(typeSlotsAt(m.descriptor, pos)));
+            }
+        }
+    }
+}
+
 ClassFile parseClassFile(const std::string& path) {
     Reader r(readFile(path));
     if (r.u4() != 0xCAFEBABE) {
@@ -358,24 +380,7 @@ ClassFile parseClassFile(const std::string& path) {
         cls.methods.push_back(readMethod(r, cls.cp));
     }
 
-    // Pre-compute MethodInfo::label and argSlotWidths so pushJavaFrame and
-    // initializeFrameArgs don't recompute them on every call. Class-load cost
-    // is one-time; saves ~10-25ms/frame on hot interpreters per
-    // performance-findings.md item F.
-    for (MethodInfo& m : cls.methods) {
-        m.label.reserve(cls.thisClass.size() + 1 + m.name.size() + m.descriptor.size());
-        m.label.append(cls.thisClass);
-        m.label.append(1, '.');
-        m.label.append(m.name);
-        m.label.append(m.descriptor);
-        size_t pos = 0;
-        if (!m.descriptor.empty() && m.descriptor[pos] == '(') {
-            ++pos;
-            while (pos < m.descriptor.size() && m.descriptor[pos] != ')') {
-                m.argSlotWidths.push_back(static_cast<uint8_t>(typeSlotsAt(m.descriptor, pos)));
-            }
-        }
-    }
+    populateMethodInfoCaches(cls);
 
     uint16_t attrCount = r.u2();
     for (uint16_t i = 0; i < attrCount; ++i) {
