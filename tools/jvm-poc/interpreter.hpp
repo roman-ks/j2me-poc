@@ -146,6 +146,30 @@ struct FrameProfile {
     uint32_t paintUs = 0;
     uint32_t suspendedTraceUs = 0;
     uint32_t steps = 0;
+    // Per-frame opcode histogram. Indexed by raw bytecode op (0x00-0xff).
+    // Incremented once per dispatched bytecode in the interpreter loop.
+    // Diagnostic — adds ~5ns/step overhead. Reset to zero each frame via
+    // resetRuntimeTrace() (default-constructs ExecutionTrace).
+    uint32_t opcodeCounts[256] = {};
+    // Per-opcode cumulative CPU cycles (CCOUNT delta around each handler).
+    // Always populated on ESP32; zero on Linux. Divide by CPU MHz to get µs.
+    // Compare with opcodeCounts[op] to find opcodes that cost dramatically
+    // more cycles on slow frames vs fast frames — points at the data
+    // structure causing PSRAM cache misses.
+    uint32_t opcodeCycles[256] = {};
+    // CPU cycles spent inside pushJavaFrame across the frame. Accumulated by
+    // an OpCycleGuard at the top of pushJavaFrame body. Divide by CPU MHz
+    // for µs. If this dominates 0xb7 / 0xb6 totals, frame-push overhead is
+    // the bottleneck (arg copy, callStack push, locals init, etc.).
+    uint32_t pushFrameCycles = 0;
+    // CPU cycles elapsed inside renderSession. On ESP32 captured via the
+    // Xtensa CCOUNT special register (RSR.CCOUNT). Divide by CPU MHz (240 on
+    // ESP32-S3 default) to get CPU-µs. Compare against renderSessionUs (wall
+    // µs) to detect preemption: if cpuUs ≪ wallUs the loopTask was suspended
+    // mid-frame. CCOUNT is 32-bit and wraps every ~17.9s at 240MHz; uint32_t
+    // subtraction handles wraparound naturally for sub-second frames.
+    // Always zero on the Linux host build.
+    uint32_t cpuCycles = 0;
     uint16_t inputEvents = 0;
     uint16_t taskRuns = 0;
     uint16_t taskSkippedSleeping = 0;

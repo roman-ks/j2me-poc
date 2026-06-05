@@ -63,6 +63,35 @@ inline uint32_t nowUs() {
 #endif
 }
 
+// Xtensa CCOUNT cycle counter, sampled via inline asm to avoid IDF-version
+// header churn (xtensa/hal.h vs esp_cpu.h). Always returns 0 on host builds —
+// caller subtracts and compares against wall-clock nowUs() to detect
+// preemption. See FrameProfile::cpuCycles for usage.
+inline uint32_t cpuCycles() {
+#ifdef ESP32_BUILD
+    uint32_t ccount;
+    __asm__ __volatile__("rsr.ccount %0" : "=a"(ccount));
+    return ccount;
+#else
+    return 0;
+#endif
+}
+
+// RAII wrapper that accumulates CCOUNT delta into a counter on destruction.
+// Used for opcodeCycles[op] (dispatch loop) and pushFrameCycles
+// (pushJavaFrame). Destructor fires on every exit including stack unwinding,
+// so `return` / `throw` paths get counted accurately.
+//
+// Pass counter=nullptr to disable — caller is expected to gate on
+// host->profileFrameTimings at the construction site. Disabled cost: one
+// pointer-null compare in the destructor; cpuCycles() is NOT called.
+// Enabled cost is identical to a manual "capture + add after" pattern.
+struct OpCycleGuard {
+    uint32_t* counter;
+    uint32_t startCycles;
+    ~OpCycleGuard() { if (counter) *counter += cpuCycles() - startCycles; }
+};
+
 std::string compareText(const Value& lhs, const char* op, const Value& rhs) {
     return lhs.asText() + " " + op + " " + rhs.asText();
 }
@@ -252,7 +281,13 @@ using ImageHeap = std::unordered_map<uint32_t, port::Image>;
 using ResourceImageCache = std::map<std::string, uint32_t>;
 
 struct RuntimeFrame {
-    std::string label;
+    // Pointer into MethodInfo::label (computed once at class load by
+    // populateMethodInfoCaches). ClassFile/MethodInfo lifetime is the whole
+    // JVM session and pointers are stable across vector moves, so this is
+    // safe for both rt.callStack and ThreadTask::suspendedFrames storage.
+    // nullptr is allowed for default-constructed frames; pushJavaFrame
+    // always sets it.
+    const std::string* label = nullptr;
     const ClassFile* cls = nullptr;
     const MethodInfo* method = nullptr;
     size_t pc = 0;
@@ -549,7 +584,7 @@ namespace {
 void captureStackSnapshot(ExecutionTrace& trace, const std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>>& callStack) {
     trace.stackSnapshot.clear();
     for (auto it = callStack.rbegin(); it != callStack.rend(); ++it) {
-        trace.stackSnapshot.push_back(it->label + " pc=" + std::to_string(it->pc));
+        trace.stackSnapshot.push_back(*it->label + " pc=" + std::to_string(it->pc));
     }
 }
 
@@ -565,7 +600,7 @@ void captureSuspendedTasks(ExecutionTrace& trace, const MidletSession& session) 
         state += " wake=" + std::to_string(task.wakeAtMillis);
         if (!task.suspendedFrames.empty()) {
             const RuntimeFrame& top = task.suspendedFrames.back();
-            state += " suspended=" + top.label + " pc=" + std::to_string(top.pc);
+            state += " suspended=" + *top.label + " pc=" + std::to_string(top.pc);
         }
         trace.suspendedTasks.push_back(std::move(state));
     }
@@ -1213,13 +1248,13 @@ void collectGarbage(Runtime& rt, std::string when) {
         const Value* locals = runtimeFrame.frame.localsData();
         const size_t localsSize = runtimeFrame.frame.localsSize();
         for (size_t i = 0; i < localsSize; ++i) {
-            addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
+            addRoot(report, *runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
         }
 
         const Value* stack = runtimeFrame.frame.stackData();
         const size_t stackSize = runtimeFrame.frame.stackSize();
         for (size_t i = 0; i < stackSize; ++i) {
-            addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+            addRoot(report, *runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
     }
     if (rt.session != nullptr) {
@@ -1235,10 +1270,10 @@ void collectGarbage(Runtime& rt, std::string when) {
                 const size_t total = slots.size();
                 const size_t suspendedLocals = std::min(localsSize, total);
                 for (size_t i = 0; i < suspendedLocals; ++i) {
-                    addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", slots[i], rt, markedObjects, markedArrays);
+                    addRoot(report, *runtimeFrame.label + " local[" + std::to_string(i) + "]", slots[i], rt, markedObjects, markedArrays);
                 }
                 for (size_t i = suspendedLocals; i < total; ++i) {
-                    addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i - suspendedLocals) + "]", slots[i], rt, markedObjects, markedArrays);
+                    addRoot(report, *runtimeFrame.label + " stack[" + std::to_string(i - suspendedLocals) + "]", slots[i], rt, markedObjects, markedArrays);
                 }
             }
         }
@@ -1395,7 +1430,13 @@ void initializeFrameArgs(RuntimeFrame& runtimeFrame, std::vector<Value>& args) {
         frame.setLocal(0, std::move(args[0]));
         argIndex = 1;
     }
-    std::vector<size_t> widths = argumentSlotWidths(method.descriptor);
+    // Use widths cached on MethodInfo by populateMethodInfoCaches at class
+    // load. Replaces the old per-call argumentSlotWidths() that heap-
+    // allocated a vector and re-parsed the descriptor every invocation
+    // (~5ms/frame on hot interpreters per performance-findings.md item F).
+    // BOTH the Linux parseClassFile and the ESP32 parseClassBytes parser
+    // must run the post-pass — see class_file.cpp/esp_extracted_midlet.cpp.
+    const std::vector<uint8_t>& widths = method.argSlotWidths;
     for (size_t i = 0; i < widths.size() && argIndex < args.size() && localIndex < method.maxLocals; ++i) {
         frame.setLocal(static_cast<uint16_t>(localIndex), std::move(args[argIndex]));
         localIndex += widths[i];
@@ -1429,6 +1470,13 @@ bool pushJavaFrame(
     const ClassFile& cls,
     const MethodInfo& method,
     std::vector<Value>& args) {
+    // Gated on host->profileFrameTimings — disabled path costs one branch +
+    // one null compare in the destructor. RAII so every return/throw exit
+    // path from this function gets accumulated.
+    const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
+    OpCycleGuard pushFrameGuard{
+        profileFrame ? &rt.trace.frameProfile.pushFrameCycles : nullptr,
+        profileFrame ? cpuCycles() : 0u};
     if (rt.callStack.size() >= kMaxCallDepth) {
         Value soe = allocateObject(rt, classes, "<push>", 0, "java/lang/StackOverflowError");
         setPendingException(rt, std::move(soe), "", 0);
@@ -1444,9 +1492,11 @@ bool pushJavaFrame(
         setPendingException(rt, std::move(soe), "", 0);
         return false;
     }
-    std::string label = rt.trace.recording ? methodLabel(cls, method) : std::string{};
+    // Point at the label cached on MethodInfo — no copy, no heap alloc per
+    // push. Was a per-call string copy (~1ms/frame) before this refactor.
+    // method outlives any RuntimeFrame that references it.
     RuntimeFrame frame{
-        std::move(label), &cls, &method, 0, SIZE_MAX,
+        &method.label, &cls, &method, 0, SIZE_MAX,
         Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
         {}};
     initializeFrameArgs(frame, args);
@@ -1464,7 +1514,7 @@ std::optional<Value> resumeCurrentMethod(
     RuntimeFrame& runtimeFrame = rt.callStack.back();
     const ClassFile& cls = *runtimeFrame.cls;
     const MethodInfo& method = *runtimeFrame.method;
-    const std::string& label = runtimeFrame.label;
+    const std::string& label = *runtimeFrame.label;
     Frame& frame = runtimeFrame.frame;
     size_t pc = runtimeFrame.pc;
 
@@ -1664,6 +1714,12 @@ std::optional<Value> resumeCurrentMethod(
         // was updated, rt.pendingException cleared. Fall through to bytecode loop.
     }
 
+    // Captured once for the whole call — branch predictor learns it cleanly
+    // so the per-bytecode opcode/cycle accumulator gate is cheap. Re-reading
+    // rt.host->profileFrameTimings every step would be a dependent load
+    // through 3 indirections that hurts the hot path.
+    const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
+
     while (pc < codeSize) {
         // Batched step-limit check: increment every step, but only consult
         // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
@@ -1687,6 +1743,13 @@ std::optional<Value> resumeCurrentMethod(
 #endif
 
         uint8_t op = code[pc];
+        // Counter + RAII guard both gated on profileFrame. Disabled cost:
+        // one branch + a null-store pair in the guard's struct + one null
+        // check in the destructor; no cpuCycles() call.
+        if (profileFrame) ++rt.trace.frameProfile.opcodeCounts[op];
+        OpCycleGuard cycleGuard{
+            profileFrame ? &rt.trace.frameProfile.opcodeCycles[op] : nullptr,
+            profileFrame ? cpuCycles() : 0u};
         switch (op) {
             case 0x01: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // aconst_null
             case 0x02: { const uint32_t t0=statNow(); frame.push(Value::ofInt(-1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // iconst_m1
@@ -3075,6 +3138,9 @@ std::optional<Value> resumeCurrentMethod(
                 break;
             }
         }
+        // cycleGuard destructs here on `break`, and on every `return`/`throw`
+        // inside the switch above. opcodeCycles[op] is accumulated by the
+        // destructor — no manual call needed.
     }
 
     LOGF_W("resumeCurrentMethod: %s.%s%s - completed", cls.thisClass.c_str(), method.name.c_str(), method.descriptor.c_str());
@@ -3295,6 +3361,9 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     Runtime& rt = session.runtime();
     const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
     const uint32_t profileStartUs = profileFrame ? nowUs() : 0;
+    // CCOUNT bracket for cpu vs wall comparison (preemption detection).
+    // Gated on profileFrame; one cycle when on, zero when off.
+    const uint32_t profileStartCycles = profileFrame ? cpuCycles() : 0u;
     resetRuntimeTrace(rt);
     const bool captureTraceDetails = rt.trace.recording || profileFrame;
     ScopedResourceReadTrace resourceReadTrace(rt.trace);
@@ -3304,6 +3373,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     rt.mainFbCanvas.emplace(width, height, pixels);
     auto finishProfile = [&]() -> ExecutionTrace {
         if (profileFrame && rt.host != nullptr) {
+            rt.trace.frameProfile.cpuCycles = cpuCycles() - profileStartCycles;
             rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
             rt.trace.frameProfile.steps = static_cast<uint32_t>(rt.steps);
             captureTaskMethodProfiles(rt);

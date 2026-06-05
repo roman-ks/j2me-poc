@@ -66,6 +66,13 @@ struct MethodInfo {
     std::vector<uint8_t> code;
     std::vector<ExceptionHandler> exceptionHandlers;
     std::vector<LocalVariable> locals;
+    // Pre-computed caches populated at class load (parseClassFile post-pass)
+    // to avoid recomputation on every method invocation. label is
+    // "ClassName.name(descriptor)" — used by trace records and exception
+    // reporting. argSlotWidths is the per-argument slot count (1 for int/ref,
+    // 2 for long/double) parsed once from descriptor.
+    std::string label;
+    std::vector<uint8_t> argSlotWidths;
 };
 
 struct ClassFile {
@@ -106,5 +113,12 @@ int32_t resolveIntegerConstant(const ClassFile& cls, uint16_t index);
 int64_t resolveLongConstant(const ClassFile& cls, uint16_t index);
 
 ClassFile parseClassFile(const std::string& path);
+
+// Populates MethodInfo::label and MethodInfo::argSlotWidths for every method
+// on cls. Must be called once at class-load time (after methods are parsed
+// but before the class is used). Both parseClassFile() and the ESP32
+// in-memory parser must call this — otherwise pushJavaFrame and
+// initializeFrameArgs see empty caches and behave incorrectly.
+void populateMethodInfoCaches(ClassFile& cls);
 
 } // namespace jvmpoc
