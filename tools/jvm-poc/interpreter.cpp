@@ -279,7 +279,13 @@ using ImageHeap = std::unordered_map<uint32_t, port::Image>;
 using ResourceImageCache = std::map<std::string, uint32_t>;
 
 struct RuntimeFrame {
-    std::string label;
+    // Pointer into MethodInfo::label (computed once at class load by
+    // populateMethodInfoCaches). ClassFile/MethodInfo lifetime is the whole
+    // JVM session and pointers are stable across vector moves, so this is
+    // safe for both rt.callStack and ThreadTask::suspendedFrames storage.
+    // nullptr is allowed for default-constructed frames; pushJavaFrame
+    // always sets it.
+    const std::string* label = nullptr;
     const ClassFile* cls = nullptr;
     const MethodInfo* method = nullptr;
     size_t pc = 0;
@@ -576,7 +582,7 @@ namespace {
 void captureStackSnapshot(ExecutionTrace& trace, const std::vector<RuntimeFrame, SramAllocator<RuntimeFrame>>& callStack) {
     trace.stackSnapshot.clear();
     for (auto it = callStack.rbegin(); it != callStack.rend(); ++it) {
-        trace.stackSnapshot.push_back(it->label + " pc=" + std::to_string(it->pc));
+        trace.stackSnapshot.push_back(*it->label + " pc=" + std::to_string(it->pc));
     }
 }
 
@@ -592,7 +598,7 @@ void captureSuspendedTasks(ExecutionTrace& trace, const MidletSession& session) 
         state += " wake=" + std::to_string(task.wakeAtMillis);
         if (!task.suspendedFrames.empty()) {
             const RuntimeFrame& top = task.suspendedFrames.back();
-            state += " suspended=" + top.label + " pc=" + std::to_string(top.pc);
+            state += " suspended=" + *top.label + " pc=" + std::to_string(top.pc);
         }
         trace.suspendedTasks.push_back(std::move(state));
     }
@@ -1240,13 +1246,13 @@ void collectGarbage(Runtime& rt, std::string when) {
         const Value* locals = runtimeFrame.frame.localsData();
         const size_t localsSize = runtimeFrame.frame.localsSize();
         for (size_t i = 0; i < localsSize; ++i) {
-            addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
+            addRoot(report, *runtimeFrame.label + " local[" + std::to_string(i) + "]", locals[i], rt, markedObjects, markedArrays);
         }
 
         const Value* stack = runtimeFrame.frame.stackData();
         const size_t stackSize = runtimeFrame.frame.stackSize();
         for (size_t i = 0; i < stackSize; ++i) {
-            addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
+            addRoot(report, *runtimeFrame.label + " stack[" + std::to_string(i) + "]", stack[i], rt, markedObjects, markedArrays);
         }
     }
     if (rt.session != nullptr) {
@@ -1262,10 +1268,10 @@ void collectGarbage(Runtime& rt, std::string when) {
                 const size_t total = slots.size();
                 const size_t suspendedLocals = std::min(localsSize, total);
                 for (size_t i = 0; i < suspendedLocals; ++i) {
-                    addRoot(report, runtimeFrame.label + " local[" + std::to_string(i) + "]", slots[i], rt, markedObjects, markedArrays);
+                    addRoot(report, *runtimeFrame.label + " local[" + std::to_string(i) + "]", slots[i], rt, markedObjects, markedArrays);
                 }
                 for (size_t i = suspendedLocals; i < total; ++i) {
-                    addRoot(report, runtimeFrame.label + " stack[" + std::to_string(i - suspendedLocals) + "]", slots[i], rt, markedObjects, markedArrays);
+                    addRoot(report, *runtimeFrame.label + " stack[" + std::to_string(i - suspendedLocals) + "]", slots[i], rt, markedObjects, markedArrays);
                 }
             }
         }
@@ -1480,13 +1486,11 @@ bool pushJavaFrame(
         setPendingException(rt, std::move(soe), "", 0);
         return false;
     }
-    // Use cached method.label (computed at class load) instead of constructing
-    // a new "Cls.name(desc)" string per call. Heap-alloc cost was ~10-15ms/frame
-    // in pushJavaFrame for hot interpreters. Empty string when not recording
-    // matches old behavior.
-    std::string label = rt.trace.recording ? method.label : std::string{};
+    // Point at the label cached on MethodInfo — no copy, no heap alloc per
+    // push. Was a per-call string copy (~1ms/frame) before this refactor.
+    // method outlives any RuntimeFrame that references it.
     RuntimeFrame frame{
-        std::move(label), &cls, &method, 0, SIZE_MAX,
+        &method.label, &cls, &method, 0, SIZE_MAX,
         Frame(slabBase, arenaEnd, method.maxLocals, method.maxStack),
         {}};
     initializeFrameArgs(frame, args);
@@ -1504,7 +1508,7 @@ std::optional<Value> resumeCurrentMethod(
     RuntimeFrame& runtimeFrame = rt.callStack.back();
     const ClassFile& cls = *runtimeFrame.cls;
     const MethodInfo& method = *runtimeFrame.method;
-    const std::string& label = runtimeFrame.label;
+    const std::string& label = *runtimeFrame.label;
     Frame& frame = runtimeFrame.frame;
     size_t pc = runtimeFrame.pc;
 
