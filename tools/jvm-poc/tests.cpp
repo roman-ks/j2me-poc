@@ -26,6 +26,11 @@ struct TestCase {
     std::vector<std::pair<size_t, uint16_t>> expectedPixels = {};
     std::vector<std::string> expectedUncaughtExceptions = {};
     std::vector<std::string> expectedThreadDeaths = {};
+    // Default: midlet tests expect render() to present a frame. Set false
+    // for midlets that don't set a displayable (e.g. a task throws before
+    // any UI is shown) — render returns early without calling host.present
+    // and the present-count check would otherwise fail.
+    bool expectsPresent = true;
 };
 
 class TestHost final : public jvmpoc::JvmHost {
@@ -72,10 +77,20 @@ const jvmpoc::MethodInfo* findMain(const jvmpoc::ClassFile& cls) {
     return nullptr;
 }
 
+// asText() prefixes kLong/kStr with "long#"/"str#" so debug traces can
+// distinguish them from kInt/handles. Game stdout and trace records that
+// echo user-facing values want the plain rendering instead.
+std::string displayText(const jvmpoc::Value& value) {
+    std::string s = value.asText();
+    if (s.rfind("long#", 0) == 0) s.erase(0, 5);
+    else if (s.rfind("str#", 0) == 0) s.erase(0, 4);
+    return s;
+}
+
 std::vector<std::string> stdoutValues(const jvmpoc::ExecutionTrace& trace) {
     std::vector<std::string> values;
     for (const jvmpoc::RuntimePrint& print : trace.runtimePrints) {
-        values.push_back(print.value.asText());
+        values.push_back(displayText(print.value));
     }
     return values;
 }
@@ -91,7 +106,7 @@ std::vector<std::string> unknownCalls(const jvmpoc::ExecutionTrace& trace) {
 std::vector<std::string> displayCurrents(const jvmpoc::ExecutionTrace& trace) {
     std::vector<std::string> currents;
     for (const jvmpoc::DisplaySetCurrent& setCurrent : trace.displaySetCurrents) {
-        currents.push_back(setCurrent.display.asText() + ".setCurrent(" + setCurrent.displayable.asText() + ")");
+        currents.push_back(displayText(setCurrent.display) + ".setCurrent(" + displayText(setCurrent.displayable) + ")");
     }
     return currents;
 }
@@ -133,7 +148,7 @@ std::vector<std::string> appendAll(
 std::vector<std::string> valueTexts(const std::vector<jvmpoc::Value>& values) {
     std::vector<std::string> texts;
     for (const jvmpoc::Value& value : values) {
-        texts.push_back(value.asText());
+        texts.push_back(displayText(value));
     }
     return texts;
 }
@@ -224,13 +239,14 @@ bool runCase(const std::string& root, const TestCase& test) {
             host.handleRelease(-3);
             releaseTrace = app.render();
         }
-        const int expectedPresentCount = inputMidletTest ? 3 : 1;
-        if (host.presentCount != expectedPresentCount || host.lastPresentWidth != host.screenWidth() ||
-            host.lastPresentHeight != host.screenHeight()) {
+        const int expectedPresentCount = !test.expectsPresent ? 0 : (inputMidletTest ? 3 : 1);
+        if (host.presentCount != expectedPresentCount ||
+            (expectedPresentCount > 0 && (host.lastPresentWidth != host.screenWidth() ||
+                                           host.lastPresentHeight != host.screenHeight()))) {
             std::cout << "FAIL " << test.name << ": render did not present expected frame\n";
             return false;
         }
-        if (!inputMidletTest && !explicitPixelTest && (host.lastPixels.empty() || host.lastPixels[0] != 0xffff)) {
+        if (test.expectsPresent && !inputMidletTest && !explicitPixelTest && (host.lastPixels.empty() || host.lastPixels[0] != 0xffff)) {
             std::cout << "FAIL " << test.name << ": render did not fill white background\n";
             return false;
         }
@@ -238,7 +254,7 @@ bool runCase(const std::string& root, const TestCase& test) {
         for (uint16_t pixel : host.lastPixels) {
             hasBlackPixel = hasBlackPixel || pixel == 0x0000;
         }
-        if (!inputMidletTest && !explicitPixelTest && !hasBlackPixel) {
+        if (test.expectsPresent && !inputMidletTest && !explicitPixelTest && !hasBlackPixel) {
             std::cout << "FAIL " << test.name << ": render did not draw black foreground pixels\n";
             return false;
         }
@@ -644,9 +660,10 @@ int main(int argc, char** argv) {
             {},
             {},
             true,
-            {{0, 0x39e7}},
+            {},  // no expected pixels — no displayable means no present, framebuffer is unobservable
             {"dev/roman/hello/ExceptionThreadTask.run()V:java/lang/RuntimeException"},
             {"dev/roman/hello/ExceptionThreadTask.run()V:java/lang/RuntimeException"},
+            false,  // expectsPresent: no displayable set → no host.present call
         },
         TestCase{
             "long arithmetic",
@@ -757,7 +774,7 @@ int main(int argc, char** argv) {
             "string null indexOf",
             "dev/roman/hello/StringNullIndexOf",
             {"dev/roman/hello/StringNullIndexOf"},
-            {"long#-1"},
+            {"-1"},
             {},
             {},
             {},
@@ -769,7 +786,7 @@ int main(int argc, char** argv) {
             "ByteArrayInputStream read",
             "dev/roman/hello/ByteArrayInputStreamTest",
             {"dev/roman/hello/ByteArrayInputStreamTest"},
-            {"long#10", "long#20", "long#200", "long#255", "long#-1", "long#-1"},
+            {"10", "20", "200", "255", "-1", "-1"},
             {}, {}, {}, {}, {}, {},
         },
         TestCase{

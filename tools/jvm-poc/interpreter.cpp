@@ -77,17 +77,19 @@ inline uint32_t cpuCycles() {
 #endif
 }
 
-// RAII wrapper that accumulates CCOUNT delta into opcodeCycles[op] for the
-// dispatch loop. Replaces a manual "capture at start + add after switch"
-// because the switch contains many `return` and `throw` paths (invokevirtual
-// to Java, exception unwind, yield) that bypass the after-switch accumulator.
-// Destructor fires on every exit including stack unwinding, so all paths are
-// counted accurately. Cost on the common break path is identical to the
-// manual pattern (one cpuCycles() call + subtract + add to memory location).
+// RAII wrapper that accumulates CCOUNT delta into a counter on destruction.
+// Used for opcodeCycles[op] (dispatch loop) and pushFrameCycles
+// (pushJavaFrame). Destructor fires on every exit including stack unwinding,
+// so `return` / `throw` paths get counted accurately.
+//
+// Pass counter=nullptr to disable — caller is expected to gate on
+// host->profileFrameTimings at the construction site. Disabled cost: one
+// pointer-null compare in the destructor; cpuCycles() is NOT called.
+// Enabled cost is identical to a manual "capture + add after" pattern.
 struct OpCycleGuard {
     uint32_t* counter;
     uint32_t startCycles;
-    ~OpCycleGuard() { *counter += cpuCycles() - startCycles; }
+    ~OpCycleGuard() { if (counter) *counter += cpuCycles() - startCycles; }
 };
 
 std::string compareText(const Value& lhs, const char* op, const Value& rhs) {
@@ -1468,9 +1470,13 @@ bool pushJavaFrame(
     const ClassFile& cls,
     const MethodInfo& method,
     std::vector<Value>& args) {
-    // Accumulate cycles via the same RAII pattern used by the per-opcode
-    // counters. Captures all return/throw exit paths from this function.
-    OpCycleGuard pushFrameGuard{&rt.trace.frameProfile.pushFrameCycles, cpuCycles()};
+    // Gated on host->profileFrameTimings — disabled path costs one branch +
+    // one null compare in the destructor. RAII so every return/throw exit
+    // path from this function gets accumulated.
+    const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
+    OpCycleGuard pushFrameGuard{
+        profileFrame ? &rt.trace.frameProfile.pushFrameCycles : nullptr,
+        profileFrame ? cpuCycles() : 0u};
     if (rt.callStack.size() >= kMaxCallDepth) {
         Value soe = allocateObject(rt, classes, "<push>", 0, "java/lang/StackOverflowError");
         setPendingException(rt, std::move(soe), "", 0);
@@ -1708,6 +1714,12 @@ std::optional<Value> resumeCurrentMethod(
         // was updated, rt.pendingException cleared. Fall through to bytecode loop.
     }
 
+    // Captured once for the whole call — branch predictor learns it cleanly
+    // so the per-bytecode opcode/cycle accumulator gate is cheap. Re-reading
+    // rt.host->profileFrameTimings every step would be a dependent load
+    // through 3 indirections that hurts the hot path.
+    const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
+
     while (pc < codeSize) {
         // Batched step-limit check: increment every step, but only consult
         // kMaxSteps every 256 steps. kMaxSteps is a soft yield boundary
@@ -1731,8 +1743,13 @@ std::optional<Value> resumeCurrentMethod(
 #endif
 
         uint8_t op = code[pc];
-        ++rt.trace.frameProfile.opcodeCounts[op];
-        OpCycleGuard cycleGuard{&rt.trace.frameProfile.opcodeCycles[op], cpuCycles()};
+        // Counter + RAII guard both gated on profileFrame. Disabled cost:
+        // one branch + a null-store pair in the guard's struct + one null
+        // check in the destructor; no cpuCycles() call.
+        if (profileFrame) ++rt.trace.frameProfile.opcodeCounts[op];
+        OpCycleGuard cycleGuard{
+            profileFrame ? &rt.trace.frameProfile.opcodeCycles[op] : nullptr,
+            profileFrame ? cpuCycles() : 0u};
         switch (op) {
             case 0x01: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // aconst_null
             case 0x02: { const uint32_t t0=statNow(); frame.push(Value::ofInt(-1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // iconst_m1
@@ -3344,9 +3361,9 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     Runtime& rt = session.runtime();
     const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
     const uint32_t profileStartUs = profileFrame ? nowUs() : 0;
-    // Capture CCOUNT before resetRuntimeTrace so the cycle count covers the
-    // entire renderSession body. Unconditional — costs one RSR instruction.
-    const uint32_t profileStartCycles = cpuCycles();
+    // CCOUNT bracket for cpu vs wall comparison (preemption detection).
+    // Gated on profileFrame; one cycle when on, zero when off.
+    const uint32_t profileStartCycles = profileFrame ? cpuCycles() : 0u;
     resetRuntimeTrace(rt);
     const bool captureTraceDetails = rt.trace.recording || profileFrame;
     ScopedResourceReadTrace resourceReadTrace(rt.trace);
@@ -3355,11 +3372,8 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     rt.graphicsHeight = height;
     rt.mainFbCanvas.emplace(width, height, pixels);
     auto finishProfile = [&]() -> ExecutionTrace {
-        // CCOUNT delta is captured unconditionally so the field is populated
-        // even when wall-clock profileFrame is off — useful when only the
-        // host side decides whether to log it.
-        rt.trace.frameProfile.cpuCycles = cpuCycles() - profileStartCycles;
         if (profileFrame && rt.host != nullptr) {
+            rt.trace.frameProfile.cpuCycles = cpuCycles() - profileStartCycles;
             rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
             rt.trace.frameProfile.steps = static_cast<uint32_t>(rt.steps);
             captureTaskMethodProfiles(rt);
