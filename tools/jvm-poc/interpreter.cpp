@@ -394,26 +394,6 @@ struct Runtime {
     std::unordered_map<uint64_t, uint16_t,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, uint16_t>>> fieldIndexCache;
-    // Per-call-site field-slot inline cache: direct-mapped, array-indexed —
-    // no hashing, no modulo-divide, no node-chase. Keyed by
-    // callCacheKey(executing cls, cpIdx), identical semantics to
-    // fieldIndexCache above, which remains the L2 fallback for the rare
-    // direct-mapped collision and the cold first-resolve. The mapping is
-    // session-stable (field layout never changes) so entries are never
-    // invalidated. key==0 marks an empty slot — callCacheKey packs a
-    // non-null ClassFile* so a real key is never 0. Served by both getfield
-    // and putfield (a field touched by both shares one Fieldref → one cpIdx
-    // → one key → one slot). Inline arrays for now (land in PSRAM at 0KB SRAM
-    // free); the win comes from removing the hash/divide/chase, not placement.
-    static constexpr uint32_t kFieldSlotICBits = 9;            // 512 entries
-    static constexpr uint32_t kFieldSlotICSize = 1u << kFieldSlotICBits;
-    uint64_t fieldSlotICKey[kFieldSlotICSize] = {};
-    uint16_t fieldSlotICSlot[kFieldSlotICSize] = {};
-    static inline uint32_t fieldSlotICIndex(uint64_t key) {
-        // Fibonacci hash → take the high bits → bucket. One multiply + shift.
-        return static_cast<uint32_t>(
-            (key * 0x9E3779B97F4A7C15ull) >> (64 - kFieldSlotICBits));
-    }
     // Build-time maps: cls* → {fieldKey → slot} and cls* → total slot count.
     // fieldKey is "name|descriptor" composite; see fieldSlotKey(). The same
     // map also holds bare-name entries that point to the first slot assigned
@@ -2542,41 +2522,30 @@ std::optional<Value> resumeCurrentMethod(
                         // correct constant pool — avoids cross-class collisions when two classes
                         // share the same cpIdx for different fields on the same object type.
                         const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
-                        const uint32_t ici = Runtime::fieldSlotICIndex(fidxKey);
-                        uint16_t slot = 0;
-                        bool haveSlot = false;
-                        if (rt.fieldSlotICKey[ici] == fidxKey) {
-                            // L1: direct-mapped inline cache — one array load, no hash.
-                            slot = rt.fieldSlotICSlot[ici];
-                            haveSlot = true;
+                        auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                        if (fidxIt != rt.fieldIndexCache.end()) {
+                            // Hot path: integer-keyed SRAM lookup → direct vector index.
+                            const uint16_t slot = fidxIt->second;
+                            if (slot < obj.fields.size()) {
+                                const Value& sv = obj.fields[slot];
+                                if (sv.isInitialized()) value = sv;
+                            }
                         } else {
-                            auto fidxIt = rt.fieldIndexCache.find(fidxKey);
-                            if (fidxIt != rt.fieldIndexCache.end()) {
-                                // L2: integer-keyed map (collision / cold-warmup fallback).
-                                slot = fidxIt->second;
-                                haveSlot = true;
-                            } else {
-                                // Cold path: resolve name|descriptor key, find slot, populate L2.
-                                const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
-                                if (obj.cls != nullptr) {
-                                    buildFieldSlots(rt, classes, *obj.cls);
-                                    const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                                    auto nameIt = slotMap.find(fieldKey);
-                                    if (nameIt != slotMap.end()) {
-                                        slot = nameIt->second;
-                                        rt.fieldIndexCache[fidxKey] = slot;
-                                        haveSlot = true;
+                            // Cold path: resolve name|descriptor key, find slot, populate cache.
+                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
+                            if (obj.cls != nullptr) {
+                                buildFieldSlots(rt, classes, *obj.cls);
+                                const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                                auto nameIt = slotMap.find(fieldKey);
+                                if (nameIt != slotMap.end()) {
+                                    const uint16_t slot = nameIt->second;
+                                    rt.fieldIndexCache[fidxKey] = slot;
+                                    if (slot < obj.fields.size()) {
+                                        const Value& sv = obj.fields[slot];
+                                        if (sv.isInitialized()) value = sv;
                                     }
                                 }
                             }
-                            if (haveSlot) {
-                                rt.fieldSlotICKey[ici] = fidxKey;
-                                rt.fieldSlotICSlot[ici] = slot;
-                            }
-                        }
-                        if (haveSlot && slot < obj.fields.size()) {
-                            const Value& sv = obj.fields[slot];
-                            if (sv.isInitialized()) value = sv;
                         }
                     }
                 }
@@ -2597,41 +2566,26 @@ std::optional<Value> resumeCurrentMethod(
                 if (id.has_value()) {
                     HeapObject& obj = rt.heap[*id];
                     const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
-                    const uint32_t ici = Runtime::fieldSlotICIndex(fidxKey);
-                    uint16_t slot = 0;
-                    bool haveSlot = false;
-                    if (rt.fieldSlotICKey[ici] == fidxKey) {
-                        // L1: direct-mapped inline cache — one array load, no hash.
-                        slot = rt.fieldSlotICSlot[ici];
-                        haveSlot = true;
-                    } else {
-                        auto fidxIt = rt.fieldIndexCache.find(fidxKey);
-                        if (fidxIt != rt.fieldIndexCache.end()) {
-                            // L2: integer-keyed map (collision / cold-warmup fallback).
-                            slot = fidxIt->second;
-                            haveSlot = true;
-                        } else {
-                            // Cold path: resolve name|descriptor key, find slot, populate L2.
-                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
-                            if (obj.cls != nullptr) {
-                                buildFieldSlots(rt, classes, *obj.cls);
-                                const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                                auto nameIt = slotMap.find(fieldKey);
-                                if (nameIt != slotMap.end()) {
-                                    slot = nameIt->second;
-                                    rt.fieldIndexCache[fidxKey] = slot;
-                                    haveSlot = true;
-                                }
-                            }
-                        }
-                        if (haveSlot) {
-                            rt.fieldSlotICKey[ici] = fidxKey;
-                            rt.fieldSlotICSlot[ici] = slot;
-                        }
-                    }
-                    if (haveSlot) {
+                    auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                    if (fidxIt != rt.fieldIndexCache.end()) {
+                        // Hot path: integer-keyed SRAM lookup → direct vector index.
+                        const uint16_t slot = fidxIt->second;
                         if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
                         obj.fields[slot] = value;
+                    } else {
+                        // Cold path: resolve name|descriptor key, find slot, populate cache.
+                        const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
+                        if (obj.cls != nullptr) {
+                            buildFieldSlots(rt, classes, *obj.cls);
+                            const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                            auto nameIt = slotMap.find(fieldKey);
+                            if (nameIt != slotMap.end()) {
+                                const uint16_t slot = nameIt->second;
+                                rt.fieldIndexCache[fidxKey] = slot;
+                                if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
+                                obj.fields[slot] = value;
+                            }
+                        }
                     }
                 }
                 if(t0b5) rt.host->putfieldStats.record(nowUs() - t0b5);
