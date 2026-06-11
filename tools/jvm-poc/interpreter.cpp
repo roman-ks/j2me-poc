@@ -394,6 +394,26 @@ struct Runtime {
     std::unordered_map<uint64_t, uint16_t,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, uint16_t>>> fieldIndexCache;
+    // Per-call-site field-slot inline cache: direct-mapped, array-indexed —
+    // no hashing, no modulo-divide, no node-chase. Keyed by
+    // callCacheKey(executing cls, cpIdx), identical semantics to
+    // fieldIndexCache above, which remains the L2 fallback for the rare
+    // direct-mapped collision and the cold first-resolve. The mapping is
+    // session-stable (field layout never changes) so entries are never
+    // invalidated. key==0 marks an empty slot — callCacheKey packs a
+    // non-null ClassFile* so a real key is never 0. Served by both getfield
+    // and putfield (a field touched by both shares one Fieldref → one cpIdx
+    // → one key → one slot). Inline arrays for now (land in PSRAM at 0KB SRAM
+    // free); the win comes from removing the hash/divide/chase, not placement.
+    static constexpr uint32_t kFieldSlotICBits = 9;            // 512 entries
+    static constexpr uint32_t kFieldSlotICSize = 1u << kFieldSlotICBits;
+    uint64_t fieldSlotICKey[kFieldSlotICSize] = {};
+    uint16_t fieldSlotICSlot[kFieldSlotICSize] = {};
+    static inline uint32_t fieldSlotICIndex(uint64_t key) {
+        // Fibonacci hash → take the high bits → bucket. One multiply + shift.
+        return static_cast<uint32_t>(
+            (key * 0x9E3779B97F4A7C15ull) >> (64 - kFieldSlotICBits));
+    }
     // Build-time maps: cls* → {fieldKey → slot} and cls* → total slot count.
     // fieldKey is "name|descriptor" composite; see fieldSlotKey(). The same
     // map also holds bare-name entries that point to the first slot assigned
@@ -774,18 +794,33 @@ std::optional<std::string> runtimeString(const Runtime& rt, const Value& value) 
 }
 
 Value loadArrayElement(Runtime& rt, const Value& arrayValue, const Value& indexValue) {
+    const bool profileFrame = rt.host && rt.host->profileFrameTimings;
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
     if (id.has_value() && index.has_value() && *index >= 0) {
         const size_t idx = static_cast<size_t>(*index);
+
+        const uint32_t findStart = profileFrame ? cpuCycles() : 0u;
+        const std::vector<int32_t>* primVec = nullptr;
+        const std::vector<Value>* objVec = nullptr;
         auto primIt = rt.primitiveArrays.find(*id);
         if (primIt != rt.primitiveArrays.end()) {
-            return idx < primIt->second.size() ? Value::ofInt(primIt->second[idx]) : Value::ofInt(0);
+            primVec = &primIt->second;
+        } else {
+            auto arrayIt = rt.arrays.find(*id);
+            if (arrayIt != rt.arrays.end()) objVec = &arrayIt->second;
         }
-        auto arrayIt = rt.arrays.find(*id);
-        if (arrayIt != rt.arrays.end() && idx < arrayIt->second.size()) {
-            return arrayIt->second[idx];
+        if (profileFrame) rt.trace.frameProfile.arrayHeapFindCycles += cpuCycles() - findStart;
+
+        const uint32_t accessStart = profileFrame ? cpuCycles() : 0u;
+        Value result = Value::ofInt(0);
+        if (primVec != nullptr) {
+            if (idx < primVec->size()) result = Value::ofInt((*primVec)[idx]);
+        } else if (objVec != nullptr && idx < objVec->size()) {
+            result = (*objVec)[idx];
         }
+        if (profileFrame) rt.trace.frameProfile.arrayAccessCycles += cpuCycles() - accessStart;
+        return result;
     }
     return Value::ofInt(0);
 }
@@ -2515,38 +2550,59 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = Value::ofInt(0);
                 const uint32_t t0 = statNow();
                 if (id.has_value()) {
+                    const uint32_t findStart = profileFrame ? cpuCycles() : 0u;
                     auto objectIt = rt.heap.find(*id);
+                    if (profileFrame) rt.trace.frameProfile.fieldHeapFindCycles += cpuCycles() - findStart;
                     if (objectIt != rt.heap.end()) {
                         HeapObject& obj = objectIt->second;
+                        const uint32_t accessStart = profileFrame ? cpuCycles() : 0u;
                         // Key by executing class (not obj.cls) so cpIdx is interpreted in the
                         // correct constant pool — avoids cross-class collisions when two classes
                         // share the same cpIdx for different fields on the same object type.
                         const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
-                        auto fidxIt = rt.fieldIndexCache.find(fidxKey);
-                        if (fidxIt != rt.fieldIndexCache.end()) {
-                            // Hot path: integer-keyed SRAM lookup → direct vector index.
-                            const uint16_t slot = fidxIt->second;
+                        const uint32_t ici = Runtime::fieldSlotICIndex(fidxKey);
+                        uint16_t slot = 0;
+                        bool haveSlot = false;
+                        if (rt.fieldSlotICKey[ici] == fidxKey) {
+                            // L1: direct-mapped inline cache — one array load, no hash.
+                            slot = rt.fieldSlotICSlot[ici];
+                            haveSlot = true;
+                            if (profileFrame) ++rt.trace.frameProfile.fieldICHits;
+                        } else {
+                            if (profileFrame) ++rt.trace.frameProfile.fieldICMisses;
+                            auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                            if (fidxIt != rt.fieldIndexCache.end()) {
+                                // L2: integer-keyed map (collision / cold-warmup fallback).
+                                slot = fidxIt->second;
+                                haveSlot = true;
+                            } else {
+                                // Cold path: resolve name|descriptor key, find slot, populate L2.
+                                const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
+                                if (obj.cls != nullptr) {
+                                    buildFieldSlots(rt, classes, *obj.cls);
+                                    const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                                    auto nameIt = slotMap.find(fieldKey);
+                                    if (nameIt != slotMap.end()) {
+                                        slot = nameIt->second;
+                                        rt.fieldIndexCache[fidxKey] = slot;
+                                        haveSlot = true;
+                                    }
+                                }
+                            }
+                            if (haveSlot) {
+                                rt.fieldSlotICKey[ici] = fidxKey;
+                                rt.fieldSlotICSlot[ici] = slot;
+                            }
+                        }
+                        if (haveSlot) {
+                            const uint32_t vecStart = profileFrame ? cpuCycles() : 0u;
                             if (slot < obj.fields.size()) {
                                 const Value& sv = obj.fields[slot];
                                 if (sv.isInitialized()) value = sv;
                             }
-                        } else {
-                            // Cold path: resolve name|descriptor key, find slot, populate cache.
-                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
-                            if (obj.cls != nullptr) {
-                                buildFieldSlots(rt, classes, *obj.cls);
-                                const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                                auto nameIt = slotMap.find(fieldKey);
-                                if (nameIt != slotMap.end()) {
-                                    const uint16_t slot = nameIt->second;
-                                    rt.fieldIndexCache[fidxKey] = slot;
-                                    if (slot < obj.fields.size()) {
-                                        const Value& sv = obj.fields[slot];
-                                        if (sv.isInitialized()) value = sv;
-                                    }
-                                }
-                            }
+                            if (profileFrame) rt.trace.frameProfile.fieldVectorReadCycles += cpuCycles() - vecStart;
                         }
+                        if (profileFrame) rt.trace.frameProfile.fieldAccessCycles += cpuCycles() - accessStart;
                     }
                 }
                 if(t0) rt.host->getfieldStats.record(nowUs() - t0);
@@ -2566,26 +2622,43 @@ std::optional<Value> resumeCurrentMethod(
                 if (id.has_value()) {
                     HeapObject& obj = rt.heap[*id];
                     const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
-                    auto fidxIt = rt.fieldIndexCache.find(fidxKey);
-                    if (fidxIt != rt.fieldIndexCache.end()) {
-                        // Hot path: integer-keyed SRAM lookup → direct vector index.
-                        const uint16_t slot = fidxIt->second;
-                        if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
-                        obj.fields[slot] = value;
+                    const uint32_t ici = Runtime::fieldSlotICIndex(fidxKey);
+                    uint16_t slot = 0;
+                    bool haveSlot = false;
+                    if (rt.fieldSlotICKey[ici] == fidxKey) {
+                        // L1: direct-mapped inline cache — one array load, no hash.
+                        slot = rt.fieldSlotICSlot[ici];
+                        haveSlot = true;
+                        if (profileFrame) ++rt.trace.frameProfile.fieldICHits;
                     } else {
-                        // Cold path: resolve name|descriptor key, find slot, populate cache.
-                        const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
-                        if (obj.cls != nullptr) {
-                            buildFieldSlots(rt, classes, *obj.cls);
-                            const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                            auto nameIt = slotMap.find(fieldKey);
-                            if (nameIt != slotMap.end()) {
-                                const uint16_t slot = nameIt->second;
-                                rt.fieldIndexCache[fidxKey] = slot;
-                                if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
-                                obj.fields[slot] = value;
+                        if (profileFrame) ++rt.trace.frameProfile.fieldICMisses;
+                        auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                        if (fidxIt != rt.fieldIndexCache.end()) {
+                            // L2: integer-keyed map (collision / cold-warmup fallback).
+                            slot = fidxIt->second;
+                            haveSlot = true;
+                        } else {
+                            // Cold path: resolve name|descriptor key, find slot, populate L2.
+                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
+                            if (obj.cls != nullptr) {
+                                buildFieldSlots(rt, classes, *obj.cls);
+                                const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                                auto nameIt = slotMap.find(fieldKey);
+                                if (nameIt != slotMap.end()) {
+                                    slot = nameIt->second;
+                                    rt.fieldIndexCache[fidxKey] = slot;
+                                    haveSlot = true;
+                                }
                             }
                         }
+                        if (haveSlot) {
+                            rt.fieldSlotICKey[ici] = fidxKey;
+                            rt.fieldSlotICSlot[ici] = slot;
+                        }
+                    }
+                    if (haveSlot) {
+                        if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
+                        obj.fields[slot] = value;
                     }
                 }
                 if(t0b5) rt.host->putfieldStats.record(nowUs() - t0b5);
@@ -2666,6 +2739,7 @@ std::optional<Value> resumeCurrentMethod(
 #endif
                         const uint32_t tTaskNative =
                             (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
+                        const uint32_t tNativeCyc = profileFrame ? cpuCycles() : 0;
                         try {
                             nativeResult = cachedLeaf != nullptr
                                 ? cachedLeaf(sharedNativeCtx, callPc, rt.callArgsBuf)
@@ -2673,6 +2747,7 @@ std::optional<Value> resumeCurrentMethod(
                                     ? cachedNativeHandler(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf)
                                     : handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
+                            if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                             }
@@ -2682,6 +2757,7 @@ std::optional<Value> resumeCurrentMethod(
                                 (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
                             throw;
                         }
+                        if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                         if (tTaskNative != 0) {
                             recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                         }
@@ -2880,6 +2956,7 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.tProfT0 = tN;
                         sharedNativeCtx.tProfTEntry = 0;
                         sharedNativeCtx.callerLabel = label;
+                        const uint32_t tNativeCyc = profileFrame ? cpuCycles() : 0;
                         try {
                             nativeResult = cachedLeaf != nullptr
                                 ? cachedLeaf(sharedNativeCtx, static_cast<uint32_t>(pc), rt.callArgsBuf)
@@ -2887,6 +2964,7 @@ std::optional<Value> resumeCurrentMethod(
                                     ? cachedNativeHandler(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf)
                                     : handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
+                            if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                             }
@@ -2896,6 +2974,7 @@ std::optional<Value> resumeCurrentMethod(
                                 (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
                             throw;
                         }
+                        if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                         if (tTaskNative != 0) {
                             recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                         }
@@ -3376,6 +3455,31 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             rt.trace.frameProfile.cpuCycles = cpuCycles() - profileStartCycles;
             rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
             rt.trace.frameProfile.steps = static_cast<uint32_t>(rt.steps);
+            rt.trace.frameProfile.fieldIndexCacheSize =
+                static_cast<uint32_t>(rt.fieldIndexCache.size());
+            rt.trace.frameProfile.fieldIndexCacheBuckets =
+                static_cast<uint32_t>(rt.fieldIndexCache.bucket_count());
+            if (!rt.fieldIndexCache.empty()) {
+                const void* nodeAddr = static_cast<const void*>(&*rt.fieldIndexCache.begin());
+#ifdef ESP32_BUILD
+                // ESP32-S3 memory map: external PSRAM data is mapped through the
+                // cache at 0x3C00_0000–0x3DFF_FFFF; internal SRAM lives up at
+                // 0x3FC8_0000+. A node landing in the PSRAM window means
+                // SramAllocator silently fell back (SRAM exhausted).
+                const uintptr_t a = reinterpret_cast<uintptr_t>(nodeAddr);
+                const bool external = (a >= 0x3C000000u && a < 0x3E000000u);
+                rt.trace.frameProfile.fieldIndexCacheNodeMem = external ? 2 : 1;
+#else
+                (void)nodeAddr;
+                rt.trace.frameProfile.fieldIndexCacheNodeMem = 0;
+#endif
+            }
+#ifdef ESP32_BUILD
+            rt.trace.frameProfile.internalFreeBytes =
+                static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            rt.trace.frameProfile.internalLargestBlock =
+                static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+#endif
             captureTaskMethodProfiles(rt);
             captureTaskNativeProfiles(rt);
             rt.host->recordFrameProfile(
