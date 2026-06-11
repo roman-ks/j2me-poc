@@ -794,33 +794,18 @@ std::optional<std::string> runtimeString(const Runtime& rt, const Value& value) 
 }
 
 Value loadArrayElement(Runtime& rt, const Value& arrayValue, const Value& indexValue) {
-    const bool profileFrame = rt.host && rt.host->profileFrameTimings;
     std::optional<uint32_t> id = arrayId(arrayValue);
     std::optional<int> index = parseIntValue(indexValue);
     if (id.has_value() && index.has_value() && *index >= 0) {
         const size_t idx = static_cast<size_t>(*index);
-
-        const uint32_t findStart = profileFrame ? cpuCycles() : 0u;
-        const std::vector<int32_t>* primVec = nullptr;
-        const std::vector<Value>* objVec = nullptr;
         auto primIt = rt.primitiveArrays.find(*id);
         if (primIt != rt.primitiveArrays.end()) {
-            primVec = &primIt->second;
-        } else {
-            auto arrayIt = rt.arrays.find(*id);
-            if (arrayIt != rt.arrays.end()) objVec = &arrayIt->second;
+            return idx < primIt->second.size() ? Value::ofInt(primIt->second[idx]) : Value::ofInt(0);
         }
-        if (profileFrame) rt.trace.frameProfile.arrayHeapFindCycles += cpuCycles() - findStart;
-
-        const uint32_t accessStart = profileFrame ? cpuCycles() : 0u;
-        Value result = Value::ofInt(0);
-        if (primVec != nullptr) {
-            if (idx < primVec->size()) result = Value::ofInt((*primVec)[idx]);
-        } else if (objVec != nullptr && idx < objVec->size()) {
-            result = (*objVec)[idx];
+        auto arrayIt = rt.arrays.find(*id);
+        if (arrayIt != rt.arrays.end() && idx < arrayIt->second.size()) {
+            return arrayIt->second[idx];
         }
-        if (profileFrame) rt.trace.frameProfile.arrayAccessCycles += cpuCycles() - accessStart;
-        return result;
     }
     return Value::ofInt(0);
 }
@@ -2550,12 +2535,9 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = Value::ofInt(0);
                 const uint32_t t0 = statNow();
                 if (id.has_value()) {
-                    const uint32_t findStart = profileFrame ? cpuCycles() : 0u;
                     auto objectIt = rt.heap.find(*id);
-                    if (profileFrame) rt.trace.frameProfile.fieldHeapFindCycles += cpuCycles() - findStart;
                     if (objectIt != rt.heap.end()) {
                         HeapObject& obj = objectIt->second;
-                        const uint32_t accessStart = profileFrame ? cpuCycles() : 0u;
                         // Key by executing class (not obj.cls) so cpIdx is interpreted in the
                         // correct constant pool — avoids cross-class collisions when two classes
                         // share the same cpIdx for different fields on the same object type.
@@ -2567,9 +2549,7 @@ std::optional<Value> resumeCurrentMethod(
                             // L1: direct-mapped inline cache — one array load, no hash.
                             slot = rt.fieldSlotICSlot[ici];
                             haveSlot = true;
-                            if (profileFrame) ++rt.trace.frameProfile.fieldICHits;
                         } else {
-                            if (profileFrame) ++rt.trace.frameProfile.fieldICMisses;
                             auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                             if (fidxIt != rt.fieldIndexCache.end()) {
                                 // L2: integer-keyed map (collision / cold-warmup fallback).
@@ -2594,15 +2574,10 @@ std::optional<Value> resumeCurrentMethod(
                                 rt.fieldSlotICSlot[ici] = slot;
                             }
                         }
-                        if (haveSlot) {
-                            const uint32_t vecStart = profileFrame ? cpuCycles() : 0u;
-                            if (slot < obj.fields.size()) {
-                                const Value& sv = obj.fields[slot];
-                                if (sv.isInitialized()) value = sv;
-                            }
-                            if (profileFrame) rt.trace.frameProfile.fieldVectorReadCycles += cpuCycles() - vecStart;
+                        if (haveSlot && slot < obj.fields.size()) {
+                            const Value& sv = obj.fields[slot];
+                            if (sv.isInitialized()) value = sv;
                         }
-                        if (profileFrame) rt.trace.frameProfile.fieldAccessCycles += cpuCycles() - accessStart;
                     }
                 }
                 if(t0) rt.host->getfieldStats.record(nowUs() - t0);
@@ -2629,9 +2604,7 @@ std::optional<Value> resumeCurrentMethod(
                         // L1: direct-mapped inline cache — one array load, no hash.
                         slot = rt.fieldSlotICSlot[ici];
                         haveSlot = true;
-                        if (profileFrame) ++rt.trace.frameProfile.fieldICHits;
                     } else {
-                        if (profileFrame) ++rt.trace.frameProfile.fieldICMisses;
                         auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                         if (fidxIt != rt.fieldIndexCache.end()) {
                             // L2: integer-keyed map (collision / cold-warmup fallback).
@@ -3455,31 +3428,6 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             rt.trace.frameProfile.cpuCycles = cpuCycles() - profileStartCycles;
             rt.trace.frameProfile.renderSessionUs = nowUs() - profileStartUs;
             rt.trace.frameProfile.steps = static_cast<uint32_t>(rt.steps);
-            rt.trace.frameProfile.fieldIndexCacheSize =
-                static_cast<uint32_t>(rt.fieldIndexCache.size());
-            rt.trace.frameProfile.fieldIndexCacheBuckets =
-                static_cast<uint32_t>(rt.fieldIndexCache.bucket_count());
-            if (!rt.fieldIndexCache.empty()) {
-                const void* nodeAddr = static_cast<const void*>(&*rt.fieldIndexCache.begin());
-#ifdef ESP32_BUILD
-                // ESP32-S3 memory map: external PSRAM data is mapped through the
-                // cache at 0x3C00_0000–0x3DFF_FFFF; internal SRAM lives up at
-                // 0x3FC8_0000+. A node landing in the PSRAM window means
-                // SramAllocator silently fell back (SRAM exhausted).
-                const uintptr_t a = reinterpret_cast<uintptr_t>(nodeAddr);
-                const bool external = (a >= 0x3C000000u && a < 0x3E000000u);
-                rt.trace.frameProfile.fieldIndexCacheNodeMem = external ? 2 : 1;
-#else
-                (void)nodeAddr;
-                rt.trace.frameProfile.fieldIndexCacheNodeMem = 0;
-#endif
-            }
-#ifdef ESP32_BUILD
-            rt.trace.frameProfile.internalFreeBytes =
-                static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-            rt.trace.frameProfile.internalLargestBlock =
-                static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-#endif
             captureTaskMethodProfiles(rt);
             captureTaskNativeProfiles(rt);
             rt.host->recordFrameProfile(

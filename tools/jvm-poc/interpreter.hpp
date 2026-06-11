@@ -168,55 +168,6 @@ struct FrameProfile {
     // Subtract from opcodeCycles[0xb6]+[0xb7]+[0xb9] to get pure dispatch
     // overhead (receiver lookup, callCache, arg pop) vs native body cost.
     uint32_t invokeNativeCycles = 0;
-    // CPU cycles spent in rt.heap.find() for getfield (0xb4) receiver
-    // lookup. Compare against fieldAccessCycles and opcodeCycles[0xb4]:
-    // opcodeCycles[0xb4] - fieldHeapFindCycles - fieldAccessCycles is pure
-    // dispatch overhead (cpIdx decode, pop/push).
-    uint32_t fieldHeapFindCycles = 0;
-    // CPU cycles spent on the fieldIndexCache lookup + obj.fields[slot]
-    // read for getfield (0xb4) once the receiver object is found. Isolates
-    // the PSRAM cost of HeapObject::fields (std::vector<Value>, default
-    // allocator) from the heap.find() cost above.
-    uint32_t fieldAccessCycles = 0;
-    // Sub-slice of fieldAccessCycles: just the obj.fields[slot] PSRAM read
-    // (size() bounds-check + element copy) on the getfield hot path.
-    // fieldAccessCycles - fieldVectorReadCycles = the fieldIndexCache.find
-    // (second unordered_map) + callCacheKey compute. Tells us whether
-    // getfield's cost is the second hash lookup or the field-vector PSRAM
-    // access.
-    uint32_t fieldVectorReadCycles = 0;
-    // Diagnostics for fieldIndexCache (SramAllocator-backed). Populated once
-    // per frame in finishProfile. Confirms whether the map that's supposed to
-    // stay in internal SRAM actually spilled to PSRAM (SramAllocator silently
-    // falls back to ::operator new when SRAM is exhausted), which would explain
-    // a getfield-cache find that costs PSRAM-miss cycles instead of SRAM speed.
-    uint32_t fieldIndexCacheSize = 0;     // live entry count
-    uint32_t fieldIndexCacheBuckets = 0;  // bucket_count() — load-factor view
-    // 0 = empty/unknown, 1 = a sampled node is in internal SRAM,
-    // 2 = a sampled node is in external PSRAM (spilled). Always 0 on Linux.
-    uint8_t fieldIndexCacheNodeMem = 0;
-    // Field-slot inline-cache hit/miss across getfield+putfield this frame.
-    // hit ÷ (hit+miss) is the L1 hit rate; a low rate means direct-mapped
-    // collisions are thrashing (bump kFieldSlotICBits) or warmup dominates.
-    uint32_t fieldICHits = 0;
-    uint32_t fieldICMisses = 0;
-    // Internal-SRAM heap headroom at frame end (ESP32 only; 0 on Linux).
-    // Decides whether fieldIndexCache *could* be kept resident: if free and
-    // largest-block both comfortably exceed the ~5KB map, the spill is a
-    // lazy-allocation timing artifact (fixable by reserving/pre-warming
-    // early); if they're tiny, residency is impossible and the per-site IC
-    // (one early contiguous block) is the only path.
-    uint32_t internalFreeBytes = 0;
-    uint32_t internalLargestBlock = 0;
-    // CPU cycles spent in rt.primitiveArrays.find()/rt.arrays.find() for
-    // array loads (0x2e-0x35: *aload), aggregated across all array-load
-    // opcodes since they share loadArrayElement(). Compare against
-    // arrayAccessCycles and the summed opcodeCycles for 0x2e-0x35.
-    uint32_t arrayHeapFindCycles = 0;
-    // CPU cycles spent reading the element out of the resolved vector
-    // (CompactArrayHeap or ArrayHeap, both PSRAM-backed) for array loads
-    // (0x2e-0x35).
-    uint32_t arrayAccessCycles = 0;
     // CPU cycles elapsed inside renderSession. On ESP32 captured via the
     // Xtensa CCOUNT special register (RSR.CCOUNT). Divide by CPU MHz (240 on
     // ESP32-S3 default) to get CPU-µs. Compare against renderSessionUs (wall
