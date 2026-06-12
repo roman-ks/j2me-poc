@@ -727,6 +727,53 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            // KNOWN-FAILING by design (docs/field-storage-compaction.plan.md §7):
+            // Font is a kStr fake-handle; stored in a reference-typed field it is
+            // corrupted to a garbage word by the compact layout, so the round-trip
+            // identity check yields 0 instead of 1. Goes green once Font/Display
+            // are migrated to real H1 handles.
+            "font field round-trip",
+            "dev/roman/hello/FontFieldRoundTrip",
+            {"dev/roman/hello/FontFieldRoundTrip"},
+            {"1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            // KNOWN-FAILING by design (see above) — Display kStr fake-handle.
+            "display field round-trip",
+            "dev/roman/hello/DisplayFieldRoundTrip",
+            {"dev/roman/hello/DisplayFieldRoundTrip"},
+            {"1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
+            // Compact field layout: a long field whose low word aliases obj#1's
+            // handle must NOT keep obj#1 alive (GC traces only ref slots), while
+            // the genuine reference field (obj#3) must survive. obj#1 is freed,
+            // long round-trips ((int)aliased == 0x01000001 == 16777217).
+            "gc long field alias",
+            "dev/roman/hello/GcLongAlias",
+            {"dev/roman/hello/Objects", "dev/roman/hello/LongAliasHolder",
+             "dev/roman/hello/GcLongAlias"},
+            {"100", "16777217", "6"},
+            {"obj#1"},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "inherited method lookup",
             "dev/roman/hello/Inheritance",
             {
