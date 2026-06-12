@@ -270,7 +270,12 @@ struct ResolvedCallEntry {
 struct HeapObject {
     std::string className;
     const ClassFile* cls = nullptr; // cached class pointer for fast virtual dispatch (item K)
-    std::vector<Value> fields;      // indexed by FieldSlot::wordIndex from fieldSlotCache (item D)
+    // Untagged 32-bit field words, indexed by FieldSlot::wordIndex. A long/double
+    // occupies two consecutive words (lo then hi). Type/width is recovered from
+    // the field descriptor via the slot caches (kind) and, for GC, fieldRefSlots.
+    // Zero-initialized → JVM field defaults (0 / null / 0L). See
+    // docs/field-storage-compaction.plan.md.
+    std::vector<int32_t> fields;
 };
 
 // Per-field-slot metadata, stored as the *value* of the field-slot caches
@@ -288,6 +293,36 @@ struct FieldSlot {
     uint16_t  wordIndex = 0;
     FieldKind kind = FieldKind::kWord;
 };
+
+// Reconstruct a field Value from the word(s) at fs.wordIndex. Out-of-range or
+// never-written slots read back as 0 (JVM field default). Endianness: words[i]
+// = low 32 bits, words[i+1] = high 32 bits.
+inline Value readFieldSlot(const std::vector<int32_t>& fields, FieldSlot fs) {
+    if (fs.kind == FieldKind::kLong) {
+        if (static_cast<size_t>(fs.wordIndex) + 1 < fields.size()) {
+            const uint64_t lo = static_cast<uint32_t>(fields[fs.wordIndex]);
+            const uint64_t hi = static_cast<uint32_t>(fields[fs.wordIndex + 1]);
+            return Value::ofLong(static_cast<int64_t>(lo | (hi << 32)));
+        }
+        return Value::ofLong(0);
+    }
+    if (fs.wordIndex < fields.size()) return Value::ofInt(fields[fs.wordIndex]);
+    return Value::ofInt(0);
+}
+
+// Store a field Value into the word(s) at fs.wordIndex, growing `fields` as
+// needed. kWord writes one word (int/handle/float-bits); kLong writes two.
+inline void writeFieldSlot(std::vector<int32_t>& fields, FieldSlot fs, const Value& v) {
+    const size_t need = static_cast<size_t>(fs.wordIndex) + (fs.kind == FieldKind::kLong ? 2 : 1);
+    if (need > fields.size()) fields.resize(need);
+    if (fs.kind == FieldKind::kLong) {
+        const uint64_t bits = static_cast<uint64_t>(v.i64);
+        fields[fs.wordIndex]     = static_cast<int32_t>(bits & 0xFFFFFFFFu);
+        fields[fs.wordIndex + 1] = static_cast<int32_t>(bits >> 32);
+    } else {
+        fields[fs.wordIndex] = v.i32;
+    }
+}
 
 using Heap = std::unordered_map<uint32_t, HeapObject>;
 using ArrayHeap = std::unordered_map<uint32_t, std::vector<Value>>;
@@ -738,11 +773,7 @@ bool writeFieldValue(
         return false;
     }
 
-    const uint16_t slot = nameIt->second.wordIndex;
-    if (slot >= obj.fields.size()) {
-        obj.fields.resize(slot + 1);
-    }
-    obj.fields[slot] = std::move(value);
+    writeFieldSlot(obj.fields, nameIt->second, value);
     return true;
 }
 
@@ -1229,8 +1260,21 @@ void markValue(
         if (objectIt == rt.heap.end()) {
             return;
         }
-        for (const Value& fieldVal : objectIt->second.fields) {
-            markValue(fieldVal, rt, markedObjects, markedArrays);
+        // Fields are untagged words; trace only the slots the class descriptors
+        // mark as references (fieldRefSlots). A ref word is the tagged handle
+        // int, so ofInt(word) reconstructs it for objectId/arrayId. Long/double
+        // words are never in the ref list, so their bit patterns can't alias a
+        // handle and get mis-traced. See docs/field-storage-compaction.plan.md.
+        const HeapObject& ho = objectIt->second;
+        if (ho.cls != nullptr) {
+            auto refIt = rt.fieldRefSlots.find(ho.cls);
+            if (refIt != rt.fieldRefSlots.end()) {
+                for (uint16_t s : refIt->second) {
+                    if (s < ho.fields.size()) {
+                        markValue(Value::ofInt(ho.fields[s]), rt, markedObjects, markedArrays);
+                    }
+                }
+            }
         }
         return;
     }
@@ -1376,9 +1420,7 @@ Value readFieldValue(Runtime& rt, const Value& object, const std::string& fieldN
     if (slotCacheIt == rt.fieldSlotCache.end()) return Value::ofInt(0);
     auto nameIt = slotCacheIt->second.find(fieldName);
     if (nameIt == slotCacheIt->second.end()) return Value::ofInt(0);
-    uint16_t slot = nameIt->second.wordIndex;
-    if (slot >= obj.fields.size() || !obj.fields[slot].isInitialized()) return Value::ofInt(0);
-    return obj.fields[slot];
+    return readFieldSlot(obj.fields, nameIt->second);
 }
 
 // Forward declarations for the trampoline-based dispatch. resumeCurrentMethod
@@ -2557,12 +2599,8 @@ std::optional<Value> resumeCurrentMethod(
                         const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
                         auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                         if (fidxIt != rt.fieldIndexCache.end()) {
-                            // Hot path: integer-keyed SRAM lookup → direct vector index.
-                            const uint16_t slot = fidxIt->second.wordIndex;
-                            if (slot < obj.fields.size()) {
-                                const Value& sv = obj.fields[slot];
-                                if (sv.isInitialized()) value = sv;
-                            }
+                            // Hot path: integer-keyed SRAM lookup → reconstruct from word(s).
+                            value = readFieldSlot(obj.fields, fidxIt->second);
                         } else {
                             // Cold path: resolve name|descriptor key, find slot, populate cache.
                             const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
@@ -2573,10 +2611,7 @@ std::optional<Value> resumeCurrentMethod(
                                 if (nameIt != slotMap.end()) {
                                     const FieldSlot fs = nameIt->second;
                                     rt.fieldIndexCache[fidxKey] = fs;
-                                    if (fs.wordIndex < obj.fields.size()) {
-                                        const Value& sv = obj.fields[fs.wordIndex];
-                                        if (sv.isInitialized()) value = sv;
-                                    }
+                                    value = readFieldSlot(obj.fields, fs);
                                 }
                             }
                         }
@@ -2601,10 +2636,8 @@ std::optional<Value> resumeCurrentMethod(
                     const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
                     auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                     if (fidxIt != rt.fieldIndexCache.end()) {
-                        // Hot path: integer-keyed SRAM lookup → direct vector index.
-                        const uint16_t slot = fidxIt->second.wordIndex;
-                        if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
-                        obj.fields[slot] = value;
+                        // Hot path: integer-keyed SRAM lookup → write word(s).
+                        writeFieldSlot(obj.fields, fidxIt->second, value);
                     } else {
                         // Cold path: resolve name|descriptor key, find slot, populate cache.
                         const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
@@ -2615,8 +2648,7 @@ std::optional<Value> resumeCurrentMethod(
                             if (nameIt != slotMap.end()) {
                                 const FieldSlot fs = nameIt->second;
                                 rt.fieldIndexCache[fidxKey] = fs;
-                                if (fs.wordIndex >= obj.fields.size()) obj.fields.resize(fs.wordIndex + 1);
-                                obj.fields[fs.wordIndex] = value;
+                                writeFieldSlot(obj.fields, fs, value);
                             }
                         }
                     }
