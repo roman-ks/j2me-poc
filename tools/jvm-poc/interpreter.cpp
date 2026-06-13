@@ -406,7 +406,7 @@ struct Runtime {
     std::unordered_map<uint64_t, std::string,
         std::hash<uint64_t>, std::equal_to<uint64_t>,
         SramAllocator<std::pair<const uint64_t, std::string>>> fieldKeyCache;
-    Value displayRef = Value::named("display#1");
+    Value displayRef = Value::ofInt(Value::kDisplayHandle);
     Value currentDisplayable = Value::named("0");
     uint16_t* graphicsFramebuffer = nullptr;
     int graphicsWidth = 0;

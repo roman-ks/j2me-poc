@@ -307,7 +307,7 @@ NativeCallResult nm_graphics_setFont(
 
 NativeCallResult nm_graphics_getFont(
     NativeCallContext& /*ctx*/, uint32_t /*pc*/, const std::vector<Value>& /*args*/) {
-    return handledValue(Value::named("font:default"));
+    return handledValue(Value::ofInt(Value::kFontHandle));
 }
 
 NativeCallResult nm_graphics_drawString(

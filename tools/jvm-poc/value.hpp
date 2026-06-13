@@ -66,8 +66,14 @@ struct Value {
     static constexpr int32_t kHandleArrTag = 0x02 << 24;
     static constexpr int32_t kHandleImgTag = 0x03 << 24;
     static constexpr int32_t kHandleGfxTag = 0x04 << 24;
+    // Font/Display are singletons represented as tagged-int handles (not kStr
+    // sentinels) so they round-trip through any handle-aware storage.
+    static constexpr int32_t kHandleFontTag    = 0x05 << 24;
+    static constexpr int32_t kHandleDisplayTag = 0x06 << 24;
     static constexpr int32_t kHandleTagMask = static_cast<int32_t>(0xFF000000);
     static constexpr int32_t kHandleIdMask  = 0x00FFFFFF;
+    static constexpr int32_t kFontHandle    = kHandleFontTag    | 1; // singleton
+    static constexpr int32_t kDisplayHandle = kHandleDisplayTag | 1; // singleton
 
     // Factories
     static Value ofInt(int32_t v)  { Value r; r.tag = Tag::kInt;  r.i32 = v; return r; }

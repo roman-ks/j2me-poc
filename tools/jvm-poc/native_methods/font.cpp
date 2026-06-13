@@ -9,9 +9,10 @@ namespace {
 
 // Singleton handle for the one physical font (port::kBitmapFont5x7). All
 // getFont/getDefaultFont variants return this same value — the runtime owns no
-// other glyph data. Matches the kStr-sentinel pattern used by displayRef.
+// other glyph data. Real H1 handle (kHandleFontTag) so it round-trips through
+// handle-aware storage; GC ignores it (not an obj/array tag).
 Value defaultFontRef() {
-    return Value::named("font:default");
+    return Value::ofInt(Value::kFontHandle);
 }
 
 int utf8CharCount(const std::string& s) {

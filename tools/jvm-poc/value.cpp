@@ -44,6 +44,8 @@ std::string Value::asText() const {
         else if (tag32 == kHandleArrTag) return "arr#"            + std::to_string(id);
         else if (tag32 == kHandleImgTag) return "image#"          + std::to_string(id);
         else if (tag32 == kHandleGfxTag) return "graphics:image#" + std::to_string(id);
+        else if (tag32 == kHandleFontTag)    return "font#"    + std::to_string(id);
+        else if (tag32 == kHandleDisplayTag) return "display#" + std::to_string(id);
         return std::to_string(i32);
     }
     if (tag == Tag::kLong)  return "long#" + std::to_string(i64);
