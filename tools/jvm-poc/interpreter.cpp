@@ -2666,7 +2666,6 @@ std::optional<Value> resumeCurrentMethod(
 #endif
                         const uint32_t tTaskNative =
                             (rt.host && rt.host->profileTaskMethods && rt.currentTask != nullptr) ? nowUs() : 0;
-                        const uint32_t tNativeCyc = profileFrame ? cpuCycles() : 0;
                         try {
                             nativeResult = cachedLeaf != nullptr
                                 ? cachedLeaf(sharedNativeCtx, callPc, rt.callArgsBuf)
@@ -2674,7 +2673,6 @@ std::optional<Value> resumeCurrentMethod(
                                     ? cachedNativeHandler(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf)
                                     : handleNativeStaticCall(sharedNativeCtx, label, callPc, nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
-                            if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                             }
@@ -2684,7 +2682,6 @@ std::optional<Value> resumeCurrentMethod(
                                 (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
                             throw;
                         }
-                        if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                         if (tTaskNative != 0) {
                             recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                         }
@@ -2883,7 +2880,6 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.tProfT0 = tN;
                         sharedNativeCtx.tProfTEntry = 0;
                         sharedNativeCtx.callerLabel = label;
-                        const uint32_t tNativeCyc = profileFrame ? cpuCycles() : 0;
                         try {
                             nativeResult = cachedLeaf != nullptr
                                 ? cachedLeaf(sharedNativeCtx, static_cast<uint32_t>(pc), rt.callArgsBuf)
@@ -2891,7 +2887,6 @@ std::optional<Value> resumeCurrentMethod(
                                     ? cachedNativeHandler(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf)
                                     : handleNativeInstanceCall(sharedNativeCtx, label, static_cast<uint32_t>(pc), nativeRef, rt.callArgsBuf);
                         } catch (const YieldThreadSleep&) {
-                            if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                             if (tTaskNative != 0) {
                                 recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                             }
@@ -2901,7 +2896,6 @@ std::optional<Value> resumeCurrentMethod(
                                 (rt.host && rt.host->profileTaskMethods) ? nowUs() : 0;
                             throw;
                         }
-                        if (profileFrame) rt.trace.frameProfile.invokeNativeCycles += cpuCycles() - tNativeCyc;
                         if (tTaskNative != 0) {
                             recordTaskNativeProfile(rt, nativeRef, nowUs() - tTaskNative);
                         }

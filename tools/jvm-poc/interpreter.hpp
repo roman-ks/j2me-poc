@@ -162,16 +162,6 @@ struct FrameProfile {
     // for µs. If this dominates 0xb7 / 0xb6 totals, frame-push overhead is
     // the bottleneck (arg copy, callStack push, locals init, etc.).
     uint32_t pushFrameCycles = 0;
-    // CPU cycles spent executing native method bodies called via invoke*
-    // opcodes (0xb6/0xb7/0xb8/0xb9). Captured by CCOUNT around the actual
-    // cachedLeaf / cachedNativeHandler / handleNative*Call dispatch. Subtract
-    // from opcodeCycles[0xb6]+[0xb7]+[0xb8]+[0xb9] to separate pure dispatch
-    // overhead (receiver lookup, callCache, arg pop) from native body cost.
-    // NOTE: only the slice run with rt.currentTask != nullptr is also tracked
-    // per-method in taskNativeProfiles; the render-loop paint() natives run
-    // with currentTask == nullptr and show up here but not there — see
-    // docs/rejected/invoke-bytecode-profiling.md.
-    uint32_t invokeNativeCycles = 0;
     // CPU cycles elapsed inside renderSession. On ESP32 captured via the
     // Xtensa CCOUNT special register (RSR.CCOUNT). Divide by CPU MHz (240 on
     // ESP32-S3 default) to get CPU-µs. Compare against renderSessionUs (wall
