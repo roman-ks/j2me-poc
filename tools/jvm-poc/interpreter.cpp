@@ -1818,7 +1818,62 @@ std::optional<Value> resumeCurrentMethod(
             case 0x29: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload_3
             case 0x17: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // fload
             case 0x18: { const uint32_t t0 = statNow(); frame.push(frame.local(codeU1(code, pc + 1))); pc += 2; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }  // dload
-            case 0x2a: { const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
+            case 0x2a: {
+                // Superinstruction: fuse the dominant `aload_0; getfield` pair
+                // (this.field) into a single dispatch. Profiling on game4 shows
+                // aload_0 + getfield are ~45% of all steps; ~90% of aload_0 are
+                // immediately followed by getfield. Fusing removes one switch
+                // dispatch and the intermediate receiver push/pop roundtrip, and
+                // — critically for field-heavy frames — counts the pair as ONE
+                // step instead of two, cutting interpreter step-limit pressure.
+                //
+                // Safe without bytecode rewriting: we only fuse on fall-through,
+                // so a branch that lands directly on the getfield still executes
+                // the standalone 0xb4 case. The field-read body below mirrors
+                // case 0xb4 — keep the two in sync.
+                if (pc + 3 < codeSize && code[pc + 1] == 0xb4) {
+                    const uint16_t cpIdx = codeU2(code, pc + 2);
+                    Value value = Value::ofInt(0);
+                    const uint32_t t0 = statNow();
+                    std::optional<uint32_t> id = objectId(frame.local(0));
+                    if (id.has_value()) {
+                        auto objectIt = rt.heap.find(*id);
+                        if (objectIt != rt.heap.end()) {
+                            HeapObject& obj = objectIt->second;
+                            const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
+                            auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                            if (fidxIt != rt.fieldIndexCache.end()) {
+                                const uint16_t slot = fidxIt->second;
+                                if (slot < obj.fields.size()) {
+                                    const Value& sv = obj.fields[slot];
+                                    if (sv.isInitialized()) value = sv;
+                                }
+                            } else {
+                                const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
+                                if (obj.cls != nullptr) {
+                                    buildFieldSlots(rt, classes, *obj.cls);
+                                    const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                                    auto nameIt = slotMap.find(fieldKey);
+                                    if (nameIt != slotMap.end()) {
+                                        const uint16_t slot = nameIt->second;
+                                        rt.fieldIndexCache[fidxKey] = slot;
+                                        if (slot < obj.fields.size()) {
+                                            const Value& sv = obj.fields[slot];
+                                            if (sv.isInitialized()) value = sv;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if(t0) rt.host->getfieldStats.record(nowUs() - t0);
+                    if (profileFrame) ++rt.trace.frameProfile.opcodeCounts[0xb4];
+                    frame.push(value);
+                    pc += 4;
+                    break;
+                }
+                const uint32_t t0 = statNow(); frame.push(frame.local(0)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break;
+            }
             case 0x2b: { const uint32_t t0 = statNow(); frame.push(frame.local(1)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x2c: { const uint32_t t0 = statNow(); frame.push(frame.local(2)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
             case 0x2d: { const uint32_t t0 = statNow(); frame.push(frame.local(3)); ++pc; if(t0) rt.host->localLoadStats.record(nowUs()-t0); break; }
