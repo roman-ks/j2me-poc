@@ -24,6 +24,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <memory>
 #include <unordered_map>
 #include <set>
 #include <string>
@@ -273,7 +274,12 @@ struct HeapObject {
     std::vector<Value> fields;      // indexed by slot from fieldSlotCache (item D)
 };
 
-using Heap = std::unordered_map<uint32_t, HeapObject>;
+// Flat array indexed by raw object id (1..N, dense via the freeObjectIds
+// free-list). nullptr = empty slot. unique_ptr keeps HeapObject addresses
+// stable across vector growth, preserving the reference-stability the
+// interpreter relies on (it holds HeapObject& across allocating calls).
+// See docs/heap-flat-array.plan.md.
+using Heap = std::vector<std::unique_ptr<HeapObject>>;
 using ArrayHeap = std::unordered_map<uint32_t, std::vector<Value>>;
 using CompactArrayHeap = std::unordered_map<uint32_t, std::vector<int32_t>>;
 using StringHeap = std::unordered_map<uint32_t, std::string>;
@@ -623,26 +629,29 @@ std::optional<std::string> parseTextHandle(const Value& value, const std::string
 }
 
 // --- Heap accessors -------------------------------------------------------
-// Single indirection over rt.heap so the underlying storage can change without
-// touching the ~20 call sites (see docs/heap-flat-array.plan.md). Step 1: thin
-// wrappers over the unordered_map; behaviour identical to direct access.
+// Single indirection over rt.heap (see docs/heap-flat-array.plan.md). The
+// storage is a flat std::vector<unique_ptr<HeapObject>> indexed by id; a probe
+// is one bounds check + one indexed load instead of a hash + bucket walk +
+// node-pointer chase. nullptr slot = no object at that id.
 inline HeapObject* heapGet(Runtime& rt, uint32_t id) {
-    auto it = rt.heap.find(id);
-    return it != rt.heap.end() ? &it->second : nullptr;
+    return id < rt.heap.size() ? rt.heap[id].get() : nullptr;
 }
 inline const HeapObject* heapGet(const Runtime& rt, uint32_t id) {
-    auto it = rt.heap.find(id);
-    return it != rt.heap.end() ? &it->second : nullptr;
+    return id < rt.heap.size() ? rt.heap[id].get() : nullptr;
 }
 inline HeapObject& heapEmplace(Runtime& rt, uint32_t id, HeapObject obj) {
-    return rt.heap[id] = std::move(obj);
+    if (id >= rt.heap.size()) rt.heap.resize(id + 1);
+    rt.heap[id] = std::make_unique<HeapObject>(std::move(obj));
+    return *rt.heap[id];
 }
 inline void heapErase(Runtime& rt, uint32_t id) {
-    rt.heap.erase(id);
+    if (id < rt.heap.size()) rt.heap[id].reset();
 }
 template <typename F>
 inline void forEachHeapObject(Runtime& rt, F&& fn) {
-    for (auto& kv : rt.heap) fn(kv.first, kv.second);
+    for (uint32_t id = 0; id < rt.heap.size(); ++id) {
+        if (rt.heap[id]) fn(id, *rt.heap[id]);
+    }
 }
 
 uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
