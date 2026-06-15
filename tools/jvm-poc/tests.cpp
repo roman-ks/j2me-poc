@@ -678,6 +678,18 @@ int main(int argc, char** argv) {
             {},
         },
         TestCase{
+            "int divide by two",
+            "dev/roman/hello/DivByTwo",
+            {"dev/roman/hello/DivByTwo"},
+            {"3", "4", "-1", "-2", "0", "0"},
+            {},
+            {},
+            {},
+            {},
+            {},
+            {},
+        },
+        TestCase{
             "canvas key events",
             "dev/roman/hello/InputMidlet",
             {"dev/roman/hello/InputMidlet", "dev/roman/hello/InputCanvas"},

@@ -16,6 +16,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -436,6 +437,11 @@ struct Runtime {
     uint32_t yieldMillis = 0;
     bool stepLimitYieldEnabled = false;
     size_t steps = 0;
+    // [pairs] temporary diagnostic: count of consecutive dispatched opcode pairs
+    // keyed (prevOp<<8)|op. Sparse map (only the few hundred pairs that actually
+    // occur), so no large preallocation. Reset per renderSession. Used to find
+    // the next superinstruction-fusion candidates after this.field.
+    std::unordered_map<uint16_t, uint32_t> opcodePairCounts;
     bool repaintRequested = true;
     std::unordered_set<std::string> initializedClasses;
 };
@@ -1751,6 +1757,10 @@ std::optional<Value> resumeCurrentMethod(
     // rt.host->profileFrameTimings every step would be a dependent load
     // through 3 indirections that hurts the hot path.
     const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
+    // [pairs] diagnostic: previous dispatched opcode for adjacency counting.
+    // Reset per executeMethod call so pairs never span a call boundary (those
+    // aren't statically fusable anyway). Sized lazily on first profiled frame.
+    int prevOp = -1;
 
     while (pc < codeSize) {
         // Batched step-limit check: increment every step, but only consult
@@ -1778,7 +1788,18 @@ std::optional<Value> resumeCurrentMethod(
         // Counter + RAII guard both gated on profileFrame. Disabled cost:
         // one branch + a null-store pair in the guard's struct + one null
         // check in the destructor; no cpuCycles() call.
-        if (profileFrame) ++rt.trace.frameProfile.opcodeCounts[op];
+        if (profileFrame) {
+            ++rt.trace.frameProfile.opcodeCounts[op];
+            // Disambiguate the already-fused `this.field` (aload_0 + getfield)
+            // from a bare aload_0, so pair counts point at the *next* fusion
+            // candidates rather than conflating both as 0x2a. 0xfb = synthetic
+            // "this.field" marker (an unused opcode slot).
+            const uint8_t effOp =
+                (op == 0x2a && pc + 3 < codeSize && code[pc + 1] == 0xb4) ? 0xfbu : op;
+            if (prevOp >= 0)
+                ++rt.opcodePairCounts[static_cast<uint16_t>((static_cast<uint32_t>(prevOp) << 8) | effOp)];
+            prevOp = effOp;
+        }
         OpCycleGuard cycleGuard{
             profileFrame ? &rt.trace.frameProfile.opcodeCycles[op] : nullptr,
             profileFrame ? cpuCycles() : 0u};
@@ -1787,7 +1808,27 @@ std::optional<Value> resumeCurrentMethod(
             case 0x02: { const uint32_t t0=statNow(); frame.push(Value::ofInt(-1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }  // iconst_m1
             case 0x03: { const uint32_t t0=statNow(); frame.push(Value::ofInt(0)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_0
             case 0x04: { const uint32_t t0=statNow(); frame.push(Value::ofInt(1)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_1
-            case 0x05: { const uint32_t t0=statNow(); frame.push(Value::ofInt(2)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_2
+            case 0x05: {   // iconst_2
+                // Superinstruction: fuse `iconst_2; idiv` → divide-by-2 with no
+                // hardware division. Java idiv truncates toward zero, so this is
+                // NOT a plain >>1 for negatives — add the sign bit first, then
+                // >>1. Divisor is always 2, so neither idiv exception case (÷0 or
+                // INT_MIN/-1) can occur. Falls back to the normal push (and lets
+                // idiv run) if the dividend isn't a plain int.
+                if (pc + 1 < codeSize && code[pc + 1] == 0x6c) {
+                    Value dividend = frame.pop();
+                    std::optional<int> d = parseIntValue(dividend);
+                    if (d.has_value()) {
+                        const int32_t v = *d;
+                        frame.push(Value::ofInt(
+                            (v + static_cast<int32_t>(static_cast<uint32_t>(v) >> 31)) >> 1));
+                        pc += 2;
+                        break;
+                    }
+                    frame.push(std::move(dividend));
+                }
+                const uint32_t t0=statNow(); frame.push(Value::ofInt(2)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break;
+            }
             case 0x06: { const uint32_t t0=statNow(); frame.push(Value::ofInt(3)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_3
             case 0x07: { const uint32_t t0=statNow(); frame.push(Value::ofInt(4)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_4
             case 0x08: { const uint32_t t0=statNow(); frame.push(Value::ofInt(5)); ++pc; if(t0) rt.host->pushStats.record(nowUs()-t0); break; }   // iconst_5
@@ -3452,6 +3493,31 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
     rt.repaintRequested = true;
 }
 
+// [pairs] diagnostic: dump the top consecutive dispatched opcode pairs in one
+// compact line, to find the next superinstruction-fusion candidates. Keyed
+// (prevOp<<8)|op. Counts are dispatch-order adjacency — a pair that only occurs
+// across a backward branch isn't statically fusable, so treat cross-branch noise
+// with care; the hot pairs are overwhelmingly sequential fall-through.
+void logTopOpcodePairs(const Runtime& rt) {
+    if (rt.opcodePairCounts.empty()) return;
+    std::vector<std::pair<uint32_t, uint16_t>> top;  // (count, key)
+    top.reserve(rt.opcodePairCounts.size());
+    for (const auto& kv : rt.opcodePairCounts) top.emplace_back(kv.second, kv.first);
+    std::sort(top.begin(), top.end(),
+              [](const std::pair<uint32_t, uint16_t>& a,
+                 const std::pair<uint32_t, uint16_t>& b) { return a.first > b.first; });
+    const size_t n = std::min<size_t>(top.size(), 12);
+    std::string line;
+    char buf[40];
+    for (size_t i = 0; i < n; ++i) {
+        const uint16_t key = top[i].second;
+        std::snprintf(buf, sizeof(buf), "0x%02x>0x%02x=%u ",
+                      (key >> 8) & 0xFFu, key & 0xFFu, top[i].first);
+        line += buf;
+    }
+    LOGF_W("[pairs] %s", line.c_str());
+}
+
 ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width, int height) {
     Runtime& rt = session.runtime();
     const bool profileFrame = rt.host != nullptr && rt.host->profileFrameTimings;
@@ -3477,6 +3543,11 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
                 rt.trace.frameProfile,
                 rt.trace.taskMethodProfiles,
                 rt.trace.taskNativeProfiles);
+            // Skip idle/sleep renders (the thread is sleeping between ticks and
+            // only a tiny timer-poll runs) — they spam the log and aren't a
+            // fusion target. Only dump frames doing real work.
+            if (rt.steps > 2000) logTopOpcodePairs(rt);
+            rt.opcodePairCounts.clear();
         }
         return rt.trace;
     };
