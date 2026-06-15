@@ -141,10 +141,33 @@ cache; it was never the catastrophic PSRAM-miss cost feared. The remaining ~368 
 (~3 µs/op on heavy frames) is **per-op execution + dispatch**, not handle lookups.
 So further map-flattening has bounded upside; the real ceiling is dispatch cost.
 
-## Phase 2 — array heaps (`rt.arrays` / `rt.primitiveArrays`)
+## Phase 2 — array heaps (`rt.arrays` / `rt.primitiveArrays`) — DEFERRED
 
-Same technique, same justification, tracked here rather than in a separate doc
-because it is the identical optimisation on a sibling structure.
+**Status:** Deferred (2026-06-15). The storage design is sound and the technique
+is proven, but a scope discovery + a recalibrated upside made the trade
+unfavourable. Recorded here so it can be picked up if the calculus changes.
+
+### Why deferred
+1. **Scope is ~3–4× the heap and crosses the native-method ABI.** Unlike
+   `rt.heap` (interpreter-local), the array maps are exposed *by reference* in
+   `NativeCallContext` (`native_methods.hpp:44-45`), so flattening the storage
+   touches not just the ~16 interpreter sites + GC but **~26 native-method sites
+   across 4 files** (`string.cpp`, `rms.cpp`, `image.cpp`, `system.cpp`) and the
+   context type — ~42 sites total, changing the native ABI.
+2. **Recalibrated upside ~1–2%, not 2–4%.** The Phase 1 Result showed each map
+   probe is only ~120 cyc and mostly cache-resident (not a PSRAM-miss). Array
+   probes are ~12–14% of ops (vs the object map's 35% → 5%), so scaling down
+   gives ~1–2%. And the hot array access is entirely in the interpreter
+   (`loadArrayElement`); the 26 native sites are cold churn, not perf.
+
+~1–2% for a 42-site cross-ABI refactor, while already deep in diminishing
+returns (per-op cost is dominated by neither dispatch nor lookups), is a poor
+trade. Banking Phase 1 (kept, ~5%) and stopping was the call.
+
+### If revisited
+The design below still holds. Same technique, same justification — tracked here
+rather than a separate doc because it is the identical optimisation on a sibling
+structure.
 
 - **Targets:** `rt.arrays` (`unordered_map<uint32_t, vector<Value>>`) and
   `rt.primitiveArrays` (`unordered_map<uint32_t, vector<int32_t>>`), probed by
