@@ -622,6 +622,29 @@ std::optional<std::string> parseTextHandle(const Value& value, const std::string
     return text.substr(prefix.size());
 }
 
+// --- Heap accessors -------------------------------------------------------
+// Single indirection over rt.heap so the underlying storage can change without
+// touching the ~20 call sites (see docs/heap-flat-array.plan.md). Step 1: thin
+// wrappers over the unordered_map; behaviour identical to direct access.
+inline HeapObject* heapGet(Runtime& rt, uint32_t id) {
+    auto it = rt.heap.find(id);
+    return it != rt.heap.end() ? &it->second : nullptr;
+}
+inline const HeapObject* heapGet(const Runtime& rt, uint32_t id) {
+    auto it = rt.heap.find(id);
+    return it != rt.heap.end() ? &it->second : nullptr;
+}
+inline HeapObject& heapEmplace(Runtime& rt, uint32_t id, HeapObject obj) {
+    return rt.heap[id] = std::move(obj);
+}
+inline void heapErase(Runtime& rt, uint32_t id) {
+    rt.heap.erase(id);
+}
+template <typename F>
+inline void forEachHeapObject(Runtime& rt, F&& fn) {
+    for (auto& kv : rt.heap) fn(kv.first, kv.second);
+}
+
 uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
     uint32_t id = 0;
     if (!rt.freeObjectIds.empty()) {
@@ -630,13 +653,13 @@ uint32_t allocateHeapObjectId(Runtime& rt, const std::string& className) {
     } else {
         id = rt.nextObjectId++;
     }
-    rt.heap[id] = HeapObject{className, nullptr, {}};
+    heapEmplace(rt, id, HeapObject{className, nullptr, {}});
     return id;
 }
 
 Value allocateObject(Runtime& rt, const std::vector<ClassFile>& classes, const std::string& label, uint32_t pc, const std::string& className) {
     uint32_t id = allocateHeapObjectId(rt, className);
-    HeapObject& obj = rt.heap[id];
+    HeapObject& obj = *heapGet(rt, id);
     obj.cls = findClass(classes, className);
     if (obj.cls != nullptr) {
         // Pre-size fields vector to the stable slot count for this class.
@@ -689,12 +712,12 @@ bool writeFieldValue(
     if (!id.has_value()) {
         return false;
     }
-    auto objectIt = rt.heap.find(*id);
-    if (objectIt == rt.heap.end() || objectIt->second.cls == nullptr) {
+    HeapObject* objPtr = heapGet(rt, *id);
+    if (objPtr == nullptr || objPtr->cls == nullptr) {
         return false;
     }
 
-    HeapObject& obj = objectIt->second;
+    HeapObject& obj = *objPtr;
     buildFieldSlots(rt, classes, *obj.cls);
     auto slotCacheIt = rt.fieldSlotCache.find(obj.cls);
     if (slotCacheIt == rt.fieldSlotCache.end()) {
@@ -836,9 +859,9 @@ NativeCallResult handleBuiltInInstanceCall(
         std::string className = ref.className;
         if (!args.empty()) {
             std::optional<uint32_t> id = objectId(args[0]);
-            auto objectIt = id.has_value() ? rt.heap.find(*id) : rt.heap.end();
-            if (id.has_value() && objectIt != rt.heap.end()) {
-                className = objectIt->second.className;
+            const HeapObject* objPtr = id.has_value() ? heapGet(rt, *id) : nullptr;
+            if (objPtr != nullptr) {
+                className = objPtr->className;
             }
         }
         return NativeCallResult{true, Value::named(std::string(kClassHandlePrefix) + className)};
@@ -926,8 +949,8 @@ std::string exceptionClassName(const Runtime& rt, const Value& exception) {
     if (!id.has_value()) {
         return exception.asText();
     }
-    auto objectIt = rt.heap.find(*id);
-    return objectIt == rt.heap.end() ? exception.asText() : objectIt->second.className;
+    const HeapObject* objPtr = heapGet(rt, *id);
+    return objPtr == nullptr ? exception.asText() : objPtr->className;
 }
 
 void setPendingException(Runtime& rt, Value exception, const std::string& methodLabel, uint32_t pc) {
@@ -1192,11 +1215,11 @@ void markValue(
         if (!markedObjects.insert(*obj).second) {
             return;
         }
-        auto objectIt = rt.heap.find(*obj);
-        if (objectIt == rt.heap.end()) {
+        const HeapObject* objPtr = heapGet(rt, *obj);
+        if (objPtr == nullptr) {
             return;
         }
-        for (const Value& fieldVal : objectIt->second.fields) {
+        for (const Value& fieldVal : objPtr->fields) {
             markValue(fieldVal, rt, markedObjects, markedArrays);
         }
         return;
@@ -1280,16 +1303,16 @@ void collectGarbage(Runtime& rt, std::string when) {
     }
 
     std::vector<uint32_t> objectsToFree;
-    for (const auto& object : rt.heap) {
-        if (markedObjects.find(object.first) == markedObjects.end()) {
-            if (object.second.className == "java/lang/String") {
-                report.unreachableStrings.push_back(objectRef(object.first));
+    forEachHeapObject(rt, [&](uint32_t objId, const HeapObject& obj) {
+        if (markedObjects.find(objId) == markedObjects.end()) {
+            if (obj.className == "java/lang/String") {
+                report.unreachableStrings.push_back(objectRef(objId));
             } else {
-                report.unreachableObjects.push_back(objectRef(object.first));
+                report.unreachableObjects.push_back(objectRef(objId));
             }
-            objectsToFree.push_back(object.first);
+            objectsToFree.push_back(objId);
         }
-    }
+    });
     std::vector<uint32_t> arraysToFree;
     for (const auto& array : rt.arrays) {
         if (markedArrays.find(array.first) == markedArrays.end()) {
@@ -1305,14 +1328,14 @@ void collectGarbage(Runtime& rt, std::string when) {
     }
 
     for (uint32_t id : objectsToFree) {
-        auto objectIt = rt.heap.find(id);
-        const bool isString = objectIt != rt.heap.end() && objectIt->second.className == "java/lang/String";
+        const HeapObject* objPtr = heapGet(rt, id);
+        const bool isString = objPtr != nullptr && objPtr->className == "java/lang/String";
         auto strIt = rt.strings.find(id);
         if (strIt != rt.strings.end()) {
             rt.internedStrings.erase(strIt->second);
             rt.strings.erase(strIt);
         }
-        rt.heap.erase(id);
+        heapErase(rt, id);
         rt.freeObjectIds.push_back(id);
         if (isString) {
             report.freedStrings.push_back(objectRef(id));
@@ -1336,9 +1359,9 @@ void collectGarbage(Runtime& rt, std::string when) {
 Value readFieldValue(Runtime& rt, const Value& object, const std::string& fieldName) {
     std::optional<uint32_t> id = objectId(object);
     if (!id.has_value()) return Value::ofInt(0);
-    auto objectIt = rt.heap.find(*id);
-    if (objectIt == rt.heap.end()) return Value::ofInt(0);
-    const HeapObject& obj = objectIt->second;
+    const HeapObject* objPtr = heapGet(rt, *id);
+    if (objPtr == nullptr) return Value::ofInt(0);
+    const HeapObject& obj = *objPtr;
     auto slotCacheIt = rt.fieldSlotCache.find(obj.cls);
     if (slotCacheIt == rt.fieldSlotCache.end()) return Value::ofInt(0);
     auto nameIt = slotCacheIt->second.find(fieldName);
@@ -1389,12 +1412,12 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
     if (!id.has_value()) {
         return;
     }
-    auto objectIt = rt.heap.find(*id);
-    if (objectIt == rt.heap.end()) {
+    const HeapObject* objPtr = heapGet(rt, *id);
+    if (objPtr == nullptr) {
         return;
     }
     const ClassFile* owner = nullptr;
-    const MethodInfo* run = findMethodInHierarchy(classes, objectIt->second.className, "run", "()V", &owner);
+    const MethodInfo* run = findMethodInHierarchy(classes, objPtr->className, "run", "()V", &owner);
     if (owner == nullptr || run == nullptr) {
         return;
     }
@@ -1575,14 +1598,14 @@ std::optional<Value> resumeCurrentMethod(
         if (!id.has_value()) {
             return;
         }
-        auto objectIt = rt.heap.find(*id);
-        if (objectIt == rt.heap.end()) {
+        const HeapObject* objPtr = heapGet(rt, *id);
+        if (objPtr == nullptr) {
             return;
         }
         const ClassFile* owner = nullptr;
         const MethodInfo* notify = findMethodInHierarchy(
             classes,
-            objectIt->second.className,
+            objPtr->className,
             methodName,
             "()V",
             &owner);
@@ -1837,9 +1860,9 @@ std::optional<Value> resumeCurrentMethod(
                     const uint32_t t0 = statNow();
                     std::optional<uint32_t> id = objectId(frame.local(0));
                     if (id.has_value()) {
-                        auto objectIt = rt.heap.find(*id);
-                        if (objectIt != rt.heap.end()) {
-                            HeapObject& obj = objectIt->second;
+                        HeapObject* objPtr = heapGet(rt, *id);
+                        if (objPtr != nullptr) {
+                            HeapObject& obj = *objPtr;
                             const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
                             auto fidxIt = rt.fieldIndexCache.find(fidxKey);
                             if (fidxIt != rt.fieldIndexCache.end()) {
@@ -2570,9 +2593,9 @@ std::optional<Value> resumeCurrentMethod(
                 Value value = Value::ofInt(0);
                 const uint32_t t0 = statNow();
                 if (id.has_value()) {
-                    auto objectIt = rt.heap.find(*id);
-                    if (objectIt != rt.heap.end()) {
-                        HeapObject& obj = objectIt->second;
+                    HeapObject* objPtr = heapGet(rt, *id);
+                    if (objPtr != nullptr) {
+                        HeapObject& obj = *objPtr;
                         // Key by executing class (not obj.cls) so cpIdx is interpreted in the
                         // correct constant pool — avoids cross-class collisions when two classes
                         // share the same cpIdx for different fields on the same object type.
@@ -2619,26 +2642,34 @@ std::optional<Value> resumeCurrentMethod(
                 std::optional<uint32_t> id = objectId(object);
                 const uint32_t t0b5 = statNow();
                 if (id.has_value()) {
-                    HeapObject& obj = rt.heap[*id];
-                    const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
-                    auto fidxIt = rt.fieldIndexCache.find(fidxKey);
-                    if (fidxIt != rt.fieldIndexCache.end()) {
-                        // Hot path: integer-keyed SRAM lookup → direct vector index.
-                        const uint16_t slot = fidxIt->second;
-                        if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
-                        obj.fields[slot] = value;
-                    } else {
-                        // Cold path: resolve name|descriptor key, find slot, populate cache.
-                        const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
-                        if (obj.cls != nullptr) {
-                            buildFieldSlots(rt, classes, *obj.cls);
-                            const auto& slotMap = rt.fieldSlotCache[obj.cls];
-                            auto nameIt = slotMap.find(fieldKey);
-                            if (nameIt != slotMap.end()) {
-                                const uint16_t slot = nameIt->second;
-                                rt.fieldIndexCache[fidxKey] = slot;
-                                if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
-                                obj.fields[slot] = value;
+                    // putfield on a live object — the receiver must already exist
+                    // (you cannot write a field of an unallocated object). Guard
+                    // against a missing slot rather than inserting a blank object
+                    // (the old rt.heap[*id] would have); a flat-array store cannot
+                    // insert at an arbitrary id anyway.
+                    HeapObject* objPtr = heapGet(rt, *id);
+                    if (objPtr != nullptr) {
+                        HeapObject& obj = *objPtr;
+                        const uint64_t fidxKey = callCacheKey(&cls, cpIdx);
+                        auto fidxIt = rt.fieldIndexCache.find(fidxKey);
+                        if (fidxIt != rt.fieldIndexCache.end()) {
+                            // Hot path: integer-keyed SRAM lookup → direct vector index.
+                            const uint16_t slot = fidxIt->second;
+                            if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
+                            obj.fields[slot] = value;
+                        } else {
+                            // Cold path: resolve name|descriptor key, find slot, populate cache.
+                            const std::string& fieldKey = resolveFieldKey(rt, cls, cpIdx);
+                            if (obj.cls != nullptr) {
+                                buildFieldSlots(rt, classes, *obj.cls);
+                                const auto& slotMap = rt.fieldSlotCache[obj.cls];
+                                auto nameIt = slotMap.find(fieldKey);
+                                if (nameIt != slotMap.end()) {
+                                    const uint16_t slot = nameIt->second;
+                                    rt.fieldIndexCache[fidxKey] = slot;
+                                    if (slot >= obj.fields.size()) obj.fields.resize(slot + 1);
+                                    obj.fields[slot] = value;
+                                }
                             }
                         }
                     }
@@ -2857,10 +2888,10 @@ std::optional<Value> resumeCurrentMethod(
                 if (isVirtualOp) {
                     std::optional<uint32_t> id = objectId(object);
                     if (id.has_value()) {
-                        auto objectIt = rt.heap.find(*id);
-                        if (objectIt != rt.heap.end()) {
-                            lookupClassName = objectIt->second.className;
-                            lookupClassPtr = objectIt->second.cls;
+                        HeapObject* objPtr = heapGet(rt, *id);
+                        if (objPtr != nullptr) {
+                            lookupClassName = objPtr->className;
+                            lookupClassPtr = objPtr->cls;
                         } else if (!haveRef) {
                             lookupClassName = cit->second.runtimeClass;
                             lookupClassFromCache = true;
@@ -2917,9 +2948,9 @@ std::optional<Value> resumeCurrentMethod(
                         sharedNativeCtx.receiverClassName = {};
                         std::optional<uint32_t> nativeObjectId = objectId(object);
                         if (nativeObjectId.has_value()) {
-                            auto objectIt = rt.heap.find(*nativeObjectId);
-                            if (objectIt != rt.heap.end()) {
-                                sharedNativeCtx.receiverClassName = objectIt->second.className;
+                            const HeapObject* objPtr = heapGet(rt, *nativeObjectId);
+                            if (objPtr != nullptr) {
+                                sharedNativeCtx.receiverClassName = objPtr->className;
                             }
                         }
                         MethodRef nativeRef{targetClass->thisClass, targetMethod->name, targetMethod->descriptor};
@@ -3160,9 +3191,9 @@ std::optional<Value> resumeCurrentMethod(
                 bool matches = false;
                 std::optional<uint32_t> id = objectId(object);
                 if (id.has_value()) {
-                    auto objIt = rt.heap.find(*id);
-                    if (objIt != rt.heap.end())
-                        matches = isAssignableTo(classes, objIt->second.className, targetName);
+                    const HeapObject* objPtr = heapGet(rt, *id);
+                    if (objPtr != nullptr)
+                        matches = isAssignableTo(classes, objPtr->className, targetName);
                 }
                 frame.push(Value::ofInt(matches ? 1 : 0));
                 pc += 3;
@@ -3359,13 +3390,13 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
     if (!displayableId.has_value()) {
         return;
     }
-    auto displayableIt = rt.heap.find(*displayableId);
-    if (displayableIt == rt.heap.end()) {
+    const HeapObject* displayablePtr = heapGet(rt, *displayableId);
+    if (displayablePtr == nullptr) {
         return;
     }
 
     const std::vector<ClassFile>& classes = session.classes();
-    if (!isClassOrSubclassOf(classes, displayableIt->second.className, "javax/microedition/lcdui/Canvas")) {
+    if (!isClassOrSubclassOf(classes, displayablePtr->className, "javax/microedition/lcdui/Canvas")) {
         return;
     }
 
@@ -3373,7 +3404,7 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
     const ClassFile* owner = nullptr;
     const MethodInfo* handler = findMethodInHierarchy(
         classes,
-        displayableIt->second.className,
+        displayablePtr->className,
         methodName,
         "(I)V",
         &owner);
@@ -3389,7 +3420,7 @@ void dispatchCanvasKeyEvent(MidletSession& session, const HostKeyEvent& event) {
         recordUncaughtException(rt, "<input>");
         clearPendingException(rt);
     }
-    // std::cout << "dispatchCanvasKeyEvent: executed " << displayableIt->second.className << "::" << methodName << std::endl;
+    // std::cout << "dispatchCanvasKeyEvent: executed " << displayablePtr->className << "::" << methodName << std::endl;
     // {
     //     // Debug: print key-gating fields from the displayable object
     //     HeapObject& dbgObj = displayableIt->second;
@@ -3638,8 +3669,8 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
         captureSuspendedForTrace();
         return finishProfile();
     }
-    auto displayableIt = rt.heap.find(*displayableId);
-    if (displayableIt == rt.heap.end()) {
+    const HeapObject* displayablePtr = heapGet(rt, *displayableId);
+    if (displayablePtr == nullptr) {
         if (profileFrame) {
             rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
         }
@@ -3649,7 +3680,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     if (profileFrame) {
         rt.trace.frameProfile.displayableFound = true;
     }
-    rt.trace.currentDisplayableClass = displayableIt->second.className;
+    rt.trace.currentDisplayableClass = displayablePtr->className;
     if (profileFrame) {
         rt.trace.frameProfile.displayLookupUs = nowUs() - displayLookupStartUs;
     }
@@ -3659,7 +3690,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     const ClassFile* paintOwner = nullptr;
     const MethodInfo* paint = findMethodInHierarchy(
         classes,
-        displayableIt->second.className,
+        displayablePtr->className,
         "paint",
         "(Ljavax/microedition/lcdui/Graphics;)V",
         &paintOwner);
@@ -3678,6 +3709,7 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     }
 
     const uint32_t paintStartUs = profileFrame ? nowUs() : 0;
+    const uint32_t paintWallStartUs = nowUs();
     if (paintOwner != nullptr && paint != nullptr) {
         if (profileFrame) {
             rt.trace.frameProfile.paintCalled = true;
@@ -3695,12 +3727,12 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
             clearPendingException(rt);
         }
         const bool isGameCanvas = isClassOrSubclassOf(
-            classes, displayableIt->second.className,
+            classes, displayablePtr->className,
             "javax/microedition/lcdui/game/GameCanvas");
         rt.trace.framePresented = !isGameCanvas || rt.gameCanvasFlushCommitted;
         rt.gameCanvasFlushCommitted = false;
     } else {
-        MethodRef ref{displayableIt->second.className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
+        MethodRef ref{displayablePtr->className, "paint", "(Ljavax/microedition/lcdui/Graphics;)V"};
         (void)recordUnknownCall(rt, "<render>", 0, ref, {rt.currentDisplayable, Value::ofInt(Value::kHandleGfxTag | 0)});
     }
     if (profileFrame) {
