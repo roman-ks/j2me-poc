@@ -109,12 +109,6 @@ Line numbers as of this plan; re-grep `rt.heap` before editing.
    untouched.
 5. **id 0 unused** — slot 0 stays `nullptr`; `isNull()` already treats 0 as null.
 
-## Out of scope
-
-`rt.arrays` / `rt.primitiveArrays` (the `baload`/`aaload` maps) — separate
-structures, *not* in the `heapProbes` count. Same treatment is a candidate
-follow-up **if** the post-change A/B shows array-map probes are now the bottleneck.
-
 ## Validation
 
 - Correctness: `make -C tools/jvm-poc test` green after Step 1 and Step 2.
@@ -122,3 +116,53 @@ follow-up **if** the post-change A/B shows array-map probes are now the bottlene
   avg — the rejected IC looked neutral on avg and regressed the tail).
 - If a step regresses: record in `docs/rejected/heap-lookup-options.md` with the
   structural reason (per CLAUDE.md Optimisation Discipline).
+
+## Result — Kept (win: ~5%, tail improved)
+
+game4, profiling-off, steady-state windows (warmup window dropped):
+
+| build | frame avg | min frame | fps |
+|---|---|---|---|
+| superinstruction (baseline) | ~388 ms | ~352–370 ms | 2.6 |
+| + indirection only (Step 1) | ~397 ms | ~361–377 ms | 2.5 |
+| **+ flat array (Step 2)** | **~368 ms** | **~333–348 ms** | **2.7–2.8** |
+
+- **Step 2 vs baseline: −20 ms/frame (−5.2%)**, min-frame −18 ms — *both* avg and
+  tail improved (the rejected IC's failure mode avoided, as predicted).
+- Step 1 (accessor indirection, still `unordered_map`) cost +9 ms — the
+  un-inlined helper calls. The storage swap (−29 ms vs Step 1) more than repays it.
+- Adding `__attribute__((always_inline))` to the helpers on top of Step 2 changed
+  nothing (same-to-slightly-worse) → gcc was already inlining them; the win is the
+  storage shape, not call elision. `always_inline` **not** kept.
+
+**Key insight that reframes the follow-ups:** a hash probe on *35% of all opcodes*
+was worth only ~5% of frame time → ~120 cyc/probe, i.e. the object map mostly fit
+cache; it was never the catastrophic PSRAM-miss cost feared. The remaining ~368 ms
+(~3 µs/op on heavy frames) is **per-op execution + dispatch**, not handle lookups.
+So further map-flattening has bounded upside; the real ceiling is dispatch cost.
+
+## Phase 2 — array heaps (`rt.arrays` / `rt.primitiveArrays`)
+
+Same technique, same justification, tracked here rather than in a separate doc
+because it is the identical optimisation on a sibling structure.
+
+- **Targets:** `rt.arrays` (`unordered_map<uint32_t, vector<Value>>`) and
+  `rt.primitiveArrays` (`unordered_map<uint32_t, vector<int32_t>>`), probed by
+  `baload`/`aaload`/`*aload`/`*astore`/`arraylength` — ~10–15% of game4 ops.
+- **Bounded the same way:** array ids are recycled via `arraysToFree` in GC.
+- **Expected upside:** smaller than the object map (fewer probes, and per the key
+  insight above the per-probe cost is ~120 cyc, mostly cache-resident) — estimate
+  ~2–4%. Worth it as a low-risk continuation, not a step-change.
+- **Same migration shape:** accessor indirection (Step 1) → storage swap to
+  `vector<unique_ptr<...>>` behind the accessors (Step 2). Two maps, so two
+  parallel accessor sets (or a small templated helper).
+- **Caveat:** primitive vs reference arrays are distinguished by which map holds
+  the id (`primitiveArrays.erase(id) == 0 ? arrays.erase(id)`); preserve that
+  disambiguation — a missing id must fall through to the other map, not assume.
+
+### Decision: extend, don't fork
+
+Kept in this doc (not a new `array-heap-flat-array.plan.md`) because the
+motivation, recycling model, reference-stability rationale, "replace don't front"
+principle, and measurement methodology are identical. A separate doc would
+duplicate all of that. If Phase 2 lands, append its own Result block below.
