@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -569,8 +570,13 @@ public:
     Value& midletRef() { return midlet_; }
     bool started() const { return started_; }
     void setStarted(bool started) { started_ = started; }
-    std::vector<ThreadTask>& tasks() { return tasks_; }
-    const std::vector<ThreadTask>& tasks() const { return tasks_; }
+    // std::deque (not vector): a running task can queue another task mid-loop
+    // (queueRunnableTask). deque keeps pointers/references to existing elements
+    // valid across push_back, so the active ThreadTask& and rt.currentTask do
+    // not dangle when the container grows during iteration. (A vector would
+    // reallocate and corrupt them — see the index loop in renderSession.)
+    std::deque<ThreadTask>& tasks() { return tasks_; }
+    const std::deque<ThreadTask>& tasks() const { return tasks_; }
 
 private:
     const std::vector<ClassFile>* classes_ = nullptr;
@@ -578,7 +584,7 @@ private:
     Runtime runtime_;
     Value midlet_ = Value::named("0");
     bool started_ = false;
-    std::vector<ThreadTask> tasks_;
+    std::deque<ThreadTask> tasks_;
 };
 
 struct YieldThreadSleep {
@@ -1436,6 +1442,10 @@ void queueRunnableTask(Runtime& rt, const std::vector<ClassFile>& classes, const
         task.cls = owner;
         task.method = run;
         task.receiver = runnable;
+        // Safe to append even while the task loop is iterating tasks_: it's a
+        // deque, so existing elements (and rt.currentTask / the active task&)
+        // keep their addresses. The loop snapshots its count, so a task queued
+        // mid-loop first runs on the next frame.
         rt.session->tasks().push_back(std::move(task));
         return;
     }
@@ -3515,7 +3525,14 @@ ExecutionTrace renderSession(MidletSession& session, uint16_t* pixels, int width
     auto resumeTaskStack = [&]() {
         runTrampoline(session.classes(), rt);
     };
-    for (ThreadTask& task : session.tasks()) {
+    // Snapshot the count: a task may queue more tasks mid-loop (deque keeps
+    // existing element addresses stable, so task& / rt.currentTask stay valid),
+    // and those new tasks should first run next frame, not this one. Index into
+    // the deque rather than holding a range-for iterator (which a push_back
+    // would invalidate).
+    const size_t taskCount = session.tasks().size();
+    for (size_t taskIndex = 0; taskIndex < taskCount; ++taskIndex) {
+        ThreadTask& task = session.tasks()[taskIndex];
         if (task.finished) {
             continue;
         }
